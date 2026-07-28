@@ -1,6 +1,7 @@
-# M1-T06 — SimulatorCamera: synthetic star fields
+# M1-T06 — SimulatorCamera and SimulatorGuideCamera: synthetic star fields
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M1-T01 · **Crates:** astroctl-drivers
+**Size:** L · **Status:** not started
 **Spec:** PRD §4.5 (SimulatorCamera), HAL-11; SDD §9
 
 ## Objective
@@ -16,10 +17,12 @@ so every downstream stage (store, preview, transfer, stacking later) handles rea
 - Settings plumbing: ISO/shutter/format lists via `get_available_settings`, current settings respected by the generator (ISO → gain/noise)
 - `FaultPlan` hooks: `FailCapture(n)`, `SlowDownload(x)`, `DisconnectAfter(d)`
 - Live view: JPEG stream at configurable fps from the same generator at reduced size
+- **`SimulatorGuideCamera`** implementing `GuideCamera` off the same generator: small high-cadence frames (raw pixel buffer, no JPEG), configurable guide-star brightness and seeing (per-frame centroid jitter), exposure/gain/binning honored, `start_continuous`/`continuous_stream`. Required by HAL-11 and named in PRD Phase 1 deliverables; the Phase 3 guide loop is out of scope, only the driver is built here. Without it the trait has no implementation and its shape goes unvalidated until Phase 3
 
 ## Acceptance criteria
 
 - [ ] Frames visibly contain stars; mean background and star count respond to config (assert statistically, not pixel-exact)
 - [ ] 2 s exposure takes ≈2 s + download delay; abort mid-exposure returns promptly with a distinct error
 - [ ] FITS opens in a standard tool (verify with `fitsio` read-back test); JPEG decodes
-- [ ] Registry name `"simulator"`, feature-gated with T02
+- [ ] `SimulatorGuideCamera`: continuous stream delivers frames at the configured cadence; injected seeing visibly moves the guide-star centroid frame to frame (assert centroid variance responds to the seeing parameter)
+- [ ] Registry name `"simulator"` for all three simulator drivers, feature-gated with T02

@@ -1,6 +1,7 @@
 # M1-T14 — Preview flow end-to-end + stack panel
 
 **Milestone:** M1 · **Track:** B+C · **Depends on:** M1-T11, T12, T13 · **Crates:** astroctl-stack, astroctl-field, frontend/
+**Size:** L · **Status:** not started
 **Spec:** ADD §5.2.2 (Preview + Export skeleton), ADR-07 (proxy); PRD STK-19, USB-06; SDD §8.3(5)
 
 ## Objective
@@ -15,6 +16,12 @@ Close the two-node loop the demo is built on: ingested frame → stub worker pre
 - Stack status into field UI: field polls/subscribes stack health + stats, republishes as `stack.status` events (connected, queue depth from T11, frame count, last preview ts — USB-06)
 - PWA stack panel: connection state, transfer queue depth + oldest age, last preview image with session frame count overlay
 - Single-machine mode verified: both binaries on one host, loopback config (STK-20 degenerate case)
+
+## PR split
+
+1. Stack side: preview job on successful ingest, `/ws/preview` binary push
+2. Field side: WS proxying for the stack sockets, `stack.status` republishing
+3. PWA stack panel + single-machine (loopback) mode verification
 
 ## Acceptance criteria
 

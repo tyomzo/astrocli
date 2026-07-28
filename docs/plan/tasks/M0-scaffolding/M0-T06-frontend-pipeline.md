@@ -1,6 +1,7 @@
 # M0-T06 — Frontend pipeline and PWA shell
 
 **Milestone:** M0 · **Depends on:** M0-T01 (integrates after T05) · **Crates:** frontend/, astroctl-field
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.9 (stack, embedding); PRD USB-08/09/10/12, ARC-02/ARC-14
 
 ## Objective

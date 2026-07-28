@@ -1,6 +1,7 @@
 # M3-T01 — Synta codec + golden vectors
 
 **Milestone:** M3 · **Depends on:** M1 · **Crates:** astroctl-drivers (skywatcher module)
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.2.2 (framing, byte-swapped hex, command table); PRD §4.2
 **Tests gated:** T-COD-1
 

@@ -1,10 +1,14 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.5.0  
+**Version:** 1.7.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
+
+**Change note (1.7.0):** §7 dependency table corrected against crates.io as of 2026-07-29, with versions pinned where verified. Three claims did not survive checking: there is **no `sep` crate** (a first-party libsep FFI binding must be written — new risk-register entry); the crate named **`erfa` is a pure-Rust reimplementation, not liberfa bindings** (select `erfars`/`erfa-sys` instead); and **RAW-decode bindings are immature** (`libraw` 0.1.1), so decoder selection moves into the M2-T01 spike. System dependencies are now listed by the milestone that first needs them — M0 requires no C libraries.
+
+**Change note (1.6.0):** Configuration schema completed — §8.1/§8.2 are normative for configuration and now carry every key the design documents reference (slew TTL, command staleness, per-operation CLI fallback, storage/session paths and disk thresholds, transfer pacing, device timeouts, worker interpreter). Processed-pipeline latency budgets disambiguated (IPP-06 vs PRF-08 vs §12). CAM-05/CAM-06 assigned to a single phase. Language-neutral GuideCamera frame type (residue of the pre-ADR-03 all-Python design). PRF-05 reconciled with the LLM-13 local STT fallback.
 
 ---
 
@@ -127,7 +131,7 @@ GuideCamera (abstract)
 ├── set_exposure(seconds)
 ├── set_gain(value)
 ├── set_binning(x, y)
-├── capture_frame() → numpy array (raw pixels)
+├── capture_frame() → raw pixel buffer (16-bit mono or Bayer, with dimensions)
 ├── start_continuous() / stop_continuous()
 ├── continuous_stream() → async iterator of frames
 ├── get_capabilities() → GuideCameraCapabilities
@@ -616,7 +620,7 @@ Key property: **the processed pipeline is configurable and re-runnable — both 
 | IPP-03 | Control pipeline outputs: plate solve result (RA/DEC/rotation/scale), detected star list with centroids, FWHM/HFR measurement, frame quality score | Must |
 | IPP-04 | Live view pipeline runs on the field node with target latency < 1s per frame; uses camera JPEG preview stream for live view and reduced-resolution debayer for captured frame preview | Must |
 | IPP-05 | Live view pipeline outputs: stretched JPEG for display, optional star overlay and solved grid annotation | Should |
-| IPP-06 | Processed pipeline runs on the stacking server with full-resolution calibrated frames; target latency < 10s per frame (non-blocking, does not gate capture) | Must |
+| IPP-06 | Processed pipeline runs on the stacking server with full-resolution calibrated frames, non-blocking (never gates capture). **End-to-end budget ≤ 10s per frame**, measured from download completion on the field node to the updated preview being visible in the operator's browser — this envelope contains transfer (PRF-07), ingest, the compute step (PRF-08), and the preview push (PRF-09) | Must |
 | IPP-07 | Processed pipeline is configurable: stacking method, rejection parameters, stretch function, calibration selection, reference frame — all adjustable at any time, including during a live capture session | Must |
 | IPP-08 | Processed pipeline is re-runnable both mid-session and post-session: changing parameters mid-session rebuilds the accumulator from all frames captured so far under the new settings, then resumes ingesting new frames; post-session reprocessing re-stacks all frames from scratch | Must |
 | IPP-09 | All raw frames from every session are stored permanently; the stacking server archive is authoritative — the field-node copy may be reclaimed only after checksum-verified transfer, per the retention policy (REL-13). Frames are never deleted by the processing pipelines | Must |
@@ -837,7 +841,7 @@ Not all commands carry equal risk. The LLM control layer uses a tiered execution
 | LLM-11 | LLM can plan an entire evening session from a natural language brief: "tonight I want to image M42 and M31, prioritize whichever is higher first, 90 minutes each, standard settings" → build target queue with timing, ordered by altitude | Could |
 | LLM-12 | LLM can perform comparative analysis: "compare the current stack with the version from last week's session" → load both, display side by side, summarize differences in integration time, SNR, FWHM | Could |
 | **Voice & accessibility** | | |
-| LLM-13 | Voice input: browser speech-to-text where available, with a local STT fallback on the field node (e.g., whisper.cpp) — Chrome's Web Speech API is cloud-backed and requires operator-device internet, which conflicts with the VPN-only model (LLM-17); iOS support is partial | Should |
+| LLM-13 | Voice input: browser speech-to-text where available, with a local STT fallback on the field node (e.g., whisper.cpp) — Chrome's Web Speech API is cloud-backed and requires operator-device internet, which conflicts with the VPN-only model (LLM-17); iOS support is partial. The local fallback is invoked as a per-utterance subprocess so no model stays resident in the backbone (PRF-05); model choice is configurable and the feature is off by default on memory-constrained field nodes | Should |
 | LLM-14 | Voice output (text-to-speech) for LLM responses — operator can hear status updates and confirmations without looking at the screen | Could |
 | LLM-15 | Voice commands work with gloves / in the dark — the interaction model doesn't require precise tapping or typing | Should |
 | **Provider & deployment** | | |
@@ -909,10 +913,10 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 | PRF-02 | Live view frame rate ≥ 5 fps on LAN; adaptive quality/frame rate reduction over VPN to maintain responsiveness |
 | PRF-03 | Guide correction loop latency ≤ 500ms (exposure + detection + correction command) — runs entirely on the field node, unaffected by VPN latency |
 | PRF-04 | Image download must not block mount tracking or UI responsiveness |
-| PRF-05 | Field node steady-state memory usage ≤ 512 MB (Rust backbone, no Python runtime, no stacking in memory on the field node); transient RAW-decode buffers during CR3 preview generation (~150–300 MB per decode) are excluded from the steady-state budget |
+| PRF-05 | Field node steady-state memory usage ≤ 512 MB (Rust backbone, no Python runtime, no stacking in memory on the field node); transient RAW-decode buffers during CR3 preview generation (~150–300 MB per decode) are excluded from the steady-state budget. The local speech-to-text model (LLM-13, Phase 3) is likewise excluded: it runs as a subprocess spawned per utterance, not as a resident model in the backbone, and a deployment that enables it must budget separately for the chosen model size (`base.en` ≈ 150 MB, larger models more) |
 | PRF-06 | Plate solve completion ≤ 5s with ASTAP (with position hint), ≤ 30s with astrometry.net blind solve |
 | PRF-07 | Frame transfer from field node to stacking server: ≤ 5s per frame over gigabit LAN, tolerant of higher latency and lower bandwidth over VPN (queued, non-blocking) |
-| PRF-08 | Live stacking on stacking server: new frame calibrated, registered, and accumulated within 3s of receipt (GPU-accelerated registration and accumulation) |
+| PRF-08 | Live stacking compute step on the stacking server: new frame calibrated, registered, and accumulated within 3s of **receipt** (frame durable on the stack node's local disk → accumulator updated; GPU-accelerated registration and accumulation). This is the innermost of the three nested budgets — PRF-08 ⊂ PRF-09 ⊂ IPP-06 |
 | PRF-09 | Live stacking preview update pushed to UI within 1s of accumulation completing |
 | PRF-10 | Stacking server memory: with 128 GB RAM, hold up to 300+ full-resolution 24 MP frames in memory for true median and sigma-clip stacking (no approximation needed for typical sessions); running accumulator + statistics buffers ≤ 8 GB |
 | PRF-11 | Calibration profile lookup (CAL-05) ≤ 100ms per frame |
@@ -988,15 +992,15 @@ Language split per ARC-01: Rust backbone on both nodes; Python confined to super
 
 | Dependency | Purpose | Notes |
 |-----------|---------|-------|
-| tokio + axum | Async runtime, REST + WebSocket backend | |
-| serialport | Mount serial communication | |
-| gphoto2 (crate) | Camera control via libgphoto2 bindings | Requires `libgphoto2` system library; CLI subprocess fallback for uncovered operations |
-| libraw (bindings) | CR3 RAW decoding for preview generation | Requires `libraw` system library |
-| sep (FFI to libsep) | Star detection for guiding, registration, and frame quality assessment | Same C Source Extractor library the Python `sep` package wraps |
-| erfa (liberfa bindings) | Coordinate transforms, sidereal time, precession/nutation | The same C library underlying astropy's core transforms; CI parity tests against astropy required |
-| fitsio | FITS read/write for plate solving I/O and metadata | Wraps cfitsio |
+| `tokio` **1.53**, `axum` **0.8** | Async runtime, REST + WebSocket backend | |
+| `serialport` **4.9** | Mount serial communication | |
+| `gphoto2` **3.4.1** | Camera control via libgphoto2 bindings | Requires `libgphoto2` system library; CLI subprocess fallback for uncovered operations. Verified current and actively maintained — the ADD §10 top risk is bulb/CR3 *coverage*, not the binding's existence |
+| RAW decoder — **selection deferred to the M2-T01 spike** | CR3 decoding for preview generation | `libraw`/`libraw-sys` are at **0.1.1** (thin bindings); `libraw_rs_vendor` avoids the system-library dependency; `rawler` 0.7.2 and `rawloader` 0.37.1 are mature pure-Rust decoders whose CR3 coverage is unconfirmed. libraw itself definitely handles CR3, so the tradeoff is binding maturity vs. decoder maturity — decide on evidence from a real R10 file, not on crates.io metadata |
+| **First-party FFI over libsep** (no crate exists) | Star detection for guiding, registration, and frame quality assessment | The C Source Extractor library the Python `sep` package wraps. **There is no `sep` crate** — the name on crates.io belongs to unrelated projects and `sxr` is an empty placeholder. A thin in-tree `sep-sys` binding must be written; libsep's API surface is small (background estimation, extraction, aperture photometry). This lands in Phase 2a with the control pipeline and needs its own spike |
+| `erfars` **0.2.0** or `erfa-sys` **0.2.1** — bindings to liberfa | Coordinate transforms, sidereal time, precession/nutation | The same C library underlying astropy's core transforms; CI parity tests against astropy required. **Do not select the crate named `erfa` (0.2.1)** — despite the name it is a pure-Rust *reimplementation*, not a binding, which would make the astropy parity suite a test of someone else's port rather than of our usage. `erfars` gives safe wrappers, `erfa-sys` the raw FFI |
+| `fitsio` **0.21.10** | FITS read/write for plate solving I/O, simulator frames, and metadata | Wraps cfitsio; needed from M1 because the simulator camera writes 16-bit FITS |
 | image / ndarray / rayon | Image ops, array math, CPU parallelism (debayer, stretch, PI controller) | |
-| rusqlite | Durable indexes: transfer journal, calibration library, session index | |
+| `rusqlite` **0.40** | Durable indexes: transfer journal, calibration library, session index | Use the `bundled` feature — SQLite compiles in, so neither node needs a system SQLite |
 | reqwest | LLM provider HTTP client (Anthropic/OpenAI/ollama, LLM-16), inter-node HTTP | No official Rust LLM SDKs assumed; providers spoken via their HTTP APIs |
 | serde / serde_json | Config, metadata, event schema, worker IPC protocol | |
 | whisper.cpp | Local speech-to-text for voice input (LLM-13) | C++ library, called from Rust or as subprocess; avoids Web Speech API's cloud dependency |
@@ -1015,13 +1019,23 @@ Plate solving backends (at least one required):
 - **astrometry.net** (`solve-field` CLI): `apt install astrometry.net` + index files from `astrometry.net/doc/readme.html`
 - **ASTAP** (`astap` CLI): download from `astap-program.org` + star database (G17 or H17)
 
-System-level:
-- `libgphoto2-dev` (camera USB access)
-- `libraw-dev` (CR3 RAW decoding, for preview generation)
-- `libcfitsio-dev`, `liberfa-dev`, `libsep` (FITS, coordinates, star detection — Rust FFI)
-- USB serial driver (usually built into kernel for PL2303/FTDI/CH340)
-- `astrometry.net` and/or `astap` (plate solving, see above)
-- CUDA toolkit + Python worker venv on the stacking server only
+System-level, listed by the milestone that first needs it — nothing below is required to start M0:
+
+| Needed from | Package | For |
+|-------------|---------|-----|
+| M0 | rustup toolchain, Node ≥ 20, npm | backbone + PWA build; no C libraries at all |
+| M1 | `libcfitsio-dev` | `fitsio` — the simulator camera writes 16-bit FITS and the preview decoder reads it |
+| M2 | `libgphoto2-dev` | camera USB access |
+| M2 | `libraw-dev` *(only if the M2-T01 spike selects a libraw-backed decoder)* | CR3 decoding for preview generation |
+| M2 | USB serial driver | usually built into the kernel for PL2303/FTDI/CH340 |
+| Phase 2a | `liberfa-dev` | `erfars`/`erfa-sys` coordinate transforms |
+| Phase 2a | `libsep` + headers | the first-party FFI binding for star detection |
+| Phase 2a | `astrometry.net` and/or `astap` | plate solving (see above) |
+| Phase 2b | CUDA toolkit + Python worker venv | stacking server only |
+
+Python on the stacking server: the M1 stub worker needs only numpy and a FITS reader. Pin the
+worker venv's interpreter deliberately (config `workers.python_interpreter`) — CuPy and PyTorch
+wheel availability lags new CPython releases, and that bites at Phase 2b, not now.
 
 ## 8. Configuration
 
@@ -1043,19 +1057,37 @@ mount:
     ra_hours: 0.0
     dec_degrees: 90.0
   settle_time_seconds: 3    # pause after slew before capture
+  serial:
+    request_timeout_ms: 500   # per request/response exchange
+    request_retries: 1        # retries before DeviceError::Timeout
+    heartbeat_misses: 3       # consecutive poll failures before watchdog fires (REL-02)
+    poll_hz: 1                # position poll rate, minimum 1 (MNT-02)
   limits:
     min_altitude_degrees: 15    # reject goto/slew targets below this altitude (MNT-15)
     meridian_limit_minutes: 15  # stop tracking this long past the meridian (MNT-16)
+    slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
+    slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
   # indi_device: "EQMod Mount"    # if driver=indi
   # ascom_host: "http://..."      # if driver=ascom_alpaca
 
 camera:
   driver: gphoto2            # "gphoto2", "indi", "ascom_alpaca", "simulator"
-  image_dir: /data/astro/captures
   default_iso: "1600"
   default_shutter: "30"
   default_format: "RAW+JPEG"
+  ops_via_cli: []            # operations routed through the `gphoto2` binary instead of the
+                             #   crate bindings, e.g. ["bulb"] — populated from the M2 spike
+  timeouts:                  # operation-class timeouts; a breach declares the thread wedged (REL-03)
+    config_seconds: 5        # get/set a setting
+    capture_extra_seconds: 30  # added to the exposure duration
+    download_seconds: 120
   # indi_device: "Canon DSLR"     # if driver=indi
+
+# Where sessions, frames and logs live on the field node (PRD §5.9 layout)
+storage:
+  sessions_dir: /data/astro/sessions
+  disk_warn_free_gb: 20      # warning alert threshold (REL-12)
+  disk_critical_free_gb: 5   # capture pauses after the in-flight frame (REL-12)
 
 guide_camera:
   driver: null               # "asi", "qhy", "indi", "simulator", or null (disabled)
@@ -1093,8 +1125,12 @@ stacking_server:
   host: 192.168.1.100      # stacking server IP on LAN
   port: 8471
   transfer_method: http     # "http" (upload endpoint) or "rsync"
-  retry_interval: 10        # seconds between retries if server unreachable
+  retry_interval: 10        # seconds between retries if server unreachable (backoff base)
   queue_dir: /data/astro/transfer_queue  # local spool for unsent frames
+  pacing:                   # keep bulk uploads from queueing operator commands behind them
+    bandwidth_cap_mbps: null   # null = uncapped; set on constrained links
+    interactive_floor_pct: 20  # % of cap allowed while the operator is actively commanding
+    interactive_window_seconds: 10  # motion command within this window triggers the floor
 
 llm:
   enabled: true
@@ -1115,6 +1151,8 @@ server:
   host: 0.0.0.0             # bind to the VPN interface IP in production (SEC-01)
   port: 8470
   auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
+  max_command_age_ms: 2000  # motion-initiating commands older than this are rejected
+                            #   COMMAND_STALE; stopping commands are never age-rejected
   log_level: INFO
   log_dir: /data/astro/logs
 ```
@@ -1165,6 +1203,21 @@ stacking:
 
   # --- Output ---
   export_dir: /data/astro/stacks
+
+# Mirrored session archive — this is the authoritative copy (IPP-09, REL-13)
+storage:
+  sessions_dir: /data/astro/sessions
+  disk_warn_free_gb: 100
+  disk_critical_free_gb: 20   # ingest rejects new frames below this (REL-12)
+
+# Supervised Python compute/ML workers (ADR-13)
+workers:
+  python_interpreter: /data/astro/venv/bin/python  # venv the workers run in
+  compute_worker: workers/compute_worker.py
+  ml_worker: workers/ml_worker.py
+  health_ping_seconds: 5      # missed × 3 → kill and restart
+  restart_backoff_seconds: 2  # capped exponential
+  job_timeout_seconds: 300
 
 calibration:
   library_dir: /data/astro/calibration
@@ -1239,7 +1292,7 @@ Deliverables:
 - Rust backend (axum) with REST endpoints and WebSocket status broadcast
 - Web UI: mount control panel (coordinates, tracking, D-pad), camera panel (settings, capture), connection status — UI adapts to device capabilities reported by HAL
 - **PWA packaging**: manifest, service worker, responsive layout — installable on tablet/phone home screen (USB-09, USB-10, USB-08, USB-12)
-- **Live view pipeline** (basic): camera preview stream to browser, last-captured frame with quick stretch (IPP-04, IPP-14)
+- **Live view pipeline** (basic): camera preview stream to browser, last-captured frame with quick stretch (CAM-05, CAM-06, IPP-04, IPP-14) — CAM-05/CAM-06 are delivered here, not in Phase 2a; Phase 2a only adds the annotation overlays (IPP-05)
 - **Session raw frame storage**: all captured frames saved with session metadata structure (IPP-09, IPP-10)
 - Configuration file loading (field node config with driver selection)
 - Basic session logging
@@ -1254,8 +1307,6 @@ Deliverables:
 - Session orchestrator state machine (SES-01 through SES-06)
 - Multi-target queue (SES-04)
 - Dithering between frames via mount guide pulses (SES-05)
-- Live view streaming to browser (CAM-05)
-- Image preview with auto-stretch (CAM-06)
 - Target catalog (Messier) and altitude plotting (PLN-03, PLN-04, PLN-05)
 - Park and sync operations (MNT-09, MNT-10)
 - Slew limits and meridian protection (MNT-15, MNT-16)
@@ -1394,7 +1445,8 @@ Exit criteria: can autoguide with sub-arcsecond RMS, automatically flip at the m
 | Open-loop steppers lose steps (wind gust, cable snag, imbalance) — the position counter silently diverges from true pointing (the HEQ5 Pro has no encoders) | Target drifts out of frame; goto accuracy degrades through the night | Medium | Continuous pointing verification via plate solving (PLS-05); sync after solve (MNT-10); solve-and-center before each sequence (PLS-03) |
 | Canon R10 gPhoto2 support gaps (CR3 bulb quirks, live view latency) | Some camera features unavailable | Low | R10 is well-supported in gPhoto2; fallback to CLI `gphoto2` for edge cases |
 | USB disconnect during long exposure | Lost frame, mount continues uncontrolled | Medium | Watchdog timer on serial heartbeat, auto-stop on camera disconnect, sequence state persistence |
-| Rust binding maturity gaps (gphoto2 crate CR3/bulb/live-view coverage, liberfa API coverage) | Camera features unavailable; coordinate errors | Medium | Prototype the camera driver first in Phase 1; per-operation fallback to `gphoto2` CLI subprocess; CI parity tests of erfa-based transforms against astropy reference values |
+| Rust binding maturity gaps. Surveyed against crates.io: `gphoto2` 3.4.1 is healthy (the residual risk is R10 bulb/CR3 *coverage*, not the binding); liberfa bindings exist (`erfars`, `erfa-sys`); **RAW-decode bindings are immature** (`libraw` 0.1.1) | Camera features unavailable; preview pipeline blocked; coordinate errors | Low-Medium | Prototype the camera driver first (M2-T01), which also selects the RAW decoder on evidence from a real CR3; per-operation fallback to `gphoto2` CLI subprocess; CI parity tests of erfa transforms against astropy — binding the same C library astropy uses, never the `erfa` reimplementation crate |
+| **No Rust binding exists for libsep** — star detection has no off-the-shelf crate, only an empty placeholder | Control pipeline (FWHM, quality scoring), registration, and guiding all depend on it; discovered late it would stall Phase 2a | Medium | Write a thin in-tree `sep-sys` FFI binding — libsep's API is small (background, extract, aperture photometry). Spike it at the *start* of Phase 2a, on the M2-T01 pattern: prove the binding against a real frame before designing the pipeline around it |
 | Rust↔Python worker IPC adds protocol and lifecycle complexity on the stacking server | Worker crash or protocol drift breaks the processed pipeline | Low-Medium | Reuse the proven rifflab backbone/worker pattern: supervised long-running workers, versioned JSON protocol, automatic restart; capture is unaffected (the field node has no Python) |
 | Pi 4/5 USB bandwidth under load (mount serial + camera PTP + guide camera) | Dropped frames or serial timeouts | Low | Separate USB buses for devices, use hub with per-port power |
 | Plate solve failure in poor conditions (few stars, clouds, dew) | Solve-and-center loop hangs, sequence stalls | Medium | Configurable timeout and max retries; fall back to mount coordinates if solve fails; frame quality gate before attempting solve |
@@ -1441,7 +1493,7 @@ Exit criteria: can autoguide with sub-arcsecond RMS, automatically flip at the m
 - UI latency: position updates visible within 200ms of position-counter read
 - Plate solve time: < 5s with ASTAP (with hint), < 30s astrometry.net blind solve
 - Frame delivery: field node to stacking server < 5s per frame on gigabit LAN
-- Live stacking: calibrated + stacked preview visible in browser within 10s of each new frame completing download
+- Live stacking: calibrated + stacked preview visible in browser within 10s of each new frame completing download (the IPP-06 end-to-end envelope)
 - Post-processing: parameter changes applied to stack within 3s; full chain re-render within 1s on cached intermediates
 - Calibration reuse: same master darks/flats applied across multiple sessions without re-acquisition
 - LLM command success rate: > 90% of natural language commands executed without requiring operator re-issue or manual correction, measured from the LLM interaction logs (LLM-19)

@@ -1,6 +1,11 @@
 # M1-T10 — Command envelope: staleness + idempotency
 
-**Milestone:** M1 · **Track:** A · **Depends on:** M1-T03 (applies to all mutation routes as they exist) · **Crates:** astroctl-field, astroctl-core, frontend/
+**Milestone:** M1 · **Track:** A+C · **Depends on:** M1-T05, M1-T08 · **Crates:** astroctl-field, astroctl-core, frontend/
+
+> Depends on T05 and T08 deliberately: the envelope must be applied to the *complete* mutation
+> surface in one pass. Landing it while camera or slew routes are still arriving guarantees a
+> partially-covered API, which is worse than no envelope — it looks enforced and isn't.
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.8.1 (staleness paragraph), §8.3(4)
 **Tests gated:** T-STALE-1
 

@@ -1,6 +1,7 @@
 # M0-T02 — Core domain types and error model
 
 **Milestone:** M0 · **Depends on:** M0-T01 · **Crates:** astroctl-core
+**Size:** M · **Status:** not started
 **Spec:** SDD §4.1 (domain types), §4.2 (error model), §2 (conventions)
 
 ## Objective

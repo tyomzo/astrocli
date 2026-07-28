@@ -1,6 +1,7 @@
 # M2-T05 — Desk integration: real-camera E2E + CR3 preview + soak
 
 **Milestone:** M2 · **Depends on:** M2-T03, M2-T04 · **Crates:** astroctl-pipeline, config, tests
+**Size:** M · **Status:** not started
 **Spec:** IMP §2/M2 exit criteria; SDD §5.7 (CR3 decode variant), §9 T-SOAK subset
 
 ## Objective
@@ -10,7 +11,7 @@ and add the CR3 decode path the preview pipeline was structured for.
 
 ## Scope
 
-- Preview decoder: add CR3 variant (libraw half-size decode → quarter-res → stretch) to the M1-T09 `SourceFormat` enum; JPEG sibling used when RAW+JPEG format active (cheaper)
+- Preview decoder: add the CR3 variant (half-size decode → quarter-res → stretch) to the M1-T09 `SourceFormat` enum, using **the decoder M2-T01 selected** — not necessarily libraw; JPEG sibling used when RAW+JPEG format is active (cheaper)
 - Config: switch example field config camera driver to `gphoto2` with `simulator` documented as the alternative; sim remains CI default
 - Desk E2E (scripted, evidence-captured): PWA session — connect R10, settings, live view, 5 timed + 1 bulb capture, previews ≤ 3 s after exposure end (PRF-timing log), frames acked by stack node, stack preview returns
 - 2 h soak: capture every 60 s; field node RSS ≤ 512 MB steady (PRF-05 with real decode spikes excluded per definition), no wedges, zero lost frames

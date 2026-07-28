@@ -1,6 +1,7 @@
 # M1-T15 — Predictive display + link-health surfacing
 
 **Milestone:** M1 · **Track:** C · **Depends on:** M1-T04 · **Crates:** frontend/
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.9 (affordances paragraph), §5.8.3 (ping/ts), §8.3(8)
 
 ## Objective

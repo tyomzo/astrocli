@@ -1,6 +1,7 @@
 # M0-T03 — Event schema and event bus
 
 **Milestone:** M0 · **Depends on:** M0-T01 (types from T02 when available) · **Crates:** astroctl-core
+**Size:** S · **Status:** not started
 **Spec:** SDD §4.3 (schema + topic table), §7 (bus capacity/lagging semantics), ADD §6.2
 
 ## Objective

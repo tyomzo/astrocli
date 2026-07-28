@@ -1,13 +1,15 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.1.0
+**Version:** 1.2.1
 **Author:** Artiom
-**Date:** 2026-07-28
+**Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.5.0
+**Governing requirements:** ASTROCTL-PRD-001 v1.7.0
+**Change note (1.2.1):** Governing-requirements pin advanced to PRD v1.7.0 (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
+**Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
 
 ---
 
@@ -166,6 +168,7 @@ External interfaces:
 | **Session Orchestrator** | Finite state machine executing sequences (slew → settle → solve-and-center → capture → dither → repeat); multi-target queue; pause/resume/abort; state persisted to disk each transition | SES-01..09, REL-04, PLS-03 |
 | **Control Pipeline** | Per-frame astrometric/quality analysis: solver adapter (ASTAP/astrometry.net subprocess), star detection (sep), FWHM/HFR, quality score. Feeds orchestrator decisions | IPP-01..03, PLS-01..06, STK-27 inputs |
 | **Live View Pipeline** | Camera JPEG preview relay; reduced-resolution debayer + stretch of last captured frame; optional overlays | IPP-04, IPP-05, CAM-05, CAM-06 |
+| **Guiding Service** (Phase 3) | Closed-loop autoguiding: guide-camera frame acquisition, star detection and sub-pixel centroid tracking (libsep), PI correction controller, guide-pulse emission through the mount facade, RMS/correction history for the UI. Runs wholly inside the field process so the loop never crosses the VPN (PRF-03); dithering (SES-05) is driven from the orchestrator through this service | GDE-01..05, PRF-03, SES-05, MNT-12 |
 | **Planning Service** | Site config, LST, target catalog, alt/az and visibility computation — erfa-based (liberfa FFI), CI-verified against astropy reference values | PLN-01..08 |
 | **Frame Store** | Session directory structure (PRD §5.9), write-once raw frames, per-frame metadata JSON, disk monitoring | IPP-09, IPP-10, REL-05, REL-11, REL-12 |
 | **Transfer Agent** | Durable on-disk queue of frames to push to the stacking server; SHA-256 per frame; retry with backoff; reclaim eligibility marking after verified transfer | STK-17, ARC-11, REL-06, REL-13, PRF-07 |
@@ -305,10 +308,15 @@ Design rules: the e-stop endpoint has a dedicated route with no queuing or middl
 
 ### 5.6 Development View
 
-Monorepo, structured as a Cargo workspace plus Python workers — mirroring the rifflab layout:
+Monorepo, structured as a Cargo workspace plus Python workers — mirroring the rifflab layout.
+
+**Naming convention:** the repository *directory* is `astrocli/` for historical reasons; every
+artifact identifier — product name, both binaries, all crates, all document IDs — is
+`astroctl`. Do not "correct" one to match the other in either direction; the directory name is
+not an artifact name.
 
 ```
-astrocli/
+astrocli/                       # repo directory (see naming convention above)
 ├── Cargo.toml                  # workspace
 ├── crates/
 │   ├── astroctl-core/          # shared types (serde models), events, config schema,
@@ -322,6 +330,7 @@ astrocli/
 │   ├── astroctl-pipeline/      # control + live view pipelines (field-side)
 │   ├── astroctl-solver/        # ASTAP / astrometry.net subprocess adapters
 │   ├── astroctl-planning/      # erfa coordinates, LST, catalog, visibility
+│   ├── astroctl-guiding/       # star centroids, PI controller, guide loop (Phase 3)
 │   ├── astroctl-transfer/      # durable queue, checksums, retry
 │   ├── astroctl-llm/           # provider adapters (HTTP), tool registry, tiers
 │   ├── astroctl-ipc/           # worker protocol: versioned messages, supervision
@@ -427,7 +436,7 @@ Per 12207 §6.4.4.3(c), the significant whole-system candidates and their assess
 | PRF-03 guide loop ≤ 500ms (Ph.3) | Entire loop inside field process; guide pulses via serial priority-adjacent lane; never crosses VPN |
 | PRF-05 field ≤ 512 MB steady | Rust backbone, no Python runtime on the field node; decode/detect on a bounded blocking pool; no full-res pipelines on field node (IPP-02) |
 | PRF-08 stack ≤ 3s/frame | GPU worker, pinned buffers, registration+accumulate on device (CMP-01/02) |
-| PRF-12 e-stop ≤ 500ms | Dedicated route → priority serial lane (§5.4.3); local watchdog path independent of operator |
+| PRF-12 e-stop ≤ 500ms | Dedicated route → priority serial lane (§5.4.3); local watchdog path independent of operator. **Three nested budgets, distinct measurement points:** (a) API handler → bytes on the wire ≤ 20 ms, verified in CI against a mock port (SDD T-SER-3); (b) API call → mount motion ceases on real hardware ≤ 100 ms, which adds 9600-baud transmission of the stop frames plus motor response (SDD T-HIL-1 step 3); (c) PRF-12's ≤ 500 ms from the operator's tap, which adds network RTT and is only meaningful on links with RTT ≤ 150 ms. Quote the letter, never a bare number |
 | PRF-13 rebuild ≤ 3s/frame | Shadow-accumulator rebuild on GPU; post-chain step cache for sub-second parameter tweaks |
 
 ### 9.2 Reliability
@@ -449,9 +458,9 @@ Residual architectural risks to be verified during Design Definition / early imp
 | Risk | Verification plan |
 |------|-------------------|
 | gphoto2 crate coverage gaps for the R10 (CR3 download, bulb, live-view stream) | Prototype the camera driver first thing in Phase 1; per-operation fallback to `gphoto2` CLI subprocess; worst case, a thin custom FFI layer over libgphoto2 |
-| erfa-based coordinate code diverges from astropy reference behavior | CI parity suite: fixed set of (time, site, target) cases computed by astropy, asserted against `astroctl-planning` to sub-arcsecond agreement |
+| erfa-based coordinate code diverges from astropy reference behavior | CI parity suite: fixed set of (time, site, target) cases computed by astropy, asserted against `astroctl-planning` to sub-arcsecond agreement. **The suite's value depends on binding liberfa itself** (`erfars`/`erfa-sys`) — astropy wraps that same C library, so parity then tests *our usage*. Against a pure-Rust reimplementation (the crate confusingly named `erfa`) the same suite would instead be testing a third party's port, which is a different and weaker guarantee. See PRD §7 |
 | Worker IPC protocol drift or worker crash loops on the stack | Protocol version handshake at worker start; supervised restart with backoff; accumulator state persisted so a restart replays, not restarts, the stack |
-| Serial two-lane queue starvation under heavy polling | Bench with simulator; e-stop injection test asserting < 100ms to wire |
+| Serial two-lane queue starvation under heavy polling | Bench with simulator; e-stop injection test asserting budget (a) of §9.1 — ≤ 20 ms handler-to-wire under 50 cmd/s normal load (SDD T-SER-3) |
 | Rebuild swap consistency (frames arriving mid-swap) | Property test on Rebuild Manager queue-drain protocol |
 | Proxy WS fan-out (preview via field node) adds latency on slow field hardware | Measure on Pi; enable direct browser↔stack path if needed (ADR-07 fallback) |
 | SQLite contention between ingest and rebuild on stack | WAL mode; single-writer discipline per DB |
@@ -479,6 +488,9 @@ Architecture-level requirements (ARC-*) to elements; functional groups summarize
 | ARC-22, ARC-23, CMP-* | Python compute workers + supervision (ADR-09, ADR-13) |
 | HAL-*, MNT-*, CAM-* | HAL registry, drivers, Safety Monitor (§5.2.1) |
 | SES-*, PLS-* | Orchestrator + Control Pipeline (§5.2.1) |
+| GDE-* | Guiding Service (§5.2.1), `astroctl-guiding` (§5.6); loop closes on the field node per §9.1/PRF-03 |
+| EXT-04 | Sequence definitions are data, not code: the orchestrator's sequence model is a serde type persisted as YAML/JSON in `session.json: sequence_state` and importable/exportable through `/api/session` (§6.1) — no sequence logic is expressible only in Rust |
+| EXT-06 | PWA structured for Capacitor wrapping (ADR-12) |
 | STK-*, PPR-*, IPP-* | Processed Pipeline, Rebuild Manager, Preview/Export (§5.2.2) |
 | CAL-* | Calibration Library (§5.2.2) |
 | MLR-* | ML Runtime + step contract (§6.2) |

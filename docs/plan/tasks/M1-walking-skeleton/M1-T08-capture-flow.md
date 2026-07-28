@@ -1,6 +1,7 @@
 # M1-T08 — Capture flow, camera routes, PWA camera panel
 
 **Milestone:** M1 · **Track:** A+C · **Depends on:** M1-T06, M1-T07 · **Crates:** astroctl-field, frontend/
+**Size:** L · **Status:** not started
 **Spec:** SDD §5.3.2 (flow, minus gphoto2 specifics), §5.6 (FSM skeleton), §5.8.1 camera rows; PRD CAM-01..04/08
 
 ## Objective
@@ -16,6 +17,14 @@ via the three-state orchestrator skeleton.
 - Routes: camera connect/disconnect, settings GET/PUT (available values from capabilities), capture, capture/abort, battery, storage, `/api/session/current` + frame listing
 - Disk-critical behavior: capture request below critical threshold → 409 with `DISK_FULL` code (REL-12)
 - PWA camera panel: settings selectors from available values, capture button with progress states, bulb duration input + countdown, battery/storage display; session frame list view
+
+## PR split
+
+Broad because the panel is the only way to demonstrate the flow, but it lands in three commits:
+
+1. Camera facade + orchestrator FSM skeleton + capture flow (backend only, exercised by tests)
+2. Camera/session routes + disk-critical behavior
+3. PWA camera panel and frame list
 
 ## Acceptance criteria
 

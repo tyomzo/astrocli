@@ -1,11 +1,13 @@
 # AstroCtl — Implementation Plan
 
 **Document ID:** ASTROCTL-IMP-001
-**Version:** 1.0.0
+**Version:** 1.1.1
 **Author:** Artiom
-**Date:** 2026-07-28
+**Date:** 2026-07-29
 **Status:** Draft
-**Governing documents:** ASTROCTL-PRD-001 v1.5.0, ASTROCTL-ADD-001 v1.1.0, ASTROCTL-SDD-001 v1.0.2
+**Governing documents:** ASTROCTL-PRD-001 v1.7.0, ASTROCTL-ADD-001 v1.2.1, ASTROCTL-SDD-001 v1.1.1
+**Change note (1.1.1):** Governing pins advanced after the dependency survey (PRD v1.7.0). §6 gains the risk that Phase 2a's star detection has no existing Rust binding.
+**Change note (1.1.0):** Governing-document pins updated — SDD v1.1.0 now designs the M1 stack-side elements this plan always required (transfer, ingest, worker IPC), so §1's contract table no longer points at deferred design. Auth added as the third declared phase deviation. M0 crate scaffolding now references ADD §5.6 (the complete 14-crate layout, which gained `astroctl-guiding` in ADD v1.2.0) rather than SDD §3 (a subset), and the M0 deliverable list names the stack proxy its exit criterion already assumed.
 
 ---
 
@@ -17,14 +19,15 @@
 |----------|-----------|----------------|-------------|
 | `Camera` trait | SDD §5.1 | `SimulatorCamera` (synthetic star fields) | M2 (gPhoto2) |
 | `MountDevice` trait | SDD §5.1 | `SimulatorMount` (ramps, settle, drift) | M3 (Skywatcher) |
-| Field↔stack HTTP (ingest + ack) | ADD ADR-05 | real (thin) — it *is* the orchestration under test | — |
-| Worker IPC (ADR-13) | SDD-planned v1.2.x | stub Python worker (echo/stretch preview) | Phase 2b (real stacking) |
+| Field↔stack HTTP (ingest + ack) | ADD ADR-05, SDD §5.10/§5.11 | real (thin) — it *is* the orchestration under test | — |
+| Worker IPC (ADR-13) | SDD §5.12 | stub Python worker (stretch preview, no stacking math) | Phase 2b (real stacking inside the same worker) |
 | REST/WS API | SDD §5.8 | real from M1 | — |
 
-Two deliberate deviations from the PRD phase order, both de-risking:
+Three deliberate deviations from the PRD phase order, all de-risking. Where they conflict, **this plan's milestone order supersedes the PRD §9 phase list**; the PRD phases remain the statement of scope, not of sequence:
 
 1. **The stacking server appears in the first increment** (PRD defers it to Phase 2b) — but only as a skeleton: ingest endpoint, ack, stub worker, preview push. Two-node orchestration, auth, the proxy, and the IPC plumbing are the highest-integration-risk items; exercising them from week one is the point of this plan. No stacking math is implemented early.
 2. **Camera before mount** (PRD lists mount first). The camera driver carries the top implementation risk (gphoto2 crate coverage for the R10 — ADD §10), needs no clear skies and no field setup to validate on a desk, and real frames flowing makes every downstream feature real. The mount lands last of the Phase-1 trio because it needs the HIL bring-up discipline (T-HIL-1) and benefits from a UI that is already trustworthy.
+3. **Authentication ships in M0** (PRD defers SEC-01/02/04 to Phase 2b). Retrofitting auth across an existing route table is exactly the kind of cross-cutting change that this plan's crate structure exists to avoid, and a field node that has ever run unauthenticated on a VPN is a habit, not a milestone. The token check and the startup refusal (SDD §4.5) cost hours in M0 and days later. Tier *enforcement* (SEC-03) still arrives in Phase 2c; only the annotation slot exists from M0.
 
 **Simulators are products, not scaffolding.** They are the PRD requirement HAL-11, keep CI hardware-free forever, and get fault injection (SDD §9) so failure paths are testable on every commit.
 
@@ -34,12 +37,13 @@ Two deliberate deviations from the PRD phase order, both de-risking:
 
 Repo + workspace + toolchain so that every later PR is small.
 
-- Cargo workspace with all crate skeletons per SDD §3 (empty but compiling, dependency rules enforced by CI job)
+- Cargo workspace with **all 14 crate skeletons per ADD §5.6** — the complete layout, not the M0–M3 subset sketched in SDD §3 (empty but compiling, dependency rules enforced by CI job)
 - `astroctl-core`: domain types, error enums, event schema, config structs + validation (SDD §4)
 - Frontend pipeline: Vite build → `include_dir!` embedding → served by a hello-world axum app
 - Both binaries start, load config, refuse to start without auth token (SEC-01/02 startup check), serve `/api/system/health`
+- Field node reverse-proxies `/stack/*` to the stack node with auth forwarded (ADR-07) — the exit criterion below depends on it
 - CI: fmt, clippy, test, frontend build, dependency-rule lint
-- **Exit:** `astroctl-field` and `astroctl-stack` run on two machines; PWA shell loads over the VPN from the field node and shows both nodes' health via the proxy.
+- **Exit:** `astroctl-field` and `astroctl-stack` run on two machines; PWA shell loads over the VPN from the field node and shows both nodes' health via the proxy. This criterion exists to prove the two-node VPN topology before any feature code depends on it; if the hardware or tunnel is not ready, the M0 README defines the permitted partial exits and requires the shortfall be carried as named debt into M1.
 
 ### M1 — Walking skeleton (the GUI + two-node orchestration delivery)
 
@@ -63,7 +67,7 @@ PWA:
 - All Phase-1 screens (SDD §5.9): connect, mount panel with D-pad (TTL renewal), camera panel, live view/preview, header status incl. link health + e-stop
 - Stack status panel: connection, queue depth, last preview (USB-06 subset)
 
-Tests gated: T-E2E-1 (against simulators), T-SLW-1, T-STALE-1, T-HOL-1, T-DUR-1.
+Tests gated: T-E2E-1 (against simulators), T-SLW-1, T-STALE-1, T-HOL-1, T-DUR-1, T-XFER-1, T-ING-1, T-IPC-1.
 
 **Exit (demo):** from a phone on the VPN — connect simulated devices, slew to coordinates and watch predicted/confirmed position, capture a synthetic frame, see it saved locally, transferred, acknowledged, and its preview return from the stacking server into the UI. Kill the stack node mid-session: capture continues, queue grows, reconnect drains it. E-stop halts a simulated slew instantly.
 
@@ -107,7 +111,9 @@ Three tracks can run concurrently after M0; contracts (core types, API schemas, 
 
 Integration cadence: the E2E simulator test (T-E2E-1) runs in CI from the first week of M1 and is the tree's health signal.
 
-## 4. Sizing (relative, single developer + AI pair)
+## 4. Sizing and PR sequencing
+
+### 4.1 Sizing (relative, single developer + AI pair)
 
 | Milestone | Size | Dominant cost |
 |-----------|------|---------------|
@@ -116,7 +122,9 @@ Integration cadence: the E2E simulator test (T-E2E-1) runs in CI from the first 
 | M2 | M | driver depth + hardware iteration loops |
 | M3 | M | HIL discipline + protocol verification, calendar-gated by bench/sky time |
 
-Suggested first PR sequence inside M1 (each keeps the tree green and demoable):
+### 4.2 PR sequence inside M1
+
+Each step keeps the tree green and demoable; the task tree under `docs/plan/tasks/` expands these into individual task files:
 1. core types + event bus + WS hub + health
 2. HAL + SimulatorMount + mount panel (position streaming visible in UI)
 3. SafeMount + TTL + e-stop (safety demonstrable on simulators)
@@ -136,7 +144,9 @@ Suggested first PR sequence inside M1 (each keeps the tree green and demoable):
 
 | Risk | Mitigation |
 |------|-----------|
-| Skeleton breadth (M1) sprawls — everything half-built, nothing demoable | PR sequence in §4 keeps a demoable tree; stub worker does *no* real compute; stacking math explicitly out of scope until 2b |
+| Skeleton breadth (M1) sprawls — everything half-built, nothing demoable | PR sequence in §4.2 keeps a demoable tree; stub worker does *no* real compute; stacking math explicitly out of scope until 2b |
 | Contracts churn after tracks parallelize | Contracts frozen at M1 start; changes require a version bump in the schema and a note in the SDD |
 | Simulator fidelity too low → real-driver swap surprises | Simulators implement timing behavior (ramps, settle, exposure duration, download delay), not just return values; fault injection from day one |
 | R10 spike fails on bulb (M2) | CLI fallback path is designed (SDD §5.3.3); worst case bulb goes through `gphoto2` binary while everything else stays on bindings |
+| **Phase 2a's star detection has no existing Rust binding** — `sep` is not a crate (PRD §7, §10). Discovered at the start of 2a it costs a spike; discovered mid-pipeline it stalls the control pipeline, registration, and guiding at once | Open Phase 2a with a `sep-sys` FFI spike on the M2-T01 pattern — prove the binding against a real frame before any pipeline design depends on it. libsep's API is small, so this is a bounded task, but it is *unplanned work that currently has no task file* |
+| RAW decoder for CR3 previews is unchosen and its candidates are unproven (PRD §7) | Folded into M2-T01: the spike now measures all four candidates against a real R10 CR3 and records the decision. The M1-T09 `SourceFormat` seam means the choice is additive, not a rewrite |

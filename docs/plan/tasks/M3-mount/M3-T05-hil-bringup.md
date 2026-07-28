@@ -1,6 +1,7 @@
 # M3-T05 — HIL bring-up (hardware, operator present)
 
 **Milestone:** M3 · **Depends on:** M3-T04, M2 complete · **Crates:** scripts/, docs/evidence/
+**Size:** L · **Status:** not started
 **Spec:** SDD §9 T-HIL-1 (six-step sequence); IMP §2/M3; PRD §4.2 verification note
 **Tests gated:** T-HIL-1
 
@@ -25,5 +26,5 @@ Execute SDD §9 T-HIL-1 steps, each gated on the previous:
 ## Acceptance criteria
 
 - [ ] All six steps pass in order, evidence archived; any opcode/parameter deviation reflected in SDD + codec vectors before proceeding past step 2
-- [ ] E-stop wire latency measured < 100 ms from API call (log-timestamped)
+- [ ] E-stop budget **(b)** of ADD §9.1 demonstrated on real hardware: ≤ 100 ms from API call to motion ceasing, log-timestamped. This is a different quantity from budget (a) (≤ 20 ms handler-to-wire, asserted in CI by T-SER-3 in M3-T02/T04) — (b) adds 9600-baud transmission and motor response. Record both numbers; quoting one where the other is meant is how the two thresholds drifted apart in the first place
 - [ ] **IMP §2/M3 exit = PRD Phase 1 exit criteria demonstrated end-to-end on real hardware and archived as the M3 demo recording**

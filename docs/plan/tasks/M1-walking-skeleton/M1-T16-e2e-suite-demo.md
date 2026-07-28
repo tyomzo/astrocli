@@ -1,8 +1,9 @@
 # M1-T16 — E2E suite, fault injection, session log, demo script
 
 **Milestone:** M1 · **Track:** all · **Depends on:** all M1 tasks · **Crates:** tests/, scripts/
+**Size:** L · **Status:** not started
 **Spec:** SDD §9 (T-E2E-1, T-HOL-1, T-DUR-1 full versions); IMP §2/M1 exit criteria, §5
-**Tests gated:** T-E2E-1, T-HOL-1 (shaped link), plus wiring T-SLW-1/T-STALE-1/T-DUR-1 into one suite
+**Tests gated:** T-E2E-1, T-HOL-1 (shaped link), plus wiring T-SLW-1/T-STALE-1/T-DUR-1/T-XFER-1/T-ING-1/T-IPC-1 into one suite
 
 ## Objective
 
@@ -18,6 +19,16 @@ permanent health signal for all later work.
 - Session JSONL log verification: every scenario's event log replayable — parse full file, reconstruct final state, compare to API state (SES-07 basic)
 - `scripts/demo-m1.sh`: launches two nodes with demo config, prints the phone URL + token QR; demo walkthrough doc `docs/plan/tasks/M1-walking-skeleton/DEMO.md` matching the IMP exit narrative
 - CI: suite wired as the `e2e` job (activates M0-T07 placeholder); shaped-link test may be nightly-only if slow — document the split
+
+## PR split
+
+The largest task in M1 and deliberately so — it is the milestone's health signal, and its parts
+share one harness. Four commits:
+
+1. E2E harness (two-binary spawn, REST/WS client helpers) + T-E2E-1
+2. Fault scenarios (stack death, field restart, mount disconnect) + T-XFER-1/T-ING-1/T-IPC-1 wiring
+3. T-HOL-1 on a shaped link + CI job wiring (activating the M0-T07 placeholder)
+4. `scripts/demo-m1.sh` + `DEMO.md`
 
 ## Acceptance criteria
 

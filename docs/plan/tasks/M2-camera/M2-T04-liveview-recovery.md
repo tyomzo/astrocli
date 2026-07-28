@@ -1,6 +1,7 @@
 # M2-T04 — Live view stream, battery/storage, wedge recovery
 
 **Milestone:** M2 · **Depends on:** M2-T02 · **Crates:** astroctl-drivers
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.3.1 (wedge protocol), §5.7 source 1; PRD CAM-05/08, REL-03
 **Tests gated:** T-CAM-1
 

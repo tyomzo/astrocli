@@ -1,6 +1,7 @@
 # M3-T04 — SkywatcherMount driver assembly
 
 **Milestone:** M3 · **Depends on:** M3-T02, M3-T03 · **Crates:** astroctl-drivers
+**Size:** L · **Status:** not started
 **Spec:** SDD §5.2.1 (layering), §5.2.3 (goto supervision); PRD MNT-01..08, SES-06
 
 ## Objective

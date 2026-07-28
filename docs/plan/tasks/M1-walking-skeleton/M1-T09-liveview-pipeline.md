@@ -1,6 +1,7 @@
 # M1-T09 — Live view pipeline, /ws/liveview, preview panel
 
 **Milestone:** M1 · **Track:** A+C · **Depends on:** M1-T08 · **Crates:** astroctl-pipeline, astroctl-field, frontend/
+**Size:** L · **Status:** not started
 **Spec:** SDD §5.7, §5.8.3 (two-socket hub), §8.3(5)(6); PRD CAM-05/06, IPP-04
 **Tests gated:** T-HOL-1 (with T16's harness; basic version here)
 

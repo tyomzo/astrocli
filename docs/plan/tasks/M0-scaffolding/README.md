@@ -7,7 +7,24 @@ PWA shell loads over the VPN from the field node and shows both nodes' health vi
 **Exit criteria (IMP §2/M0):**
 - `astroctl-field` and `astroctl-stack` run on separate hosts
 - PWA shell loads from the field node over VPN; both nodes' health visible
-- CI green: fmt, clippy, tests, frontend build, dependency-rule lint
+- Quality gate green: fmt, clippy, tests, frontend build, dependency-rule lint
+
+**If the second host or the VPN is not ready yet.** The exit criterion exists to prove the
+two-node VPN topology early, because it is the assumption most expensive to discover broken
+later. It is not a code gate — all M0 *code* completes without it. If the stacking machine or
+the tunnel is not up, take the partial exit in this order of preference:
+
+1. **Two hosts, no VPN** — both binaries on separate machines over the LAN. Proves the proxy,
+   the two-token auth story, and cross-host config. Only the tunnel is unproven.
+2. **One host, VPN to the phone** — both binaries on the dev machine (loopback, the documented
+   STK-20 degenerate case), but the PWA loaded on a real phone over the VPN. Proves the half
+   that touches the UI, service worker, and remote auth.
+3. **One host, localhost only** — everything works, nothing about the deployment shape is
+   proven. Acceptable, but the debt is real.
+
+Whichever you take, record it in the M1 README as explicit debt and clear it before M1's demo —
+M1's exit criterion is a phone-over-VPN two-node demo, so an untested tunnel does not survive
+past M1 regardless.
 
 ## Tasks and order
 

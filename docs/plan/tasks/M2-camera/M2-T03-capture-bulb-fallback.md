@@ -1,6 +1,7 @@
 # M2-T03 — Capture + download durability + bulb + CLI fallback
 
 **Milestone:** M2 · **Depends on:** M2-T02 · **Crates:** astroctl-drivers
+**Size:** L · **Status:** not started
 **Spec:** SDD §5.3.2 (flow), §5.3.3 (per-operation CLI fallback); PRD CAM-03/04, REL-05
 
 ## Objective

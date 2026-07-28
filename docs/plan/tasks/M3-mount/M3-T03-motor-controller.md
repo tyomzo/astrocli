@@ -1,6 +1,7 @@
 # M3-T03 — Motor controller + position math
 
 **Milestone:** M3 · **Depends on:** M3-T01 · **Crates:** astroctl-drivers
+**Size:** L · **Status:** not started
 **Spec:** SDD §5.2.3 (position math, goto, pier side); PRD §4.2 parameters
 **Tests gated:** T-POS-1
 

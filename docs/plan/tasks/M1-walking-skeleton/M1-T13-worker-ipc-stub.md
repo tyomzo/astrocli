@@ -1,7 +1,9 @@
 # M1-T13 — Worker IPC crate, supervisor, stub Python worker
 
 **Milestone:** M1 · **Track:** B · **Depends on:** M0 · **Crates:** astroctl-ipc, astroctl-stack, workers/
-**Spec:** ADD ADR-13, §6.2 (Worker IPC protocol); SDD §1.2 (detail deferred to v1.2.x — this task implements the *protocol plumbing*, minimal message set)
+**Size:** L · **Status:** not started
+**Spec:** SDD §5.12 (framing, message set v1, handshake, supervision, stub worker); ADD ADR-13, §6.2
+**Tests gated:** T-IPC-1
 
 ## Objective
 

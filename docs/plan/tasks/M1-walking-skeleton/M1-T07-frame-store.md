@@ -1,6 +1,7 @@
 # M1-T07 — Frame store: sessions, durability, ID reservation
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M0 · **Crates:** astroctl-session
+**Size:** M · **Status:** not started
 **Spec:** SDD §5.5, §6 (data design); PRD §5.9 layout, REL-04/05/11/12, IPP-09/10 subset
 **Tests gated:** T-DUR-1
 

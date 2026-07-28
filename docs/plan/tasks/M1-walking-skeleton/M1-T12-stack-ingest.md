@@ -1,7 +1,9 @@
 # M1-T12 — Stack ingest + session mirror
 
 **Milestone:** M1 · **Track:** B · **Depends on:** M0 · **Crates:** astroctl-stack
-**Spec:** ADD §5.2.2 (Ingest Service, Session Manager), ADR-05; PRD IPP-15, REL-12
+**Size:** M · **Status:** not started
+**Spec:** SDD §5.11 (route table, ingest procedure, dedup and conflict semantics, session mirror, journal); ADD §5.2.2, ADR-05; PRD IPP-15, REL-11/12
+**Tests gated:** T-ING-1
 
 ## Objective
 

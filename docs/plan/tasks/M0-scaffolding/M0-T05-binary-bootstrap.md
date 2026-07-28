@@ -1,6 +1,7 @@
 # M0-T05 — Binary bootstrap: axum, auth, health, proxy stub
 
 **Milestone:** M0 · **Depends on:** M0-T02, T03, T04 · **Crates:** astroctl-field, astroctl-stack
+**Size:** M · **Status:** not started
 **Spec:** SDD §4.5 (auth), §8.1 (startup sequence), §8.2 (route metadata), §5.8.2 pattern; ADD ADR-07
 
 ## Objective

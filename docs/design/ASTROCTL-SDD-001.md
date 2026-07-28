@@ -1,14 +1,16 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.0.2
+**Version:** 1.1.1
 **Author:** Artiom
-**Date:** 2026-07-28
+**Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.5.0 (requirements), ASTROCTL-ADD-001 v1.1.0 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.7.0 (requirements), ASTROCTL-ADD-001 v1.2.1 (architecture)
+**Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
 **Change note (1.0.2):** Remote-link latency mitigations consolidated (§8.3): command staleness rejection, control/bulk connection separation (dedicated live-view socket), transfer pacing rule for Phase 2b, predictive position display and link-health surfacing in the PWA.
+**Change note (1.1.0):** Design added for the two-node walking skeleton that ASTROCTL-IMP-001 delivers in M1, which v1.0.x deferred to the Phase 2b increment and therefore left unspecified: transfer agent (§5.10), stack ingest and session mirror (§5.11), worker IPC and supervision (§5.12). Increment table re-scoped accordingly (§1.2). `transfer.acked` and `stack.status` added to the closed topic enum (§4.3); the field node now carries one SQLite database from M1 (§6). `guide_pulse` regains the `rate` parameter PRD §4.1 specifies (§5.1). New verification entries T-XFER-1, T-ING-1, T-IPC-1 (§9).
 
 ---
 
@@ -20,14 +22,16 @@ This document is the output of the Design Definition process for AstroCtl. It re
 
 ### 1.2 Scope and increment plan
 
-Per 12207's iterative application and the phase plan (PRD §9), this SDD is delivered in increments. **Version 1.0.0 provides full design for Phase 1 scope plus cross-phase foundations** that must be stable from the first commit (type system, error model, event schema, concurrency topology, config). Later elements are designed at the boundary level only and will be detailed in subsequent SDD versions:
+Per 12207's iterative application, this SDD is delivered in increments. **Version 1.1.0 provides full design for everything the implementation plan delivers in M0–M3** (ASTROCTL-IMP-001 §2) plus the cross-phase foundations that must be stable from the first commit (type system, error model, event schema, concurrency topology, config).
+
+The increment boundary follows the *implementation plan*, not the PRD phase list. IMP §1 deliberately pulls a skeleton of the two-node orchestration — transfer, ingest, worker IPC — into M1 to de-risk it early, so that skeleton is designed here (§5.10–5.12) rather than deferred. What remains deferred is the compute those elements will eventually carry, not the elements themselves.
 
 | SDD increment | Scope | Sections |
 |---------------|-------|----------|
-| **v1.0.0 (this)** | Foundations + Phase 1: core types, HAL, Skywatcher driver, gPhoto2 driver, simulators, safety monitor, frame store, live view pipeline, field API gateway, config, testing | all |
-| v1.1.x (Phase 2a) | Session FSM detail, control pipeline, solver adapters, planning (erfa), slew limits detail | §5.6 expand, new §5.10–5.12 |
-| v1.2.x (Phase 2b) | Transfer agent, stack backbone, worker IPC detail, calibration library, ingest | new sections |
-| v1.3.x (Phase 2c) | Post-chain executor, rebuild manager, LLM agent, confirmation service | new sections |
+| **v1.1.0 (this)** | Foundations + everything in IMP M0–M3: core types, HAL, Skywatcher driver, gPhoto2 driver, simulators, safety monitor, frame store, live view pipeline, field API gateway, **transfer agent, stack ingest + session mirror, worker IPC and supervision**, config, testing | all |
+| v1.2.x (Phase 2a) | Session FSM detail, control pipeline, solver adapters, planning (erfa), slew limits detail | §5.6 expand, new sections |
+| v1.3.x (Phase 2b) | Real stacking compute inside the worker, calibration library, accumulator design, transfer hardening (pacing §8.3.7, reclaim policy) | expand §5.10–5.12, new sections |
+| v1.4.x (Phase 2c) | Post-chain executor, rebuild manager, LLM agent, confirmation service | new sections |
 | v2.x (Phases 3–4) | Guiding, polar alignment, ML workers, adapters (INDI/Alpaca) | new sections |
 
 ### 1.3 Design constraints inherited from the ADD
@@ -55,19 +59,28 @@ Per 12207's iterative application and the phase plan (PRD §9), this SDD is deli
 
 ## 3. Design Overview
 
-Phase 1 delivers one binary, `astroctl-field`, composed of the crates below. Arrows are compile-time dependencies (all also depend on `astroctl-core`):
+M0–M3 deliver **two** binaries. The crates below are the subset of ADD §5.6 that carries code in
+these milestones; the rest (`solver`, `planning`, `guiding`, `llm`) are scaffolded empty at M0 and
+filled in later phases. ADD §5.6 remains the authoritative full layout and dependency matrix.
+Arrows are compile-time dependencies; everything also depends on `astroctl-core`:
 
 ```
-                       astroctl-field (bin)
-                     /      |       |      \
-        astroctl-safety  astroctl- astroctl- astroctl-session
-              |          pipeline  hal   ┌──────┘
-              |             |       |    │ (frame store lives here)
-              └────────► astroctl-drivers
-                        (skywatcher, gphoto2, simulators)
+              astroctl-field (bin)                    astroctl-stack (bin)
+            /    |      |       |     \                  |          |
+ astroctl-safety |  astroctl- astroctl- astroctl-     astroctl-  (spawns)
+       |         |   pipeline   hal      session         ipc         │
+       |    astroctl-transfer    |     ┌────┘              │         ▼
+       |                         |     │ (frame store)     │   workers/compute_worker.py
+       └──────────────────► astroctl-drivers              │        (Python child)
+                        (skywatcher, gphoto2, simulators)  │
+                                                 astroctl-core (shared by both binaries)
 ```
 
-Runtime task topology (Phase 1):
+`astroctl-field` and `astroctl-stack` never depend on each other (ADD §5.6 rule 5); they share
+`astroctl-core` for types and events, `astroctl-ipc` for the worker protocol definitions, and the
+HTTP contract of §5.11.1.
+
+Runtime task topology — field node:
 
 ```
  axum server task ──► mount facade ──► [normal lane] ──┐
@@ -79,8 +92,21 @@ Runtime task topology (Phase 1):
       ├──► live view pipeline ──► decode pool       │ (frames)
       │            ▲______________frames____________┘
       ├──► frame store (fsync writes, session dirs)
+      ├──► transfer agent ──► transfer.db ──► HTTP ──► stack /api/ingest   (§5.10)
       ├──► WS hub ◄── event bus (tokio::sync::broadcast)
       └──► watchdog task (serial heartbeat, USB presence, disk, clock)
+```
+
+Runtime task topology — stacking server:
+
+```
+ axum server task ──► ingest handler ──► verify+fsync ──► session mirror ──► ingest.db  (§5.11)
+      │                                                          │
+      │                                                    submit preview job
+      ├──► worker supervisor ──► stdio IPC ──► compute_worker.py (child process)  (§5.12)
+      │            ▲ ping/restart                     │
+      ├──► preview WS (/ws/preview, binary) ◄─────────┘
+      └──► watchdog task (disk thresholds, worker health)
 ```
 
 ---
@@ -110,6 +136,10 @@ pub enum TrackingMode { Sidereal, Lunar, Solar }
 #[derive(Copy, Clone, PartialEq)] pub enum Axis { Ra, Dec }
 #[derive(Copy, Clone, PartialEq)] pub enum Direction { North, South, East, West }
 #[derive(Copy, Clone, PartialEq)] pub enum SlewSpeed { Guide, Slow, Medium, Fast, Max }
+
+/// Guide-pulse rate as a fraction of sidereal, (0.0, 1.0]. Constructor validates. (MNT-12)
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GuideRate(f64);
 ```
 
 Newtype constructors (`RaHours::new`, `DecDegrees::new`) are the only way to build coordinate values; out-of-range input is a `CoreError::InvalidCoordinate`, never a wrapped/clamped silent fix.
@@ -160,9 +190,12 @@ Phase 1 topics and payloads:
 | `mount.position` | `{ra, dec, alt, az, pier_side}` | 1 Hz (MNT-02) |
 | `mount.status` | `{state, tracking, slewing, parked}` | on change |
 | `camera.status` | `{connected, battery_pct, charging, storage_free_mb}` | on change + 60s |
-| `capture.progress` | `{frame_id, state: exposing\|downloading\|saved, elapsed_s}` | on change |
+| `capture.progress` | `{frame_id, state: exposing\|downloading\|saved\|preview_ready, elapsed_s}` | on change |
 | `frame.saved` | `{frame_id, path, size_bytes, sha256}` | per frame |
 | `liveview.frame` | binary WS frame (JPEG), not JSON — carried on the dedicated `/ws/liveview` socket, never on `/ws` (§8.3) | ≤ camera rate |
+| `transfer.acked` | `{frame_id, sha256, acked_at, queue_depth}` — the stack node has the frame and verified it; the only event that makes a field-node frame reclaim-eligible (REL-13) | per frame |
+| `transfer.status` | `{state: idle\|uploading\|offline, queue_depth, oldest_queued_age_s, last_ack_ts}` | on change + 30s |
+| `stack.status` | `{connected, session_frame_count, last_preview_ts, worker_state, restarts}` — republished by the field node from the stack's health so the PWA has one event source (USB-06) | on change + 30s |
 | `alert` | `{severity, code, message}` | as needed |
 | `system.health` | `{disk_free_gb, clock_synced, uptime_s}` | 60s |
 
@@ -198,7 +231,11 @@ pub trait MountDevice: Send + Sync {
     async fn stop_tracking(&self) -> Result<(), DeviceError>;
     async fn slew(&self, axis: Axis, dir: Direction, speed: SlewSpeed) -> Result<(), DeviceError>;
     async fn stop_slew(&self, axis: Axis) -> Result<(), DeviceError>;
-    async fn guide_pulse(&self, axis: Axis, dir: Direction, duration_ms: u32) -> Result<(), DeviceError>;
+    /// `rate` is a fraction of the sidereal rate, per PRD §4.1 and MNT-12; the driver
+    /// programs it (Synta `P`) before issuing the pulse. Devices without settable rates
+    /// return `Unsupported` for any value other than their fixed one.
+    async fn guide_pulse(&self, axis: Axis, dir: Direction,
+                         duration_ms: u32, rate: GuideRate) -> Result<(), DeviceError>;
     async fn park(&self) -> Result<(), DeviceError>;
     async fn unpark(&self) -> Result<(), DeviceError>;
     /// Must complete without awaiting normal-lane traffic. See §5.4.
@@ -312,7 +349,7 @@ capture request → set format/ISO/shutter if changed → trigger
   → download to <session>/frames/.tmp_<id>.cr3   (streamed)
   → fsync file → rename to light_<id>.cr3 → fsync dir      ← frame is now durable
   → compute sha256 (blocking pool) → write frame meta JSON → emit frame.saved
-  → hand path to live view pipeline (and, Phase 2b, transfer queue)
+  → hand path to live view pipeline (§5.7) and enqueue in the transfer agent (§5.10)
 ```
 
 The rename-after-fsync makes a torn download invisible to every consumer (they only ever see completed frames). Bulb: R10 bulb is driven via PTP remote release config; if the binding lacks it, the fallback adapter (§5.3.3) handles bulb first — this is the highest-risk item in Phase 1 (ADD §10) and gets prototyped first.
@@ -367,7 +404,7 @@ The full sequence FSM (targets, dithering, solve-and-center, pause/resume — SE
 Two sources, one output path (WS binary frames on `liveview.frame`):
 
 1. **Camera live view stream** (CAM-05): JPEG frames from the camera thread's watch channel, forwarded as-is; rate-limited per client (default 5 fps LAN / adaptive down to 1 fps, USB-11 groundwork).
-2. **Last-captured preview** (CAM-06, IPP-04): on `frame.saved`, a decode job goes to the blocking pool — libraw half-size decode → quarter-res RGB → asinh auto-stretch (fixed algorithm in Phase 1; the STF options come with the post-chain) → JPEG (quality 85) → cached as `<session>/preview/light_<id>.jpg` and pushed once on the bus.
+2. **Last-captured preview** (CAM-06, IPP-04): on `frame.saved`, a decode job goes to the blocking pool — half-size RAW decode (decoder selected by M2-T01; M1 handles only the simulator's FITS) → quarter-res RGB → asinh auto-stretch (fixed algorithm in Phase 1; the STF options come with the post-chain) → JPEG (quality 85) → cached as `<session>/preview/light_<id>.jpg` and pushed once on the bus.
 
 Decode jobs are a queue of depth 1 with replace semantics: if frames arrive faster than decode, only the newest is previewed (previews are ephemeral; raw frames are what matters).
 
@@ -398,6 +435,8 @@ All routes under bearer auth (§4.5); tier annotations present from Phase 1 (enf
 | `/api/camera/battery`, `/storage` | GET | read | BatteryStatus / StorageInfo |
 | `/api/session/current` | GET | read | session.json view + frame list |
 | `/api/session/frames/{id}/preview.jpg` | GET | read | cached preview image |
+| `/api/transfer/status` | GET | read | → queue depth, oldest age, last ack, link state (§5.10.4) |
+| `/stack/*` | any | pass-through | reverse proxy to the stack node, auth forwarded (ADR-07); WS upgrades proxied too, so the operator keeps a single origin |
 | `/ws` | GET | read | WS upgrade — control/status events (JSON only); subscribe message selects topics |
 | `/ws/liveview` | GET | read | WS upgrade — binary JPEG frames only (live view + previews); separate socket so a large frame can never head-of-line-block control traffic (§8.3) |
 
@@ -415,13 +454,210 @@ Registered before the normal middleware stack (auth only, no JSON parsing — em
 
 One task serving two endpoints per client (§8.3 separation): `/ws` for JSON control/status events, `/ws/liveview` for binary image frames. Per-client bounded queues: on `/ws`, 64 events with a latest-only slot for `mount.position` (high-rate telemetry coalesces, discrete events never dropped while under bound); on `/ws/liveview`, a depth-1 replace queue — only the newest frame is ever in flight. Client subscribe/unsubscribe messages filter topics server-side. Reconnect is client-driven (PWA auto-reconnect, REL-10); on `/ws` connect the hub sends a state snapshot (current status of every stateful topic) so the UI never renders from partial state. Every outbound event carries `ts`, and the hub answers `ping` frames immediately — the PWA derives link RTT and telemetry age from these (§8.3).
 
-### 5.9 PWA (Phase 1 scope)
+### 5.9 PWA (M1 scope)
 
 React + TypeScript, Vite build, output embedded in the binary via `include_dir!`. State: a thin store fed exclusively by WS events + snapshot (no REST polling); commands are REST calls that optimistically do nothing — UI state changes only when the corresponding event arrives (single source of truth). Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state (a tracking mount's motion is exactly predictable), rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
 
+### 5.10 Transfer agent (`astroctl-transfer`)
+
+Durable, resumable delivery of frames to the stacking server. The invariant is that the frame
+is already durable locally before the agent ever sees it (§5.3.2, REL-05) — the agent can
+therefore fail, restart, or stay offline indefinitely without endangering data.
+
+#### 5.10.1 Journal and state machine
+
+One SQLite database, `<queue_dir>/transfer.db`, WAL mode, single writer:
+
+```sql
+CREATE TABLE queue (
+  frame_id     TEXT PRIMARY KEY,      -- light_00042
+  session_id   TEXT NOT NULL,
+  path         TEXT NOT NULL,         -- absolute; frame lives in the session dir, not copied
+  sha256       TEXT NOT NULL,
+  size_bytes   INTEGER NOT NULL,
+  state        TEXT NOT NULL,         -- queued | uploading | acked | failed
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  queued_ts    TEXT NOT NULL,
+  acked_ts     TEXT,
+  reclaimable  INTEGER NOT NULL DEFAULT 0
+);
+```
+
+Frames are **referenced, never copied** into a spool: `queue_dir` holds only the journal. This
+keeps the write-once frame the single copy on the field node (REL-11) and makes enqueue O(1).
+
+State transitions: `queued → uploading → acked`, with `uploading → queued` on any failure.
+`failed` is terminal and requires operator action; it is reached only when the stack node
+returns a *definitive* rejection (checksum mismatch after re-read, or a 4xx that is not 408/429).
+Transport failure is never terminal — an unreachable stack is a normal operating state.
+
+#### 5.10.2 Upload loop
+
+Single task, one upload in flight (ordering matters for the operator's mental model, and
+concurrency buys nothing on a constrained tunnel):
+
+```
+subscribe frame.saved ─► insert row (queued) ─► notify uploader
+uploader: pick oldest queued ─► mark uploading ─► POST multipart to stack /api/ingest
+          ─► on 200 {sha256, stored}: verify echoed sha == ours
+                 ─► mark acked, reclaimable=1, emit transfer.acked
+          ─► on transport error / 5xx / timeout: mark queued, attempts+=1, backoff
+```
+
+Backoff is capped exponential from `stacking_server.retry_interval` (config), doubling to a
+5-minute ceiling. **One** `alert` is emitted when the link transitions to offline and one when
+it recovers — never per attempt; a night-long outage must not produce thousands of events.
+
+#### 5.10.3 Restart recovery and reclaim
+
+On startup the agent scans for `uploading` rows and returns them to `queued`: re-upload is
+always safe because ingest deduplicates by `(frame_id, sha256)` (§5.11.2). A crash mid-upload
+therefore costs one retransmission, never a lost or duplicated frame.
+
+`reclaimable=1` is *marking only*. No deletion path exists in this increment — REL-13's retention
+policy (operator-configured, opt-in) is designed in SDD v1.3.x. The flag is the durable record
+that the archive of record has the frame.
+
+#### 5.10.4 Interface
+
+`GET /api/transfer/status` → `{state, queue_depth, oldest_queued_age_s, last_ack_ts, attempts_current}`;
+the same data is pushed as `transfer.status` events so the PWA never polls. Pacing (§8.3.7) is a
+binding rule on this element but its implementation lands with Phase 2b; the config keys exist
+from M1 (PRD §8.1 `stacking_server.pacing`) and are parsed and validated but not yet enforced —
+a deviation that must be removed, not forgotten, when 2b lands.
+
+### 5.11 Stack ingest and session mirror (`astroctl-stack`)
+
+The receiving half of ADR-05. Its contract is narrow and absolute: **an ack means the bytes are
+on the stack node's disk, fsynced, and their checksum matched.**
+
+#### 5.11.1 Route table (M1 scope, stack node `:8471`)
+
+| Route | Method | Body → Response |
+|-------|--------|-----------------|
+| `/api/system/health` | GET | → `{status, disk_free_gb, versions, worker: {state, restarts}}` |
+| `/api/ingest` | POST | multipart: `meta` (JSON: session_id, frame_id, sha256, size, capture params) + `frame` (binary) → `{sha256, stored: true, duplicate: bool}` |
+| `/api/stacking/stats` | GET | → `{session_id, frame_count, last_ingest_ts, last_preview_ts}` (real statistics arrive in 2b) |
+| `/ws` | GET | WS — JSON status events |
+| `/ws/preview` | GET | WS — binary JPEG previews only (mirrors the field node's `/ws/liveview` split, §8.3(5)) |
+
+All routes under the same bearer-token middleware as the field node (§4.5).
+
+#### 5.11.2 Ingest procedure
+
+```
+stream body → sessions/<sid>/frames/.tmp_<frame_id>   (never buffered whole in RAM)
+  → hash while streaming; compare to meta.sha256
+      mismatch → delete tmp, 422 {code: "CHECKSUM_MISMATCH"}, nothing stored
+  → fsync file → rename to frames/light_<id>.<ext> → fsync dir     ← durable
+  → journal insert → 200 {sha256, stored: true}
+```
+
+Hashing happens *during* the stream, so a corrupt 25 MB upload costs one disk write and no
+second pass. Dedup: if `(frame_id, sha256)` is already `stored`, return `200 {duplicate: true}`
+immediately without touching the file — this is what makes the field agent's blind retry safe.
+A same-`frame_id`-different-`sha256` arrival is a hard error (`FRAME_ID_CONFLICT`), never an
+overwrite; raw frames are immutable here too (REL-11).
+
+Ingest refuses new frames below `storage.disk_critical_free_gb` with `507` and a `DISK_FULL`
+alert, so the field node's queue absorbs the backlog rather than the archive filling (REL-12).
+
+#### 5.11.3 Session mirror and journal
+
+The mirror layout is **byte-for-byte the same structure** as the field node's (§5.5) — this is
+asserted by a fixture test shared between `astroctl-session` and `astroctl-stack`, so the two
+layouts cannot drift. `session.json` on the stack is constructed from ingest metadata rather
+than copied, and tolerates frames arriving in any order or long after the session ended (IPP-15).
+
+`ingest.db` (SQLite, WAL) records every received frame with source and timestamp. It is the
+future authority for REL-13 reclaim decisions and, from 2b, the work list for rebuilds.
+
+### 5.12 Worker IPC and supervision (`astroctl-ipc`)
+
+Per ADR-13: versioned JSON over stdio, frames passed by filesystem path, workers supervised as
+child processes. This channel never crosses the network and never carries pixel data.
+
+#### 5.12.1 Framing and message set (protocol v1)
+
+One JSON object per line on stdin/stdout, UTF-8, newline-delimited; the worker's stderr is
+captured into the backbone's `tracing` output with a `worker` field and is *not* part of the
+protocol. Line framing (not length prefixing) keeps the worker debuggable by hand — a developer
+can pipe messages into `compute_worker.py` from a shell.
+
+```rust
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToWorker {
+    Hello    { proto_version: u16 },
+    Job      { id: u64, kind: JobKind, params: serde_json::Value, paths: Vec<PathBuf> },
+    Cancel   { id: u64 },
+    Ping     { nonce: u64 },
+    Shutdown,
+}
+
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FromWorker {
+    Hello    { proto_version: u16, capabilities: WorkerCaps },  // gpu, vram_mb, libs
+    Progress { id: u64, pct: u8 },
+    Result   { id: u64, ok: bool, data: Option<serde_json::Value>, error: Option<WorkerError> },
+    Pong     { nonce: u64 },
+    Log      { level: String, message: String },
+}
+```
+
+`JobKind` in this increment is `Preview` only. `WorkerError` carries a `code` from a closed enum
+plus a message, so worker failures reach the operator through the same error vocabulary as
+everything else (§4.2).
+
+#### 5.12.2 Handshake
+
+The backbone writes `Hello{proto_version}` and waits for the worker's `Hello`. Version equality
+is required — **not** compatibility ranges. A mismatch is logged with both versions and the
+worker is not used; the supervisor does not retry a version mismatch (retrying a deterministic
+failure is a crash loop). This is the drift detector ADR-13 exists for, and it must fail at
+startup rather than on the first job.
+
+A worker that produces no `Hello` within 10 s is killed and treated as a failed start.
+
+#### 5.12.3 Supervision
+
+```
+spawn(python_interpreter, compute_worker.py) ─► handshake ─► ready
+   │                                                          │
+   ├─ Ping every `health_ping_seconds` (config, default 5)     │
+   │     3 consecutive missed Pongs ──► SIGKILL ──────────────┤
+   ├─ child exit (any cause) ────────────────────────────────►┤
+   └─ job exceeds `job_timeout_seconds` ─► Cancel, then kill ─┘
+                                                              ▼
+                                            restart with capped exponential backoff
+                                            (base `restart_backoff_seconds`, 60 s ceiling)
+```
+
+An in-flight job whose worker dies is retried **once** on the fresh worker, then failed with an
+alert — a job that reliably kills its worker must not become a restart loop. The restart counter
+is exposed in `/api/system/health` and in `stack.status`, because a worker quietly restarting
+every few minutes is the failure mode most likely to go unnoticed.
+
+Capture on the field node is unaffected by any of this by construction: the worker sits behind
+ingest, and ingest acks on durability, not on processing.
+
+#### 5.12.4 The M1 stub worker
+
+`workers/compute_worker.py` implements the handshake and `JobKind::Preview` only: read the frame
+at the given path, asinh-stretch, write a JPEG beside it, return its path. **No stacking math, no
+GPU, no accumulator.** Its dependency list stays minimal (numpy plus a FITS reader) so that
+`workers/requirements.txt` does not acquire the CUDA stack before anything needs it.
+
+The point of the stub is that the machinery around it — spawn, handshake, ping, restart, job
+round-trip, protocol versioning — is exercised end-to-end from the first milestone with compute
+too trivial to hide bugs. When real stacking arrives in 2b, only the inside of this file changes.
+
+A small Python mirror of the message types lives in `workers/astroctl_ipc.py`; it and the Rust
+enums are checked against a shared golden-message fixture (T-IPC-1) so the two definitions cannot
+drift silently.
+
 ---
 
-## 6. Data Design (Phase 1)
+## 6. Data Design (M0–M3)
 
 | Artifact | Format | Written by | Schema highlights |
 |----------|--------|-----------|-------------------|
@@ -431,8 +667,14 @@ React + TypeScript, Vite build, output embedded in the binary via `include_dir!`
 | `control/quality_<id>.json` | JSON v1 | capture flow | ts, exposure, iso, format, sha256, size |
 | `preview/light_<id>.jpg` | JPEG | live view pipeline | ephemeral, regenerable |
 | session log | JSONL of Event | event bus sink | one file per session; rotation not needed (bounded by session) |
+| `<queue_dir>/transfer.db` | SQLite (WAL) | transfer agent | §5.10.1 schema; references frames by path, never copies them |
+| `stacking-server.yaml` | YAML | operator | PRD §8.2; deny-unknown-fields |
+| stack `sessions/<sid>/…` | mirror of the field layout | ingest service | structurally identical to the field node's, asserted by a shared fixture test (§5.11.3) |
+| stack `ingest.db` | SQLite (WAL) | ingest service | received frames, source, timestamps; future authority for REL-13 |
 
-No SQLite on the field node in Phase 1 (first need is the transfer journal, Phase 2b).
+The field node carries exactly **one** SQLite database (the transfer journal) and the stack node
+one (the ingest journal). Both are single-writer with WAL, per ADR-06 and the contention risk in
+ADD §10. Everything else on either node stays human-readable and travels with the data.
 
 ---
 
@@ -447,6 +689,10 @@ No SQLite on the field node in Phase 1 (first need is the transfer journal, Phas
 | watchdog | tokio task | — | bus out, priority lane on serial-loss-while-moving |
 | WS hub | tokio task | client sockets | broadcast in, per-client queues out |
 | event bus | `broadcast` channel | — | capacity 256; lagging receiver ⇒ resync via snapshot |
+| transfer agent | tokio task (field) | `transfer.db`, one in-flight upload | bus in (`frame.saved`), HTTP out, bus out (`transfer.acked`) |
+| ingest handler | tokio tasks (stack) | `ingest.db` (single writer), session mirror | HTTP in, worker job queue out |
+| worker supervisor | tokio task (stack) | child process handles | stdio pipes, job queue in, bus out |
+| compute worker | OS process (Python, stack) | its own memory/GPU context | stdio IPC only (§5.12); crash isolated from the backbone |
 
 Shutdown order (SIGTERM): stop accepting API → abort live view → if capturing, finish download (bounded 120 s) → stop tracking? **No** — tracking state is left as-is (an operator restart of the service mid-session must not stop the mount) → flush session log → exit. This asymmetry (finish camera, don't touch mount) is deliberate: the mount is safe while tracking; a half-downloaded frame is a lost frame.
 
@@ -472,12 +718,12 @@ Consolidated design position on operating over a slow/lossy VPN. The first two a
 4. **Staleness rejection + idempotency** — `issued_at`/`command_id` envelope (§5.8.1): late starts are refused, late stops are always honored, retries are idempotent.
 5. **Connection separation** — safety/control traffic never shares a TCP stream with bulk image data: `/ws` (JSON events) and `/ws/liveview` (binary frames) are distinct sockets, and the e-stop POST uses the browser's separate HTTP connection pool with `keepalive`. A 500 KB JPEG retransmit can therefore never head-of-line-block a stop command or a position update.
 6. **Coalescing telemetry** — latest-only delivery for self-superseding state (§5.8.3); the UI shows the present or a marked prediction, never a replayed past.
-7. **Transfer pacing** *(binding rule for the Phase 2b transfer agent, SDD v1.2.x)* — the frame uploader must (a) enforce a configurable bandwidth cap, and (b) automatically yield: while any operator motion command is active or was issued within the last 10 s, uploads throttle to a configured interactive floor (default 20% of cap). Prevents self-inflicted bufferbloat where a 25 MB CR3 upload queues the operator's commands behind it in the tunnel.
+7. **Transfer pacing** *(binding rule on the §5.10 transfer agent; config keys exist and validate from M1, enforcement lands with Phase 2b — see §5.10.4)* — the frame uploader must (a) enforce a configurable bandwidth cap, and (b) automatically yield: while any operator motion command is active or was issued within the last 10 s, uploads throttle to a configured interactive floor (default 20% of cap). Prevents self-inflicted bufferbloat where a 25 MB CR3 upload queues the operator's commands behind it in the tunnel.
 8. **Predictive display + link-health surfacing** — the PWA dead-reckons between updates and displays RTT/telemetry age (§5.9); degradation is explicit, never silent (PRF-01, USB-11).
 
 ---
 
-## 9. Verification Design (Phase 1)
+## 9. Verification Design (M0–M3)
 
 | ID | Test design | Verifies |
 |----|-------------|----------|
@@ -489,14 +735,17 @@ Consolidated design position on operating over a slow/lossy VPN. The first two a
 | T-STALE-1 | Command staleness: goto with `issued_at` 5 s old → `COMMAND_STALE`, no motion; slew/stop with same age → executed; duplicate `command_id` → original outcome returned, no re-execution | §5.8.1 staleness/idempotency |
 | T-HOL-1 | Connection separation: saturate `/ws/liveview` with frames over a shaped 1 Mbit link; assert `/ws` position events and e-stop POST latency unaffected (≤ 2× baseline) | §8.3(5) |
 | T-CAM-1 | Camera thread against gphoto2 vusb/simulator: capture, settings, timeout-wedge recovery respawn | §5.3.1, REL-03 |
-| T-E2E-1 | Full API-level session against simulator drivers: connect → goto → capture → preview → frame durable; assert event stream shape | Phase 1 exit criteria |
+| T-E2E-1 | Full API-level two-node session against simulator drivers: connect → goto → capture → frame durable → transferred → acked → stub-worker preview returns through the proxy; assert event stream shape | IMP M1 exit criteria |
 | T-DUR-1 | Kill -9 during download / during meta write; on restart assert no partial frame visible, no ID reuse | §5.3.2, §5.5, REL-04/05 |
+| T-XFER-1 | Transfer durability: kill the stack node mid-session (queue grows, capture unaffected, one offline alert not thousands); restart it (queue drains in order, every frame acked exactly once); kill the *field* node mid-upload (row returns to `queued`, frame re-uploaded, journal intact) | §5.10, REL-06/07/13, ARC-11 |
+| T-ING-1 | Ingest contract: bit-flipped upload → `CHECKSUM_MISMATCH`, nothing stored, tmp cleaned; duplicate `(frame_id, sha256)` → `duplicate: true`, one file on disk; same id different sha → `FRAME_ID_CONFLICT`, original untouched; below critical disk → 507 | §5.11.2, REL-11/12, IPP-15 |
+| T-IPC-1 | Worker protocol and supervision: golden-message fixture asserted against **both** the Rust enums and `workers/astroctl_ipc.py`; version mismatch → clean refusal, no retry, no hang; `kill -9` mid-job → restart, job retried once, disruption < 10 s; job that always kills the worker → failed with alert, no restart loop | §5.12, ADR-13, ARC-22 |
 | T-HIL-1 | Hardware-in-loop checklist (real HEQ5 + R10): handshake values vs. EQMOD reference, low-speed slews first, bulb prototype — **first powered milestone, gates Phase 1 completion** | §5.2, §5.3, ADD §10 risks |
 | T-SOAK-1 | 8 h simulator soak: 1 Hz polling + capture every 60 s; assert memory flat ≤ 512 MB steady (PRF-05), no task death | PRF-05, robustness |
 
 Simulators (HAL-11) are first-class: `SimulatorMount` implements realistic slew ramps, settle, and configurable fault injection (timeouts, garbled frames) — fault injection is a constructor parameter so T-SER/T-E2E tests express failure scenarios declaratively.
 
-## 10. Requirements Traceability (Phase 1 elements)
+## 10. Requirements Traceability (M0–M3 elements)
 
 | Requirement | Design element |
 |-------------|----------------|
@@ -504,6 +753,7 @@ Simulators (HAL-11) are first-class: `SimulatorMount` implements realistic slew 
 | HAL-08 | §5.1 probe design |
 | HAL-11 | §9 simulators |
 | MNT-01..08 | §5.2 driver; §5.4 wrapper; §5.8 routes |
+| MNT-12 | §5.1 `guide_pulse` incl. rate; §5.2.2 opcode `P` |
 | MNT-15/16 | §5.4 SafeMount |
 | CAM-01..05 (05 basic), CAM-06, CAM-08 | §5.3, §5.7, §5.8 |
 | IPP-04, IPP-09/10 (Phase 1 subset) | §5.7, §5.5, §6 |
@@ -513,8 +763,13 @@ Simulators (HAL-11) are first-class: `SimulatorMount` implements realistic slew 
 | PRF-01, PRF-04, PRF-05, PRF-12 | §5.2.4, §5.3.1, §7, §5.8.2, T-SOAK-1/T-SER-3 |
 | SEC-01/02 (subset) | §4.5 |
 | USB-03/04/09/10/12 | §5.9 |
+| STK-16, STK-17, ARC-11, REL-06, REL-13 (marking) | §5.10 transfer agent |
+| STK-18, STK-19, STK-20, ARC-08/13, ADR-05/07 | §5.11 routes + §5.8.1 `/stack/*` proxy |
+| IPP-15, REL-07, REL-11/12 (stack side) | §5.11.2, §5.11.3 |
+| ARC-22, CMP-06 (worker-side fallback path), ADR-13 | §5.12 IPC + supervision |
+| USB-06 | `stack.status` / `transfer.status` topics (§4.3), stack panel (§5.9) |
 
-Requirements of later phases trace at architecture level via ADD §11 and will be detailed in the SDD increments of §1.2.
+Requirements of later phases trace at architecture level via ADD §11 and will be detailed in the SDD increments of §1.2. Note that §5.10–5.12 design the *skeleton* these requirements need in M1; the stacking mathematics behind STK-01..15 and the reclaim mechanics of REL-13 arrive with the v1.3.x increment.
 
 ---
 
