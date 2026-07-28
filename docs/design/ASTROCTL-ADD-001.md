@@ -1,15 +1,16 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.2.1
+**Version:** 1.2.2
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.7.0
-**Change note (1.2.1):** Governing-requirements pin advanced to PRD v1.7.0 (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
+**Governing requirements:** ASTROCTL-PRD-001 v1.8.0
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
 **Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
+**Change note (1.2.1):** Governing-requirements pin advanced (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
+**Change note (1.2.2):** Pin advanced to PRD v1.8.0. The erfa risk is now largely retired by build evidence — `erfars` vendors the ERFA C source, so the parity suite tests our usage of the same library astropy wraps, and no system liberfa is involved.
 
 ---
 
@@ -29,7 +30,7 @@ The architecture covers the complete AstroCtl system as specified in the PRD: fi
 
 | Reference | Title |
 |-----------|-------|
-| ASTROCTL-PRD-001 v1.5.0 | AstroCtl Product Requirements Document (governing requirements; all `XXX-nn` IDs cited below refer to it) |
+| ASTROCTL-PRD-001 v1.8.0 | AstroCtl Product Requirements Document (governing requirements; all `XXX-nn` IDs cited below refer to it) |
 | ISO/IEC/IEEE 12207:2017 | Systems and software engineering — Software life cycle processes |
 | ISO/IEC/IEEE 42010:2022 | Software, systems and enterprise — Architecture description |
 

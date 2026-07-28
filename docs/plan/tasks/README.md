@@ -1,6 +1,6 @@
 # AstroCtl — Implementation Task Breakdown
 
-Task files for AI-agent (or human) implementation, derived from ASTROCTL-IMP-001 v1.1.1.
+Task files for AI-agent (or human) implementation, derived from ASTROCTL-IMP-001 v1.1.2.
 One folder per milestone, one file per task. Each milestone folder has a README with the
 milestone goal, exit criteria, and dependency order.
 
@@ -8,10 +8,10 @@ milestone goal, exit criteria, and dependency order.
 
 | Doc | Path | Role |
 |-----|------|------|
-| PRD v1.7.0 | `docs/intent/ASTROCTL-PRD-001.md` | requirements (`XXX-nn` IDs), config schema (§8.1/§8.2 are normative) |
-| ADD v1.2.1 | `docs/design/ASTROCTL-ADD-001.md` | architecture, ADRs, crate boundaries |
-| SDD v1.1.1 | `docs/design/ASTROCTL-SDD-001.md` | detailed design — **the spec for these tasks** |
-| IMP v1.1.1 | `docs/plan/ASTROCTL-IMP-001.md` | milestone strategy, definition of done |
+| PRD v1.8.0 | `docs/intent/ASTROCTL-PRD-001.md` | requirements (`XXX-nn` IDs), config schema (§8.1/§8.2 are normative) |
+| ADD v1.2.2 | `docs/design/ASTROCTL-ADD-001.md` | architecture, ADRs, crate boundaries |
+| SDD v1.1.2 | `docs/design/ASTROCTL-SDD-001.md` | detailed design — **the spec for these tasks** |
+| IMP v1.1.2 | `docs/plan/ASTROCTL-IMP-001.md` | milestone strategy, definition of done |
 
 Every task's **Spec** line names the sections that govern it. If a task cites a section that
 does not exist or does not actually cover the work, stop and fix the document first — building

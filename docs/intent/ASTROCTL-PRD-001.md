@@ -1,10 +1,12 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.7.0  
+**Version:** 1.8.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
+
+**Change note (1.8.0):** §7 re-grounded on build evidence rather than crates.io metadata — every crate was resolved and `cargo check`ed in isolation (`docs/evidence/dependency-survey-2026-07-29.md`). Outcomes: toolchain pin moves to **1.97.1** because `rusqlite` 0.40 does not build on 1.94; **`erfars`** selected for ERFA (it vendors the C source, so `liberfa-dev` is not needed); **`rawler`** selected as the RAW decoder (pure Rust with R10 fixtures, so `libraw-dev` is not needed); **`libudev-dev`** added — `serialport` requires it and nobody had recorded that. System dependencies are now measured, and M2's list is down to `libgphoto2-dev` alone.
 
 **Change note (1.7.0):** §7 dependency table corrected against crates.io as of 2026-07-29, with versions pinned where verified. Three claims did not survive checking: there is **no `sep` crate** (a first-party libsep FFI binding must be written — new risk-register entry); the crate named **`erfa` is a pure-Rust reimplementation, not liberfa bindings** (select `erfars`/`erfa-sys` instead); and **RAW-decode bindings are immature** (`libraw` 0.1.1), so decoder selection moves into the M2-T01 spike. System dependencies are now listed by the milestone that first needs them — M0 requires no C libraries.
 
@@ -993,11 +995,11 @@ Language split per ARC-01: Rust backbone on both nodes; Python confined to super
 | Dependency | Purpose | Notes |
 |-----------|---------|-------|
 | `tokio` **1.53**, `axum` **0.8** | Async runtime, REST + WebSocket backend | |
-| `serialport` **4.9** | Mount serial communication | |
+| `serialport` **4.9** | Mount serial communication | Pulls `libudev-sys`, so it needs **`libudev-dev`** — measured, and previously undocumented. Building with `default-features = false` drops udev but also drops enumeration by USB VID/PID, which MNT-01 auto-detection depends on |
 | `gphoto2` **3.4.1** | Camera control via libgphoto2 bindings | Requires `libgphoto2` system library; CLI subprocess fallback for uncovered operations. Verified current and actively maintained — the ADD §10 top risk is bulb/CR3 *coverage*, not the binding's existence |
-| RAW decoder — **selection deferred to the M2-T01 spike** | CR3 decoding for preview generation | `libraw`/`libraw-sys` are at **0.1.1** (thin bindings); `libraw_rs_vendor` avoids the system-library dependency; `rawler` 0.7.2 and `rawloader` 0.37.1 are mature pure-Rust decoders whose CR3 coverage is unconfirmed. libraw itself definitely handles CR3, so the tradeoff is binding maturity vs. decoder maturity — decide on evidence from a real R10 file, not on crates.io metadata |
+| `rawler` **0.7.2** | CR3 decoding for preview generation | **Selected on build evidence** (`docs/evidence/dependency-survey-2026-07-29.md`): pure Rust, no system library, dedicated CR3/CRX decoder, an R10 camera profile, and R10 regression fixtures across RAW/CRAW/BURST. `rawloader` has no CR3 support at all; `libraw`/`libraw-sys` are at 0.1.1 and would add a `libraw_r` system dependency for nothing. M2-T01 still confirms decode timing and peak RSS on a real file |
 | **First-party FFI over libsep** (no crate exists) | Star detection for guiding, registration, and frame quality assessment | The C Source Extractor library the Python `sep` package wraps. **There is no `sep` crate** — the name on crates.io belongs to unrelated projects and `sxr` is an empty placeholder. A thin in-tree `sep-sys` binding must be written; libsep's API surface is small (background estimation, extraction, aperture photometry). This lands in Phase 2a with the control pipeline and needs its own spike |
-| `erfars` **0.2.0** or `erfa-sys` **0.2.1** — bindings to liberfa | Coordinate transforms, sidereal time, precession/nutation | The same C library underlying astropy's core transforms; CI parity tests against astropy required. **Do not select the crate named `erfa` (0.2.1)** — despite the name it is a pure-Rust *reimplementation*, not a binding, which would make the astropy parity suite a test of someone else's port rather than of our usage. `erfars` gives safe wrappers, `erfa-sys` the raw FFI |
+| `erfars` **0.2.0** | Coordinate transforms, sidereal time, precession/nutation | **Selected on build evidence:** it vendors the ERFA C source (251 `.c` files, built with `cc`) rather than linking a system copy — so it is genuinely the library astropy wraps *and* needs no `liberfa-dev`. CI parity tests against astropy still required. **Do not select the crate named `erfa` (0.2.1)** — despite the name it is a pure-Rust *reimplementation* (0 C files), which would turn the parity suite into a test of someone else's port rather than of our usage. `erfa-sys` is unnecessary now that `erfars` vendors |
 | `fitsio` **0.21.10** | FITS read/write for plate solving I/O, simulator frames, and metadata | Wraps cfitsio; needed from M1 because the simulator camera writes 16-bit FITS |
 | image / ndarray / rayon | Image ops, array math, CPU parallelism (debayer, stretch, PI controller) | |
 | `rusqlite` **0.40** | Durable indexes: transfer journal, calibration library, session index | Use the `bundled` feature — SQLite compiles in, so neither node needs a system SQLite |
@@ -1021,17 +1023,21 @@ Plate solving backends (at least one required):
 
 System-level, listed by the milestone that first needs it — nothing below is required to start M0:
 
+Every entry below was confirmed by isolated build (`docs/evidence/dependency-survey-2026-07-29.md`),
+not inferred from documentation:
+
 | Needed from | Package | For |
 |-------------|---------|-----|
-| M0 | rustup toolchain, Node ≥ 20, npm | backbone + PWA build; no C libraries at all |
+| M0 | rustup toolchain **1.97.1**, Node ≥ 20, npm, a C compiler | backbone + PWA build; no astronomy C libraries at all. `cc` is needed because `rusqlite` compiles bundled SQLite |
 | M1 | `libcfitsio-dev` | `fitsio` — the simulator camera writes 16-bit FITS and the preview decoder reads it |
-| M2 | `libgphoto2-dev` | camera USB access |
-| M2 | `libraw-dev` *(only if the M2-T01 spike selects a libraw-backed decoder)* | CR3 decoding for preview generation |
-| M2 | USB serial driver | usually built into the kernel for PL2303/FTDI/CH340 |
-| Phase 2a | `liberfa-dev` | `erfars`/`erfa-sys` coordinate transforms |
+| M2 | `libgphoto2-dev` | camera USB access — M2's **only** system dependency; `rawler` needs none |
+| M3 | `libudev-dev` | `serialport` port enumeration by USB VID/PID (MNT-01 auto-detect) |
+| M3 | USB serial driver | usually built into the kernel for PL2303/FTDI/CH340 |
 | Phase 2a | `libsep` + headers | the first-party FFI binding for star detection |
 | Phase 2a | `astrometry.net` and/or `astap` | plate solving (see above) |
 | Phase 2b | CUDA toolkit + Python worker venv | stacking server only |
+
+No `liberfa-dev` (erfars vendors ERFA) and no `libraw-dev` (rawler is pure Rust).
 
 Python on the stacking server: the M1 stub worker needs only numpy and a FITS reader. Pin the
 worker venv's interpreter deliberately (config `workers.python_interpreter`) — CuPy and PyTorch

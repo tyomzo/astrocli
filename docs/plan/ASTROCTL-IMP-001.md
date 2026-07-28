@@ -1,12 +1,13 @@
 # AstroCtl — Implementation Plan
 
 **Document ID:** ASTROCTL-IMP-001
-**Version:** 1.1.1
+**Version:** 1.1.2
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
-**Governing documents:** ASTROCTL-PRD-001 v1.7.0, ASTROCTL-ADD-001 v1.2.1, ASTROCTL-SDD-001 v1.1.1
+**Governing documents:** ASTROCTL-PRD-001 v1.8.0, ASTROCTL-ADD-001 v1.2.2, ASTROCTL-SDD-001 v1.1.2
 **Change note (1.1.1):** Governing pins advanced after the dependency survey (PRD v1.7.0). §6 gains the risk that Phase 2a's star detection has no existing Rust binding.
+**Change note (1.1.2):** Pins advanced to PRD v1.8.0 after the crates were actually built (`docs/evidence/dependency-survey-2026-07-29.md`). §6: the RAW-decoder risk is resolved to `rawler` with only speed/memory left to confirm, and a toolchain-drift risk is added — the 1.97.1 pin is a hard floor, not a preference.
 **Change note (1.1.0):** Governing-document pins updated — SDD v1.1.0 now designs the M1 stack-side elements this plan always required (transfer, ingest, worker IPC), so §1's contract table no longer points at deferred design. Auth added as the third declared phase deviation. M0 crate scaffolding now references ADD §5.6 (the complete 14-crate layout, which gained `astroctl-guiding` in ADD v1.2.0) rather than SDD §3 (a subset), and the M0 deliverable list names the stack proxy its exit criterion already assumed.
 
 ---
@@ -149,4 +150,5 @@ Each step keeps the tree green and demoable; the task tree under `docs/plan/task
 | Simulator fidelity too low → real-driver swap surprises | Simulators implement timing behavior (ramps, settle, exposure duration, download delay), not just return values; fault injection from day one |
 | R10 spike fails on bulb (M2) | CLI fallback path is designed (SDD §5.3.3); worst case bulb goes through `gphoto2` binary while everything else stays on bindings |
 | **Phase 2a's star detection has no existing Rust binding** — `sep` is not a crate (PRD §7, §10). Discovered at the start of 2a it costs a spike; discovered mid-pipeline it stalls the control pipeline, registration, and guiding at once | Open Phase 2a with a `sep-sys` FFI spike on the M2-T01 pattern — prove the binding against a real frame before any pipeline design depends on it. libsep's API is small, so this is a bounded task, but it is *unplanned work that currently has no task file* |
-| RAW decoder for CR3 previews is unchosen and its candidates are unproven (PRD §7) | Folded into M2-T01: the spike now measures all four candidates against a real R10 CR3 and records the decision. The M1-T09 `SourceFormat` seam means the choice is additive, not a rewrite |
+| RAW decoder for CR3 previews — **resolved to `rawler` on build evidence** (`docs/evidence/dependency-survey-2026-07-29.md`); residual risk is decode speed and peak RSS on the field node, not correctness | M2-T01 validates it against a real R10 file and on the target hardware; PRF-05 is the gate. The M1-T09 `SourceFormat` seam keeps the choice additive if it has to be revisited |
+| Toolchain drift between workstation, field node and CI | `rust-toolchain.toml` pins **1.97.1** exactly (M0-T01). The floor is real, not cosmetic: `rusqlite` 0.40 does not build on 1.94, which is what the workstation defaulted to when the pack was written |
