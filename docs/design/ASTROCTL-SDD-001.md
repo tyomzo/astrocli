@@ -782,17 +782,18 @@ Three consequences worth stating explicitly, because each is easy to get wrong:
    slash** when not — so the distinction survives both night mode and the operator. Tapping an
    unavailable badge explains why rather than doing nothing.
 
-```
-   summoned D-pad, over the image        badge states
-│                      │              ╭───╮   filled  → available
-│      LIVE VIEW       │              │ ⊕ │   (green, but the shape carries it)
-│         ┌────┐       │              ╰───╯
-│      ┌──┼ N  ┼──┐    │              ╭╌╌╌╮   hollow + slash → unavailable
-│      │W │    │ E│    │              ┆ ⊘ ┆   (mount down / goto in flight /
-│      └──┼ S  ┼──┘    │              ╰╌╌╌╯    axis at a limit) — tap explains
-│         └────┘  ╭───╮│
-│    ●●●○○ speed  │ ✕ ││
-```
+   ```
+      summoned D-pad, over the image        badge states
+   │                      │              ╭───╮   filled  → available
+   │      LIVE VIEW       │              │ ⊕ │   (green, but the shape carries it)
+   │         ┌────┐       │              ╰───╯
+   │      ┌──┼ N  ┼──┐    │              ╭╌╌╌╮   hollow + slash → unavailable
+   │      │W │    │ E│    │              ┆ ⊘ ┆   (mount down / goto in flight /
+   │      └──┼ S  ┼──┘    │              ╰╌╌╌╯    axis at a limit) — tap explains
+   │         └────┘  ╭───╮│
+   │    ●●●○○ speed  │ ✕ ││
+   ```
+
 3. **The target region is a slot with a stable contract.** In M1 it holds manual RA/DEC entry.
    Phase 2a's catalog (PLN-03/04) drops into the same slot without restructuring anything around
    it — it changes how a target is *chosen*, not what the rest of the UI does with one.
@@ -825,13 +826,13 @@ first-class screen real estate rather than a queue-depth badge.
 └────────────────┴─────────────────────────────────────────────┘
 ```
 
-The tablet target column carries the stack statistics deliberately: both answer "what is this
-session doing", and keeping them together leaves the image surface uninterrupted — which is the
-same reason the D-pad goes on top of the image rather than beside it.
-
 They answer different questions at different times — live view is for framing and focus, the stack
 is for "is this working" — so the app switches to `STACK` when a capture sequence starts, and the
 operator can switch back at will.
+
+The tablet target column carries the stack statistics deliberately: both answer "what is this
+session doing", and keeping them together leaves the image surface uninterrupted — which is the
+same reason the D-pad goes on top of the image rather than beside it.
 
 **The stack view is a slot with a stable contract**, exactly like the target region:
 
