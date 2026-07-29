@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.11.2
+**Version:** 1.12.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.15.2 (requirements), ASTROCTL-ADD-001 v1.4.1 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.16.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -48,6 +48,8 @@
 **Change note (1.11.1):** the nudge control is **summoned, never automatic** — a badge in the bottom-right of the image surface that expands only on tap. Auto-expanding on slew completion contradicted the decision to overlay the image: it covers the frame the operator waited through the slew to see. The badge also signals availability before it is tapped, encoded **redundantly** rather than by colour alone, since night mode collapses hues toward red and a green/red badge becomes red/red.
 
 **Change note (1.11.2):** §5.9's layout consolidated into three sketches — the three phone destinations, the summoned D-pad with its two badge states, and the tablet arrangement — replacing the partial ones accumulated while the design was being worked out. Added the four-slot table (target chooser, stack controls, rebuilding indicator, nudge availability) stating what M1 builds and what 2a/2b/2c fill, so the boundary between fixed layout and deferred content is explicit rather than inferred. M1-T04 and M1-T14 now point at it directly.
+
+**Change note (1.12.0):** §5.9's target-platform paragraph named the three Android capabilities the PWA relies on without recording that all three require a **secure context**. Added, with the trap that makes it worth stating: every one of them works on `http://localhost` and none work on a phone over the VPN, so a capability check passing on the workstation says nothing about the field. Found by testing M0-T06 on a real phone after it reported the shell working. Also records that an expired certificate revokes the secure context as thoroughly as a missing one, which is why SEC-07 puts expiry in the health payload.
 
 ---
 
@@ -704,6 +706,24 @@ things worth having: the **Screen Wake Lock API**, so the display does not sleep
 the operator watches live view; `beforeinstallprompt` for a real install flow rather than a
 share-sheet instruction; and reliance on service-worker cache persistence, which iOS evicts after
 about seven days of non-use and would otherwise have made USB-10's promise quietly conditional.
+
+**All three of those capabilities require a secure context, which is why SEC-05 makes TLS a Must
+rather than a hardening option.** Chrome exposes `navigator.wakeLock`, service-worker registration
+and `beforeinstallprompt` only on HTTPS or `localhost`. Being inside a VPN does not qualify — the
+origin is what the browser judges, and `http://` over a tunnel is still an insecure origin. The
+practical consequences for anyone working on the frontend:
+
+- **`localhost` is a false positive.** Every one of these works when the developer opens
+  `http://localhost:8470/`, and none of them work on the phone over the VPN. A capability check
+  that passes on the workstation says nothing about the field. This was found by testing on a real
+  phone after M0-T06 reported the shell working, and it is the reason the four device gates in
+  that task can only be honestly run over TLS.
+- **Degrade, do not assume.** Report each capability's actual state rather than presuming it —
+  M0-T06's device card is the pattern. `navigator.wakeLock` being `undefined` is a normal
+  condition on an insecure origin, not a browser too old to support the app.
+- **An expired certificate revokes the secure context** exactly as a missing one does, silently
+  disabling the wake lock and the installed app. SEC-07 puts expiry in the health payload for
+  this reason; the UI should surface it as a real warning, not a diagnostic detail.
 
 **Colour architecture — decided at M0 even though night mode is Phase 4.** All colour resolves
 through semantic CSS custom properties (`--surface`, `--fg`, `--accent`, `--warn`, `--danger`),

@@ -1,12 +1,12 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.4.1
+**Version:** 1.5.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.15.2
+**Governing requirements:** ASTROCTL-PRD-001 v1.16.0
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
 **Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
 **Change note (1.2.1):** Governing-requirements pin advanced (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
@@ -27,6 +27,8 @@
 **Change note (1.4.0):** ADR-12 extended — Android/Chrome is the supported PWA target and the iOS-compatible-subset discipline is recorded as rejected, with reasons. Paying its cost would have bought an option nobody holds while giving up Screen Wake Lock, which matters when the operator watches a live view for minutes at a time.
 
 **Change note (1.4.1):** §5.6 records a watch item — rules 5 and the core/axum boundary together leave the two binaries with no shared home for HTTP-layer code, so ~700 lines are duplicated. Fine at M0 size; if M1 grows it, an `astroctl-api` crate between core and the binaries closes the drift risk without violating any rule.
+
+**Change note (1.5.0):** §4's context diagram already showed `HTTPS/WSS` on the operator link but never said where TLS terminates or why it was not optional. Both are now recorded: termination is **in `astroctl-field`**, because a cloud proxy would put a WAN round trip in front of every live-view frame on the cellular link the two-node split exists to work around (and contradicts ARC-06), while a sidecar adds a second process to supervise on a Pi already running the mount and camera. The reason it is mandatory is browser secure-context gating of wake lock, service workers and installability — not confidentiality, which the VPN already provides. Aligns with PRD 1.16.0's SEC-05/06/07/08.
 
 ---
 
@@ -109,6 +111,19 @@ Operator PWA ──HTTPS/WSS (VPN)──► astroctl-field ──HTTP/WS (VPN)�
                                   (mount) (camera)                 workers  /data archive
                                                                    (IPC, supervised)
 ```
+
+**TLS terminates in `astroctl-field`, not in front of it** (SEC-05). The obvious alternatives both
+break something the architecture depends on: a cloud reverse proxy puts a WAN round trip in front
+of every live-view frame and every event, on the cellular link the two-node split exists to work
+around, and it contradicts ARC-06's standalone operation; a local proxy sidecar adds a second
+process to supervise on a Pi that already runs the mount and camera. The field node is the only
+process that must be up for the system to function, so it is the right place for the certificate.
+
+The reason this is `HTTPS` rather than an option is not confidentiality — the VPN already provides
+that. It is that browsers gate the Screen Wake Lock API, service-worker registration and
+`beforeinstallprompt` behind a *secure context*, and a tunnelled `http://` origin does not qualify.
+USB-09 and USB-10 are therefore unreachable without it. The field↔stack hop stays plain HTTP
+(SEC-09): no browser is involved, so nothing is gated.
 
 ---
 

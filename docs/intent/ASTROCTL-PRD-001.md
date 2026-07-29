@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.15.2  
+**Version:** 1.16.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -35,6 +35,8 @@
 **Change note (1.15.1):** the `disk_*_free_gb` thresholds now state their unit — GiB, 2^30 bytes, matching `df -h`. The unit was never defined and 10^9 versus 2^30 differ by 7%, which is not acceptable ambiguity on a threshold that pauses capture. Surfaced by M0-T05.
 
 **Change note (1.15.2):** Phase 2a's target catalog is noted as filling the target slot M1 already builds (SDD §5.9) rather than arriving as new layout. PLN-03/04 stay in 2a; only the shell shape is settled early.
+
+**Change note (1.16.0):** **TLS on the operator↔field connection promoted from a "Could" to a Must**, and the reason recorded, after testing the M0-T06 PWA on a real Android phone over the LAN. Chrome gates the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 were unreachable over plain HTTP at any address other than `localhost` — and a VPN does not substitute, because the browser judges the origin and a tunnelled `http://` origin is still insecure. SEC-05 previously called TLS optional while ADD §4 already drew `HTTPS/WSS` on that link; the two now agree. New: SEC-06 (issuance must not require inbound exposure — DNS-01 or an externally issued certificate, so SEC-01 holds), SEC-07 (certificate expiry in `/api/system/health`, because an expired certificate revokes the secure context exactly as a missing one does), SEC-08 (the hostname must resolve through the VPN's DNS, or the UI becomes unreachable precisely when the field node runs standalone — defeating ARC-06). Inter-node TLS stays optional as SEC-09; no browser is involved on that path. §8.1 deliberately does **not** yet carry the `server.tls` block: a drift test holds the PRD schema, the shipped example and the config struct identical, and the config denies unknown fields, so the schema moves in M0-T09 with the implementation rather than ahead of it. An absent block will mean plain HTTP; an unreadable one a startup failure, never a silent downgrade.
 
 ---
 
@@ -1001,8 +1003,8 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 | USB-06 | Stacking server status shows: connected/disconnected, queue depth, current stack frame count, last preview timestamp |
 | USB-07 | UI is fully functional over VPN from a device not co-located with the rig — all controls, previews, and status work remotely with no degradation beyond network latency |
 | USB-08 | Responsive layout: single-column on phone, multi-panel on tablet/desktop — all functionality accessible on both form factors |
-| USB-09 | PWA manifest with app name, icon set, theme color, and display: standalone — installable to the home screen on **Android** (the supported and tested target; iOS may work but is untested and not gated). Android's `beforeinstallprompt` is used for a real install flow |
-| USB-10 | Service worker caches the UI shell (HTML, JS, CSS, fonts, icons) so the app opens instantly even if the VPN tunnel is still connecting — data loads when connectivity is established |
+| USB-09 | PWA manifest with app name, icon set, theme color, and display: standalone — installable to the home screen on **Android** (the supported and tested target; iOS may work but is untested and not gated). Android's `beforeinstallprompt` is used for a real install flow. **Requires a secure context (SEC-05)** — Chrome does not offer installation over plain HTTP |
+| USB-10 | Service worker caches the UI shell (HTML, JS, CSS, fonts, icons) so the app opens instantly even if the VPN tunnel is still connecting — data loads when connectivity is established. **Requires a secure context (SEC-05)** — service workers do not register over plain HTTP |
 | USB-11 | Live view and stacking preview degrade gracefully over lower-bandwidth VPN links (adaptive JPEG quality, reduced frame rate) |
 | USB-12 | Touch-optimized controls: D-pad buttons, sliders, and capture button sized for finger interaction (minimum 44×44px tap targets) |
 
@@ -1027,7 +1029,11 @@ The VPN is the trust boundary: AstroCtl services are never exposed to the public
 | SEC-02 | Token-based authentication on all REST and WebSocket endpoints on both nodes (shared token per node, supplied via environment variable) | Must |
 | SEC-03 | LLM tier enforcement is server-side: medium/high-tier endpoints require a confirmation token issued on explicit operator approval; the API rejects unconfirmed calls regardless of caller — tiers cannot be bypassed by the agent, a prompt injection, or a buggy client | Must |
 | SEC-04 | Secrets (LLM API keys, auth tokens) are supplied via environment variables, never stored in the main config file or written to logs | Must |
-| SEC-05 | Optional TLS on browser and inter-node connections for transports the operator doesn't fully trust | Could |
+| SEC-05 | **TLS on the operator↔field-node connection, terminated by the field node itself.** Not a hardening option: browsers gate the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 are unreachable over plain HTTP at any address other than `localhost`. A VPN does not help — a tunnelled `http://` origin is still insecure to the browser. The certificate must be one the operator's device already trusts (a real certificate for a name the operator controls), because a warning interstitial and a secure context are mutually exclusive | Must |
+| SEC-06 | Certificate acquisition must not require inbound exposure of the field node — DNS-01 or an externally issued certificate copied to the node, never HTTP-01 or port forwarding, so SEC-01 holds | Must |
+| SEC-07 | The field node reports its certificate's expiry in `/api/system/health` and warns before it lapses. An expired certificate revokes the secure context exactly as a missing one does, so it disables wake lock and the installed app — a failure the operator must not discover in the dark. **§8.1 gains the `server.tls` block in M0-T09**, together with the config struct and the shipped example: the three are held identical by a drift test and the config denies unknown fields, so a schema entry landing ahead of the implementation would ship an example the binary refuses to parse | Must |
+| SEC-08 | The operator-facing hostname resolves without internet access, via the VPN's own DNS rather than the public zone. Public-DNS-only resolution would make the UI unreachable precisely when the field node is operating standalone, defeating ARC-06 | Must |
+| SEC-09 | TLS on the field↔stack inter-node connection remains optional, for transports the operator doesn't fully trust. No browser is involved on that path, so no secure context is at stake | Could |
 
 ## 7. Technical Dependencies
 
