@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.11.1
+**Version:** 1.11.2
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -46,6 +46,8 @@
 **Change note (1.11.0):** the accumulating stack is promoted from a status readout to a **primary view**. PRD §2 promises "immediate visual feedback as signal accumulates" — that is the payoff the two-node architecture exists for, and filing it under status was wrong. `FRAME` and `STACK` are now two sources sharing one image surface, switching to `STACK` when a sequence starts. The stack view is a slot like the target region: no knobs in M1 (the stub worker does no stacking), stats and the first controls in 2b, the post-chain in 2c. Also specifies the **rebuilding state**: IPP-16 re-stacks in the background while the preview keeps serving the pre-rebuild image, so a knob change correctly does nothing visible for a while and looks like a bug unless the panel says so.
 
 **Change note (1.11.1):** the nudge control is **summoned, never automatic** — a badge in the bottom-right of the image surface that expands only on tap. Auto-expanding on slew completion contradicted the decision to overlay the image: it covers the frame the operator waited through the slew to see. The badge also signals availability before it is tapped, encoded **redundantly** rather than by colour alone, since night mode collapses hues toward red and a green/red badge becomes red/red.
+
+**Change note (1.11.2):** §5.9's layout consolidated into three sketches — the three phone destinations, the summoned D-pad with its two badge states, and the tablet arrangement — replacing the partial ones accumulated while the design was being worked out. Added the four-slot table (target chooser, stack controls, rebuilding indicator, nudge availability) stating what M1 builds and what 2a/2b/2c fill, so the boundary between fixed layout and deferred content is explicit rather than inferred. M1-T04 and M1-T14 now point at it directly.
 
 ---
 
@@ -733,19 +735,27 @@ it occupies screen space for the 95% of a session when nobody touches it.
 The session FSM (§5.6) already knows which state the system is in, so the UI follows it.
 
 ```
-  IDLE — no target yet                    ON TARGET
-┌──────────────────────────┐   ┌───────────────┬──────────────────────┐
-│ TARGET                   │   │ M42           │                      │
-│ ┌──────────────────────┐ │   │ Orion Nebula  │     LIVE VIEW        │
-│ │ RA   __:__:__        │ │   │               │       ┌───┐          │
-│ │ DEC ±__°__'__"       │ │   │ alt 47° ↑     │     ┌─┼─N─┼─┐        │
-│ │        [ GOTO ]      │ │   │ transit 1h20  │     │W│   │E│ ←D-pad │
-│ └──────────────────────┘ │   │ RA  05:35:17  │     └─┼─S─┼─┘  OVER  │
-│                          │   │ DEC -05°23'   │       └───┘  the img │
-│  ← the catalog picker    │   │               ├──────────────────────┤
-│    (PLN-03, Phase 2a)    │   │ [ change ]    │ ⊕nudge ISO1600 30s   │
-│    replaces this box     │   │               │ RAW     [ CAPTURE ]  │
-└──────────────────────────┘   └───────────────┴──────────────────────┘
+   TARGET                      FRAME                       STACK
+┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
+│ ●mnt ●cam ○stk 21:14 │  │ ●mnt ●cam ○stk 21:14 │  │ ●mnt ●cam ●stk 21:14 │
+│               [STOP] │  │               [STOP] │  │               [STOP] │
+├──────────────────────┤  ├──────────────────────┤  ├──────────────────────┤
+│ TARGET               │  │ M42 Orion   alt 47°↑ │  │ M42 Orion   alt 47°↑ │
+│ ┌──────────────────┐ │  ├──────────────────────┤  ├──────────────────────┤
+│ │ RA   __:__:__._  │ │  │                      │  │                      │
+│ │ DEC ±__°__'__"   │ │  │                      │  │  ACCUMULATING STACK  │
+│ │                  │ │  │      LIVE VIEW       │  │                      │
+│ │    [  GOTO  ]    │ │  │                      │  │                      │
+│ └──────────────────┘ │  │                      │  ├──────────────────────┤
+│   ↑ 2a: catalog      │  │              ╭───╮   │  │ 47 fr · 23m30s · q3  │
+│     replaces this    │  │              │ ⊕ │   │  │ FWHM 3.1" ↓          │
+│                      │  │              ╰───╯   │  │ ┌──────────────────┐ │
+│ now  05:34:32.1 ~    │  ├──────────────────────┤  │ │ (2b: knobs land  │ │
+│      +22°00'52"      │  │ ISO1600 30s RAW      │  │ │  in here)        │ │
+│      alt 47° az 128° │  │          [ CAPTURE ] │  │ └──────────────────┘ │
+├──────────────────────┤  ├──────────────────────┤  ├──────────────────────┤
+│ ◎target ▣frame ⛁stack│  │ ◎target ▣frame ⛁stack│  │ ◎target ▣frame ⛁stack│
+└──────────────────────┘  └──────────────────────┘  └──────────────────────┘
 ```
 
 Three consequences worth stating explicitly, because each is easy to get wrong:
@@ -771,6 +781,18 @@ Three consequences worth stating explicitly, because each is easy to get wrong:
    must therefore be encoded redundantly — a **filled** badge when available, **hollow with a
    slash** when not — so the distinction survives both night mode and the operator. Tapping an
    unavailable badge explains why rather than doing nothing.
+
+```
+   summoned D-pad, over the image        badge states
+│                      │              ╭───╮   filled  → available
+│      LIVE VIEW       │              │ ⊕ │   (green, but the shape carries it)
+│         ┌────┐       │              ╰───╯
+│      ┌──┼ N  ┼──┐    │              ╭╌╌╌╮   hollow + slash → unavailable
+│      │W │    │ E│    │              ┆ ⊘ ┆   (mount down / goto in flight /
+│      └──┼ S  ┼──┘    │              ╰╌╌╌╯    axis at a limit) — tap explains
+│         └────┘  ╭───╮│
+│    ●●●○○ speed  │ ✕ ││
+```
 3. **The target region is a slot with a stable contract.** In M1 it holds manual RA/DEC entry.
    Phase 2a's catalog (PLN-03/04) drops into the same slot without restructuring anything around
    it — it changes how a target is *chosen*, not what the rest of the UI does with one.
@@ -783,19 +805,29 @@ first-class screen real estate rather than a queue-depth badge.
 `FRAME` and `STACK` are therefore **two sources sharing one image surface**, not two panels:
 
 ```
-┌───────────────┬──────────────────────────────────────────┐
-│ M42           │           [ FRAME │ STACK ]              │
-│ Orion Nebula  │  ┌────────────────────────────────────┐  │
-│ alt 47° ↑     │  │                                    │  │
-│ transit 1h20  │  │       accumulating stack           │  │
-│               │  │                                    │  │
-│ ── STACK ──   │  └────────────────────────────────────┘  │
-│ 47 frames     │  stretch ▁▃▅   σ-clip 2.5/3.0  [apply]   │
-│ 23m30s integ  │                                          │
-│ queue 3       ├──────────────────────────────────────────┤
-│ FWHM 3.1" ↓   │ ⊕nudge   ISO1600 30s RAW    [ CAPTURE ]  │
-└───────────────┴──────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ ●mount ●camera ●stack    LST 21:14   RTT 18ms       [ STOP ] │
+├────────────────┬─────────────────────────────────────────────┤
+│ M42            │             [ FRAME │ STACK ]               │
+│ Orion Nebula   │  ┌───────────────────────────────────────┐  │
+│                │  │                                       │  │
+│ alt 47° ↑      │  │            image surface              │  │
+│ transit 1h20   │  │                                       │  │
+│ RA  05:35:17   │  │                             ╭───╮     │  │
+│ DEC -05°23'    │  └─────────────────────────────╰─⊕─╯─────┘  │
+│                │  ( 2b: stretch ▁▃▅  σ-clip 2.5/3.0 [apply] )│
+│ ── STACK ──    │  ( re-stacking 34/120 ▓▓▓▓░░░░  ← IPP-16 )  │
+│ 47 frames      ├─────────────────────────────────────────────┤
+│ 23m30s integ   │  ISO 1600    30s    RAW        [ CAPTURE ]  │
+│ queue 3        │                                             │
+│ FWHM 3.1" ↓    │                                             │
+│ [ change ]     │                                             │
+└────────────────┴─────────────────────────────────────────────┘
 ```
+
+The tablet target column carries the stack statistics deliberately: both answer "what is this
+session doing", and keeping them together leaves the image surface uninterrupted — which is the
+same reason the D-pad goes on top of the image rather than beside it.
 
 They answer different questions at different times — live view is for framing and focus, the stack
 is for "is this working" — so the app switches to `STACK` when a capture sequence starts, and the
@@ -824,6 +856,18 @@ Phone navigation is therefore three concerns rather than five subsystems: **Targ
 at), **Frame** (acquire) and **Stack** (the result). Connection status and alerts live in the
 header where USB-04 already puts them. On tablet all three are visible at once and the navigation
 disappears.
+
+**Four slots, so later phases fill structure rather than replace it.** Everything else in the
+layout is fixed from M0 — e-stop top-right on every screen, status and LST in the header, the image
+surface as the persistent centre, nudge bottom-right, 60–70 px primary targets, semantic tokens
+with the night-mode override.
+
+| Slot | M1 | Phase 2a | Phase 2b / 2c |
+|------|----|----------|----------------|
+| Target chooser | manual RA/DEC entry | catalog picker (PLN-03/04) | — |
+| Stack controls | nothing — the stub worker does no stacking | — | knobs (IPP-07), then post-chain (PPR-*) |
+| Rebuilding indicator | reserved, never fires | — | fires on every knob change (IPP-16) |
+| Nudge availability | connected / disconnected | + goto in flight | + axis at limit |
 
 **Connect flow.** Before each `WebSocket` construction — the first and every reconnect — the PWA
 POSTs `/api/auth/ws-ticket` with its bearer token and opens the socket with the returned ticket
