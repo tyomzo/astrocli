@@ -1,0 +1,97 @@
+/*
+ * Semantic colour tokens — SDD §5.9 "Colour architecture", PRD USB-01/USB-02.
+ *
+ * THIS IS THE ONLY FILE IN THE APPLICATION THAT MAY CONTAIN A LITERAL COLOUR.
+ *
+ * Enforced mechanically:
+ *
+ *     grep -rE '#[0-9a-fA-F]{3,6}' src --include=*.tsx     → must return nothing
+ *
+ * Everything else names a token. That is what makes USB-02's night mode a change to the second
+ * block below instead of a pass over every component — and the reason it is written at M0, when
+ * there are four components, rather than in Phase 4 when there are forty. A token layer with only
+ * one theme is a token layer nobody trusts, so the override ships now even though the styling
+ * work it enables does not.
+ *
+ * Two literals live outside this file and cannot be moved into it: `<meta name="theme-color">` in
+ * index.html and `theme_color`/`background_color` in the web manifest. The browser reads both
+ * before any stylesheet exists, so neither can resolve a custom property. They track `--surface`
+ * by hand; if that changes, change them too.
+ *
+ * # Reading the palette
+ *
+ * Surfaces are TRUE BLACK, not dark grey (SDD §5.9): better on the OLED panels these phones have,
+ * and better for dark adaptation. `--surface-raised` is barely off black on purpose — the
+ * separation an operator needs outdoors comes from `--border`, not from a luminance step that
+ * only reads indoors.
+ *
+ * # Night mode
+ *
+ * `:root[data-mode="night"]` collapses every hue toward red at low luminance. Note what that does
+ * to `--ok` and `--danger`: they become two shades of the same red. This is not a defect of the
+ * palette, it is the reason SDD §5.9 requires state to be encoded redundantly — shape or glyph
+ * first, colour second. A component that distinguishes two states by colour alone is correct in
+ * the default theme and broken here, which is exactly why the override exists at M0.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --surface: #000000;
+  --surface-raised: #0b0b0e;
+  --surface-overlay: #16161b;
+  --border: #2a2a31;
+  --border-strong: #47474f;
+
+  /* Foreground */
+  --fg: #e8e8ec;
+  --fg-muted: #9b9ba5;
+  --fg-faint: #64646d;
+
+  /* Status. `--accent` is the interactive/informational hue; the rest are states. */
+  --accent: #58a6ff;
+  --on-accent: #03121f;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --danger: #f85149;
+  --on-danger: #140202;
+
+  /* Focus ring. Separate from `--accent` so a future theme can make it louder without making
+     every link louder — a keyboard or D-pad user needs to find focus outdoors. */
+  --focus: #58a6ff;
+
+  /* Applied to image surfaces (live view, stack preview) by M1-T09/M1-T14. Defined here rather
+     than in those panels because it is a theme decision, not a panel decision: night mode has to
+     be able to change it in one place, and SDD §5.9 requires filtering the one greyscale-white
+     thing on screen or night mode protects nothing. */
+  --image-filter: none;
+}
+
+:root[data-mode='night'] {
+  color-scheme: dark;
+
+  --surface: #000000;
+  --surface-raised: #0c0202;
+  --surface-overlay: #180505;
+  --border: #3c1010;
+  --border-strong: #5e1a1a;
+
+  --fg: #e04a35;
+  --fg-muted: #a13727;
+  --fg-faint: #6b241a;
+
+  --accent: #ff5a3c;
+  --on-accent: #150200;
+  --ok: #c8402c;
+  --warn: #ff7a45;
+  --danger: #ff2d1a;
+  --on-danger: #1a0000;
+
+  --focus: #ff7a45;
+
+  /* Red channel only, at roughly half brightness. A stretched star field is greyscale-white, so
+     an unfiltered preview destroys 20–30 minutes of dark adaptation in one glance (SDD §5.9).
+     The per-panel "true colour" toggle that makes this bearable is M1-T14's. */
+  --image-filter: sepia(1) saturate(6) hue-rotate(-32deg) brightness(0.55);
+}

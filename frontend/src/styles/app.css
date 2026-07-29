@@ -1,0 +1,78 @@
+@import 'tailwindcss';
+@import './tokens.css';
+
+/*
+ * The bridge between the semantic tokens and Tailwind's utility names — SDD §5.9.
+ *
+ * `@theme inline` matters: it makes `bg-surface` compile to `background-color: var(--surface)`
+ * rather than to a copy of the token's value frozen at build time. That indirection is the whole
+ * mechanism — flipping `data-mode` on <html> re-resolves every utility in the document, with no
+ * component involved and no re-render.
+ *
+ * Sizes are tokens for the same reason colours are. USB-12's 44 px is the FLOOR for incidental
+ * controls, not the target for the ones that matter: the operator may be wearing gloves, so
+ * primary controls are 60–70 px (SDD §5.9) and the e-stop is larger still. Naming them means a
+ * reviewer can see `h-control` and know it is in the band, instead of counting rems.
+ */
+@theme inline {
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-overlay: var(--surface-overlay);
+  --color-edge: var(--border);
+  --color-edge-strong: var(--border-strong);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-faint: var(--fg-faint);
+
+  --color-accent: var(--accent);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-on-danger: var(--on-danger);
+  --color-focus: var(--focus);
+
+  /* USB-12 floor for incidental controls. */
+  --spacing-touch: 2.75rem;
+  /* SDD §5.9's 60–70 px band for primary controls (D-pad, capture). */
+  --spacing-control: 4rem;
+  /* Larger still, and positionally constant on every screen (USB-03). */
+  --spacing-estop: 5rem;
+
+  /* No web fonts. A font file is bytes USB-10 has to move before the shell can render, and the
+     system UI font on Android is already legible at the sizes this app uses. */
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Roboto Mono', 'SF Mono', Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    background-color: var(--surface);
+    color: var(--fg);
+    /* Android Chrome delays a tap by ~300 ms while it waits to see a double-tap-to-zoom. The app
+       has no zoomable content and the operator is issuing motion commands. */
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    /* `dvh` rather than `vh`: Chrome's URL bar collapses on scroll, and `vh` puts the e-stop
+       under it (USB-03 wants it reachable without looking). */
+    min-height: 100dvh;
+    overscroll-behavior-y: none;
+  }
+
+  /* One focus treatment for the whole app. Outdoors, in the dark, a 1 px ring is invisible. */
+  :focus-visible {
+    outline: 3px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  /* Telemetry is read as a column of numbers that update in place; proportional digits make the
+     whole row twitch every time a value changes. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

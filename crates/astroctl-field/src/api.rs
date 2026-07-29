@@ -19,10 +19,15 @@
 //! # The static-asset seam (M0-T06)
 //!
 //! [`router`] returns the authenticated API surface and nothing else, with no fallback of its
-//! own. M0-T06 merges the `include_dir!`-embedded PWA into it and installs the SPA fallback; the
-//! two subtrees stay separable because a browser cannot put an `Authorization` header on the
+//! own. [`crate::pwa`] merges the `include_dir!`-embedded PWA onto it and brings the SPA fallback;
+//! the two subtrees stay separable because a browser cannot put an `Authorization` header on the
 //! navigation request that loads the app shell, so the shell and the API cannot share one auth
-//! policy.
+//! policy. `crate::assemble` is where the two are joined.
+//!
+//! One consequence lands back here: after the merge the fallback for *every* unmatched path is
+//! the PWA's, so "auth runs before routing" no longer covers an undeclared `/api/...` path by
+//! itself. [`crate::pwa`] restores that property deliberately rather than by accident — see its
+//! module docs.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;

@@ -1,0 +1,32 @@
+{
+  "name": "astroctl-pwa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AstroCtl operator PWA — served by astroctl-field from an embedded build (ARC-02).",
+  "license": "MIT",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "preview": "vite preview",
+    "icons": "node scripts/make-icons.mjs"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zustand": "5.0.14"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.4",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vite": "8.1.5"
+  }
+}

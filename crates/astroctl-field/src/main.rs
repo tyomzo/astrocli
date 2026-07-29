@@ -35,6 +35,7 @@ mod api;
 mod auth;
 mod cli;
 mod proxy;
+mod pwa;
 mod route_meta;
 mod telemetry;
 #[cfg(test)]
@@ -218,10 +219,7 @@ async fn serve(
         logging,
         config: Arc::clone(&config),
     };
-    // The M0-T06 seam: the embedded PWA and its SPA fallback merge onto this router. They stay
-    // outside `with_auth` because a browser cannot put an `Authorization` header on the
-    // navigation request that loads the app shell.
-    let app = api::with_auth(router.with_state(state), auth);
+    let app = assemble(router, state);
 
     // --- 5. API up, health `starting` (SDD §8.1) ---------------------------------------------
     let addr = SocketAddr::new(
@@ -290,6 +288,22 @@ async fn serve(
         Ok(Err(error)) => Err(Box::new(error)),
         Err(error) => Err(Box::new(error)),
     }
+}
+
+/// The whole HTTP surface: the authenticated API of [`api::router`], with the unauthenticated PWA
+/// merged onto it (M0-T06).
+///
+/// The merge order is the design. `with_auth` layers the API's routes; `merge` then adds a router
+/// whose only member is the SPA fallback, which is therefore *outside* that layer — a browser
+/// cannot put an `Authorization` header on the navigation request that loads an app shell. See
+/// [`pwa`] for what that costs and how the cost is paid.
+///
+/// It is a function rather than four lines inside [`serve`] so that the tests drive exactly what
+/// the binary binds. A test that assembles its own approximation of the app is a test that keeps
+/// passing after the real assembly changes.
+fn assemble(router: axum::Router<AppState>, state: AppState) -> axum::Router {
+    let auth = Arc::clone(&state.auth);
+    api::with_auth(router.with_state(state), Arc::clone(&auth)).merge(pwa::router(auth))
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

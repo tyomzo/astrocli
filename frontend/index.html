@@ -1,0 +1,31 @@
+<!doctype html>
+<!--
+  `data-mode` is the theme switch of SDD §5.9. Setting it to "night" re-themes the whole app from
+  the token layer alone — no component reads it, and no component may. See src/styles/tokens.css.
+-->
+<html lang="en" data-mode="dark">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      `viewport-fit=cover` so the app reaches under a phone's gesture bar; the shell adds the
+      safe-area padding back where it matters. No `user-scalable=no`: pinch-zoom is an
+      accessibility affordance and this app has no gesture that conflicts with it.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!--
+      One of the two literal colours outside the token file (the other is the manifest's). Chrome
+      reads this to tint the system bars before a stylesheet exists, so it cannot resolve
+      `var(--surface)`. It tracks `--surface` by hand — change both together.
+    -->
+    <meta name="theme-color" content="#000000" />
+    <meta name="description" content="AstroCtl — field control for a remote astrophotography rig." />
+    <title>AstroCtl</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+    <script type="module" src="/src/main.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>AstroCtl needs JavaScript. It is a control surface for hardware, not a document.</noscript>
+  </body>
+</html>

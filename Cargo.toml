@@ -87,5 +87,13 @@ rustix = { version = "1", features = ["fs"] }
 # the auth/route-metadata tests assert on real responses rather than on handler return values.
 tower = { version = "0.5", features = ["util"] }
 
+# --- added by M0-T06 (frontend pipeline) ---
+# The built PWA compiled into the field binary (ARC-02: "deployment is a single service"). Chosen
+# over `rust-embed` because it is a plain proc macro over a directory with no runtime, no feature
+# matrix and no debug-mode filesystem fallback — the last of which would make the binary behave
+# differently in development from production in exactly the layer this is meant to make boring.
+# Absence of `frontend/dist` is handled by astroctl-field's build.rs, not by this crate.
+include_dir = { version = "0.7" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

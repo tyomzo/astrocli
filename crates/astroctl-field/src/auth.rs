@@ -184,7 +184,11 @@ pub async fn require_bearer(
 
 /// Render a 401 with the SDD §4.2 envelope and the `WWW-Authenticate` challenge RFC 6750 §3
 /// requires.
-fn unauthorized(err: &ApiError) -> Response {
+///
+/// Visible to the crate because [`crate::pwa`] renders the same refusal for an API path that
+/// matched no route — sharing the function is what makes the two indistinguishable, which is the
+/// property that stops an unauthenticated caller mapping the API by probing.
+pub(crate) fn unauthorized(err: &ApiError) -> Response {
     let mut response = (StatusCode::UNAUTHORIZED, Json(err)).into_response();
     response.headers_mut().insert(
         WWW_AUTHENTICATE,
