@@ -31,8 +31,16 @@ interface ErrorEnvelope {
 }
 
 export type RequestFailure =
-  /** 401. The token is missing or wrong — retrying will not help (SEC-02). */
-  | { kind: 'unauthorized'; message: string }
+  /**
+   * 401. Retrying will not help (SEC-02).
+   *
+   * `presented` separates the two ways to get one, because they are different instructions:
+   * `false` means the app sent no `Authorization` header at all and the operator has yet to
+   * enter a token; `true` means one was sent and the node refused it. Collapsing them produces
+   * "token rejected" on a first load where nothing was ever offered, which sends the operator
+   * looking for a wrong value instead of an absent one.
+   */
+  | { kind: 'unauthorized'; presented: boolean; message: string }
   /** The node answered with the §4.2 envelope. `code` is what the UI switches on. */
   | { kind: 'api'; status: number; code: string; message: string; retryable: boolean }
   /** Nothing answered: DNS, TCP, the VPN, or a response that was not the envelope. */
@@ -105,7 +113,12 @@ export async function getJson<T>(path: string, token: string | null): Promise<Re
       ok: false,
       failure: {
         kind: 'unauthorized',
-        message: envelope?.message ?? 'the node rejected the bearer token',
+        presented: token !== null,
+        message:
+          envelope?.message ??
+          (token !== null
+            ? 'the node rejected the bearer token'
+            : 'the node requires a bearer token'),
       },
     };
   }

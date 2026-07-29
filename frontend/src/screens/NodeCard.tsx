@@ -83,10 +83,17 @@ function Body({ slot }: { slot: NodeSlot }): ReactNode {
 function Failure({ failure }: { failure: RequestFailure }): ReactNode {
   switch (failure.kind) {
     case 'unauthorized':
-      return (
+      return failure.presented ? (
         <Problem heading="Token rejected">
-          {failure.message}. Enter the value of the node&rsquo;s{' '}
-          <code className="font-mono">server.auth_token_env</code> variable below.
+          {failure.message}. The node refused the stored token — check it against the value of
+          its <code className="font-mono">server.auth_token_env</code> variable and store it
+          again below.
+        </Problem>
+      ) : (
+        <Problem heading="Token needed">
+          This node requires a bearer token and none has been entered yet. Put the value of its{' '}
+          <code className="font-mono">server.auth_token_env</code> variable in the Credential card
+          below.
         </Problem>
       );
     case 'api':
