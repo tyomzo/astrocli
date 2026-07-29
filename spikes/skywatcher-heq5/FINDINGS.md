@@ -462,10 +462,13 @@ controller commanded regardless of what the gearbox did. Zero error here means t
 faithful across direction changes — worth knowing, and not nothing — but mechanical lost motion on
 reversal is invisible to it by construction.
 
-Real backlash needs an external reference. The camera-on-a-table rig used for the optical
-confirmation could do it: command a reversal, measure the pixel displacement, and find the
-commanded counts that produce no image motion. That is a genuinely useful Phase 3 input (guiding
-cares about backlash) and remains **open**.
+Real backlash needs an external angular reference, and the right one is **the sky, not a bench rig**
+— see E19 in `MOTION-PLAN.md`. At the 1000 mm equipment profile one count is 0.187 px of star
+motion, so a plausible backlash is 39–391 px: about 40× the sensitivity of a camera-on-a-table rig
+with a lever arm, with no rod and no second tripod. More importantly it measures the mount
+*loaded and balanced*, which is the only configuration whose backlash matters — gear mesh and
+preload differ once an OTA is mounted. Remains **open**, and is a Phase 3 input rather than
+anything M0–M2 depends on.
 
 ## Status
 

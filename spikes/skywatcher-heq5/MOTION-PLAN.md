@@ -173,8 +173,11 @@ two modes scale the step period differently, which the driver must then encode e
 ### E11 · slew speeds
 Each speed class from `G`, low to high, each axis, each direction. Measure actual counts/s per class. **Run the high-speed classes last**, and note the fence is coarse at those rates.
 
-### E12 · backlash
-Move + 5,000 counts, stop, settle, reverse. Count the commanded steps before the counter starts changing. That dead zone is the backlash figure — it feeds guiding (Phase 3) and goto accuracy now.
+### E12 · direction reversal / counter fidelity — **executed**
+Four alternating ±5,000-count moves; error 0 on every one. **This is not a backlash measurement** —
+the counter is open-loop and reports commanded steps regardless of what the gearbox did. It
+establishes that the *controller* is faithful across direction changes. True backlash needs an
+external angular reference: see **E19**, under the sky.
 
 ### E13 · goto accuracy vs distance
 Gotos of 1,000 / 10,000 / 100,000 / 1,000,000 counts, both directions, five repeats each. Record final error. **Feeds the `tolerance` value in SDD §5.2.3**, which is currently a guessed "default 10 counts".
@@ -206,11 +209,79 @@ Sidereal on axis 1 for 8 hours with 1 Hz polling. Record drift from predicted co
 
 ---
 
+---
+
+## Phase 8 — under the sky (OTA mounted, clear night)
+
+Everything above runs on a bare mount indoors. This phase needs the telescope mounted, balanced,
+roughly polar aligned, and a clear sky. It corresponds to T-HIL-1 step 5.
+
+### E19 · backlash, measured against stars
+
+**Why the sky rather than a bench rig.** Backlash is angular, and a star is at infinite distance,
+so the angular shift measured in the image *is* the axis rotation — no lever arm, no radius
+geometry, no question of whether the rod flexed. At the PRD's 1000 mm equipment profile
+(0.767 arcsec/px on the R10's 3.72 µm pixels):
+
+| | |
+|---|---|
+| 1 count | 0.1436 arcsec = **0.187 px** |
+| backlash 0.5 arcmin (209 counts) | **39 px** of star displacement |
+| backlash 2 arcmin (836 counts) | **156 px** |
+| seeing, ~2 arcsec | 2.6 px — **30× smaller** than a 1 arcmin backlash |
+
+A table-top rig with a 300 mm lever and full-resolution stills yields about 2 px per arcmin. The
+sky yields **78 px per arcmin — roughly 40× better** — and needs no rod, no macro framing, and no
+second tripod.
+
+**The stronger reason is validity, not precision.** Backlash on a bare mount is not the same number
+as backlash on a loaded, balanced one: gear mesh, preload and flexure all change once an OTA is
+bolted on. A bench measurement characterises a configuration the mount will never image in. Under
+the sky it is measured as it will actually be used.
+
+**Measure DEC first.** DEC carries no sidereal motion, so with tracking running the field is static
+in DEC and the measurement is a clean subtraction with nothing to model. DEC backlash is also the
+one guiding actually suffers from — it is why unidirectional DEC guiding and DEC compensation
+exist. Easiest axis and most valuable, which is a rare combination.
+
+**Procedure:**
+1. Track at sidereal. Choose a moderately bright star; defocus very slightly so the centroid is
+   well sampled rather than landing in one pixel.
+2. DEC **+2,000 counts** to seat the gear train in one direction. Settle.
+3. Capture the reference frame.
+4. Step **−100 counts**, settle ~2 s, capture. Repeat ~20 times.
+5. Centroid the star in each frame; plot pixel displacement against cumulative commanded counts.
+6. **Backlash = the x-intercept of a linear fit to the engaged region**, extrapolated back to zero
+   displacement. Better than eyeballing first motion, and robust to the first step or two being
+   partially engaged.
+7. Repeat in the opposite direction, three runs each, and report the spread.
+
+No plate solving required — a single star centroid suffices, which keeps this far simpler than the
+Phase 2a machinery. Where several stars are in frame, averaging their centroids suppresses seeing
+further.
+
+**Then RA**, which is messier: track at sidereal so the star sits still and commanded moves add on
+top. Any tracking-rate error contaminates the result, so characterise the drift first over a minute
+with no commands issued and subtract it.
+
+**Confounders:** settle before capturing (the mount rings); re-shoot the reference at the end to
+check for thermal or tracking walk; and avoid running this near the meridian where a flip could
+intervene.
+
+**Feeds:** GDE-01..05 (guiding), MNT-12 guide pulses, and the dither settling in SES-05. It is a
+**Phase 3 input — nothing in M0–M2 depends on it**, so the argument for doing it is opportunistic:
+the marginal cost on a night you are already set up is about ten minutes, and the centroid harness
+overlaps heavily with the pointing-verification work of PLS-05.
+
 ## What this series does not cover
 
 Meridian and altitude limits (T-HIL-1 step 6) need real geometry and a payload, so they stay with
-the full bring-up. Park and unpark need a defined park position. Anything requiring the sky is
-Phase 2a. Physical USB-unplug recovery still needs a hand on the cable.
+the full bring-up. Park and unpark need a defined park position. Physical USB-unplug recovery was
+executed as part of M2-T01 step 7 (`../gphoto2-r10/FINDINGS.md`).
+
+The bench-rig backlash approach — camera on a table, rod clamped in the saddle, cross-correlated
+ROI — was designed and then **discarded** in favour of E19. It is more work, ~40× less precise, and
+measures an unloaded configuration that does not correspond to how the mount is used.
 
 ## Feedback into the documents
 
