@@ -6,8 +6,10 @@ one system, driven from a phone or tablet over a VPN. It replaces the usual patc
 KStars/Ekos/INDI/PHD2/Siril with one coherent stack. The problem statement and vision are
 ASTROCTL-PRD-001 §1–2.
 
-**There is no code in this repository yet.** The pack below is the complete governing
-specification; implementation starts at `docs/plan/tasks/M0-scaffolding/M0-T01`.
+The pack below is the complete governing specification. **M0 is largely built** — the Rust
+workspace, `astroctl-core`, both binaries, the embedded PWA and TLS termination are in
+(`M0-T01`–`M0-T06`, `M0-T09`); `M0-T07` (CI) and `M0-T08` (containers) are not. Task status lives
+in each file under `docs/plan/tasks/`, which is authoritative over this paragraph.
 
 ## The documents
 
