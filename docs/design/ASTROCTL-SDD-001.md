@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.9.0
+**Version:** 1.10.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.15.1 (requirements), ASTROCTL-ADD-001 v1.4.1 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.15.2 (requirements), ASTROCTL-ADD-001 v1.4.1 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -40,6 +40,8 @@
 **Change note (1.8.1):** §4.5's startup refusal is narrowed from "not a loopback/VPN address" to loopback specifically. A VPN interface carries an ordinary private address and nothing distinguishes it from a LAN one, so the original wording was not implementable and invited a "10.0.0.0/8 is probably a tunnel" heuristic — guessing about precisely what SEC-01 exists to protect. Surfaced by M0-T05.
 
 **Change note (1.9.0):** **WebSocket authentication designed** — a browser cannot send an `Authorization` header on a WS upgrade, which §4.5 previously required and nothing had noticed. Resolved with a single-use 30 s ticket from `POST /api/auth/ws-ticket`, so the long-lived token never enters a URL and therefore never reaches the field node's own access log. Written into §4.5, the §5.8.1 route table, the §5.9 connect flow, and M1-T03/M1-T04. Also §4.2 gains `NODE_UNREACHABLE`, `DISK_LOW` and `NOT_IMPLEMENTED`: the closed enum had no way to say "the other node is not answering", and borrowing `DEVICE_TRANSPORT` tells the operator to check a cable when the problem is a tunnel. Surfaced by M0-T05.
+
+**Change note (1.10.0):** §5.9 given a layout, and it is not the obvious one. The subsystem decomposition — mount panel, camera panel, stack panel — mirrors the backend rather than the operator, whose sequence is pick a target, slew, frame, capture, watch. Manual mount control is not a destination but a brief step after a slew settles, so a permanent panel for it wastes space for most of a session. Layout now follows the session FSM. Three specifics: the D-pad **overlays the image** because nudging is framing and the control must share a field of view with its effect; the nudge affordance is contextual but always summonable, auto-expanding when a slew completes; and the target region is a **slot with a stable contract** holding manual RA/DEC entry in M1, into which Phase 2a's catalog drops without restructuring anything.
 
 ---
 
@@ -716,6 +718,49 @@ need honest pixels, and a mode the operator has to fight is a mode they will swi
 that matter. The operator may be wearing gloves, which materially reduces pointing precision, so
 primary controls — D-pad, capture, e-stop — are **60–70 px**. The e-stop is larger still and holds
 a constant screen position across every view (USB-03) so it can be hit without looking at it.
+
+**Layout is organised by session state, not by subsystem.** The obvious decomposition — a mount
+panel, a camera panel, a stack panel — mirrors the *backend's* structure and is wrong for the
+operator, whose sequence is **pick a target → slew → frame → configure → capture → watch it
+accumulate**. Manual mount control in particular is not a destination: it is a brief
+fine-adjustment step that only matters in the window after a slew settles. Given a permanent panel
+it occupies screen space for the 95% of a session when nobody touches it.
+
+The session FSM (§5.6) already knows which state the system is in, so the UI follows it.
+
+```
+  IDLE — no target yet                    ON TARGET
+┌──────────────────────────┐   ┌───────────────┬──────────────────────┐
+│ TARGET                   │   │ M42           │                      │
+│ ┌──────────────────────┐ │   │ Orion Nebula  │     LIVE VIEW        │
+│ │ RA   __:__:__        │ │   │               │       ┌───┐          │
+│ │ DEC ±__°__'__"       │ │   │ alt 47° ↑     │     ┌─┼─N─┼─┐        │
+│ │        [ GOTO ]      │ │   │ transit 1h20  │     │W│   │E│ ←D-pad │
+│ └──────────────────────┘ │   │ RA  05:35:17  │     └─┼─S─┼─┘  OVER  │
+│                          │   │ DEC -05°23'   │       └───┘  the img │
+│  ← the catalog picker    │   │               ├──────────────────────┤
+│    (PLN-03, Phase 2a)    │   │ [ change ]    │ ⊕nudge ISO1600 30s   │
+│    replaces this box     │   │               │ RAW     [ CAPTURE ]  │
+└──────────────────────────┘   └───────────────┴──────────────────────┘
+```
+
+Three consequences worth stating explicitly, because each is easy to get wrong:
+
+1. **The D-pad overlays the image; it does not sit beside it.** Nudging *is* framing, so the
+   control and the thing it affects must be in one field of view. A separate panel makes the
+   operator look back and forth between their hand and the result.
+2. **Contextual by default, always summonable.** The `⊕nudge` affordance is permanently present
+   but compact, and expands automatically when a slew completes. Hiding a control the operator
+   wants is a worse failure than showing one they do not — progressive disclosure must never
+   become a guessing game at 2 a.m.
+3. **The target region is a slot with a stable contract.** In M1 it holds manual RA/DEC entry.
+   Phase 2a's catalog (PLN-03/04) drops into the same slot without restructuring anything around
+   it — it changes how a target is *chosen*, not what the rest of the UI does with one.
+
+Phone navigation follows the same three concerns rather than the five subsystems: **Target**
+(what to point at), **Frame** (the image, nudge, capture controls) and **Session** (progress,
+frames, stack, alerts). Connect and settings hang off the header. On tablet all three are visible
+at once and the navigation disappears.
 
 **Connect flow.** Before each `WebSocket` construction — the first and every reconnect — the PWA
 POSTs `/api/auth/ws-ticket` with its bearer token and opens the socket with the returned ticket

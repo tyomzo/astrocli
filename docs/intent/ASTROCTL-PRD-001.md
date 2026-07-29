@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.15.1  
+**Version:** 1.15.2  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -33,6 +33,8 @@
 **Change note (1.15.0):** **Android is the supported and tested UI target**; iOS may work but is untested and gated by nothing. EXT-06 (Capacitor-readiness) becomes advisory rather than binding, since its stated motivation in §11 was iOS PWA limitations and there is no iOS device in the deployment. That permits Android capabilities the iOS-compatible subset would have forbidden — Screen Wake Lock so the display does not sleep mid-session, `beforeinstallprompt`, and reliance on service-worker cache persistence that iOS evicts after ~7 days. USB-09/ARC-14 narrowed accordingly.
 
 **Change note (1.15.1):** the `disk_*_free_gb` thresholds now state their unit — GiB, 2^30 bytes, matching `df -h`. The unit was never defined and 10^9 versus 2^30 differ by 7%, which is not acceptable ambiguity on a threshold that pauses capture. Surfaced by M0-T05.
+
+**Change note (1.15.2):** Phase 2a's target catalog is noted as filling the target slot M1 already builds (SDD §5.9) rather than arriving as new layout. PLN-03/04 stay in 2a; only the shell shape is settled early.
 
 ---
 
@@ -1360,7 +1362,7 @@ Deliverables:
 - Session orchestrator state machine (SES-01 through SES-06)
 - Multi-target queue (SES-04)
 - Dithering between frames via mount guide pulses (SES-05)
-- Target catalog (Messier) and altitude plotting (PLN-03, PLN-04, PLN-05)
+- Target catalog (Messier) and altitude plotting (PLN-03, PLN-04, PLN-05) — drops into the target slot M1 already builds (SDD §5.9), replacing manual RA/DEC entry. No layout restructuring: it changes how a target is chosen, not what the UI does with one
 - Park and sync operations (MNT-09, MNT-10)
 - Slew limits and meridian protection (MNT-15, MNT-16)
 - Session log files (SES-07)
