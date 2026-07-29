@@ -53,23 +53,29 @@ That is what makes it worth a task rather than a footnote.
 
 ## The concrete deployment
 
-Domain `diirc.lt`; the VPN is reachable as `through.diirc.lt`. What is actually deployed today,
-checked rather than assumed (2026-07-29):
+The field node is **`field.diirc.online`**. What is actually deployed today, checked rather than
+assumed (2026-07-29):
 
 | Name | Cert | Issuer | Where it lives |
 |------|------|--------|----------------|
+| `diirc.online` | none yet | — | registered 2026-07-29 at Hostinger; NS `athena`/`apollo.dns-parking.com`, not yet resolving publicly |
 | `diirc.lt` | SAN `diirc.lt`, `www.diirc.lt` | Let's Encrypt | Hostinger shared hosting (`2.57.91.91`, `server: hcdn`), auto-provisioned and auto-renewed |
-| `through.diirc.lt` | SAN `through.diirc.lt` only | Let's Encrypt | Azure host (`4.223.171.38`), own ACME client |
+| `through.diirc.lt` | SAN `through.diirc.lt` only | Let's Encrypt | Azure host (`4.223.171.38`), own ACME client — the VPN endpoint, unchanged unless it is deliberately moved |
 
-**Neither certificate is reusable and there is no wildcard.** Both are single-name Let's Encrypt
-certificates covering the names they serve; neither covers `field.diirc.lt`. The Hostinger one is
-additionally out of reach — on shared hosting the private key is not normally exportable. So
-`field.diirc.lt` needs its own certificate; the "copy an existing wildcard" shortcut does not exist
-here. (An earlier draft of this task offered it, before the certificates were checked.)
+**Nothing existing can be reused.** `diirc.online` is new and has no certificate at all. The two
+`diirc.lt` certificates are single-name, cover only the names they serve, and the Hostinger one is
+additionally out of reach — on shared hosting the private key is not normally exportable. There is
+no wildcard anywhere. `field.diirc.online` therefore needs its own certificate; the "copy an
+existing wildcard" shortcut an earlier draft of this task offered does not exist.
 
-- **Name.** `field.diirc.lt`, resolving to the field node's VPN address. Does not resolve today.
+**`diirc.online` is at Hostinger as well** (`athena`/`apollo.dns-parking.com`), so moving to it
+changes no decision below — the `dns_hostinger` route applies unchanged. Note it was registered on
+the day this was written and was not yet resolving; **delegation has to propagate before ACME can
+validate anything**, which is a first-attempt failure worth expecting rather than debugging.
+
+- **Name.** `field.diirc.online`, resolving to the field node's VPN address.
 - **Issuance — settled: Let's Encrypt via `acme.sh --dns dns_hostinger`.** DNS for the zone is at
-  Hostinger (`ns1/ns2.dns-parking.com`), and `acme.sh` ships a **native Hostinger DNS plugin**, so
+  Hostinger (`athena`/`apollo.dns-parking.com`), and `acme.sh` ships a **native Hostinger DNS plugin**, so
   DNS-01 automates against the zone as it stands. No migration to another DNS provider, no
   `_acme-challenge` CNAME delegation, no `acme-dns` instance — all of which an earlier draft of this
   task proposed before the plugin was found.
@@ -96,7 +102,7 @@ here. (An earlier draft of this task offered it, before the certificates were ch
 - **Resolution (SEC-08).** The name must resolve **through the VPN's DNS, not only the public
   zone**. If resolution depends on reaching public DNS, the UI becomes unreachable precisely when
   the field node is operating standalone with no internet — which is ARC-06's whole premise. Verify
-  deliberately: with the uplink down, the phone must still resolve `field.diirc.lt`.
+  deliberately: with the uplink down, the phone must still resolve `field.diirc.online`.
 - A private address in a public A record is acceptable and is not exposure. Note it in the setup
   document so it does not later read as a leak.
 - **Renewal is every 90 days**, and the industry ceiling is falling (200 days today, 100 in March
@@ -105,7 +111,7 @@ here. (An earlier draft of this task offered it, before the certificates were ch
 
 ## Acceptance criteria
 
-- [ ] `https://field.diirc.lt:8470/` serves the PWA with no certificate warning on Android Chrome
+- [ ] `https://field.diirc.online:8470/` serves the PWA with no certificate warning on Android Chrome
 - [ ] `window.isSecureContext` is `true`; `navigator.wakeLock` is defined
 - [ ] With TLS configured, plain HTTP on the same port is refused rather than served
 - [ ] Config without a `tls` block still serves HTTP — `localhost` development and M0-T08 unchanged
