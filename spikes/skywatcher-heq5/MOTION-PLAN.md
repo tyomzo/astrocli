@@ -87,45 +87,76 @@ speed. It is not a substitute for the bounded-motion discipline below.
 ### E4 · repeat on axis 2
 Same, DEC. Direction conventions frequently differ between axes.
 
+### E5 · step-period relation, measured inside a bounded goto
+**This was originally Phase 4 and has been moved forward.** It does not need unbounded tracking,
+and therefore does not need `K` proven — a goto self-terminates, so the highest-value measurement
+in the series can happen before we rely on the stop path at all.
+
+**Question:** is the corrected timer frequency right, and is `rate = timer_freq / step_period`?
+
+**Procedure:** `G` = `"20"`, `I` = **620**, `H` = **+6,000 counts** (0.239°), `M`, `J`. Poll `:j`
+throughout at full rate (~62/s). Then:
+
+1. Discard the first and last ~15% of samples — those are the accel and decel ramps.
+2. Linear-fit the middle. The slope is the commanded rate in counts/s.
+3. `measured_timer_freq = 620 × slope`.
+
+**Prediction — and it discriminates without needing the fit:**
+
+| | rate at period 620 | 6,000-count goto takes |
+|---|---|---|
+| timer_freq = **64,935** (ours) | 104.73 counts/s | **57.3 s** |
+| timer_freq = 460,800 (old) | 743.23 counts/s | **8.1 s** |
+
+A stopwatch separates those. The fit then gives the precise figure: ~3,580 samples at 1.68 counts
+each makes the slope estimate very tight.
+
+**Worth noting:** 64,935 ÷ 620 = 104.7339 counts/s against a true sidereal rate of 104.7304 — a
+0.003% match. Synta almost certainly chose the timer frequency so that sidereal lands on the round
+step period 620, which is independent circumstantial support for 64,935 being correct. E5 is what
+turns that from a suggestive coincidence into a measurement.
+
+**Abort:** fence at 20,000 counts.
+**Feeds:** M3-T03 speed math; final confirmation of PRD §4.2.
+
+### E6 · rate linearity, also bounded
+Repeat E5 at step periods 310, 1240 and 2480, adjusting the increment so each run lasts roughly a
+minute. Rate should scale inversely and linearly. Confirms the *formula*, not just one lucky point.
+
+**Residual uncertainty, stated honestly:** E5 and E6 measure the rate in **GOTO** mode. Tracking
+uses **SLEW** mode, and the two could interpret the step period differently. The 7× constant
+question is settled either way — that difference is far too large to be a mode artefact — but the
+precise tracking rate needs the slew-mode confirmation in Phase 4.
+
 ---
 
 ## Phase 3 — prove the stop path, with its failure disarmed
 
-### E5 · `K` mid-travel
+### E7 · `K` mid-travel
 **Question:** does the ramped stop work, and how much does it overshoot?
 **Procedure:** identical bounded goto to E3, but send `K` at roughly half travel. Record the counter at the moment `K` was written and where motion actually ceased.
 **Prediction:** motion ends short of target; overshoot is the ramp-down distance.
 **The point:** if `K` does nothing, the mount still stops at the target. You learn the stop path is broken without paying for it. **This is the experiment that converts `K` from assumed to verified.**
 
-### E6 · `L` mid-travel
+### E8 · `L` mid-travel
 Same, with instant stop. **Record the overshoot difference between `K` and `L`** — that difference is the physical meaning of the e-stop path and belongs in the PRF-12 discussion.
 
-### E7 · `K` and `L` with both axes moving
+### E9 · `K` and `L` with both axes moving
 Two simultaneous bounded gotos, stop both. Confirms per-axis addressing under concurrent motion.
 
 ---
 
-## Phase 4 — the rate formula. The highest-value experiment in the series.
+## Phase 4 — tracking rate in SLEW mode
 
-### E8 · sidereal step period
-**Question:** is the corrected timer frequency actually right, and is the step-period formula correct?
+The constant is already settled by E5/E6. What remains is confirming that **slew mode** — which is
+what tracking actually uses — interprets the step period identically to goto mode.
 
-This closes the loop on the constant we changed. The predicted step period for sidereal tracking is
-
-```
-step_period = timer_freq / rate = 64,935 / 104.7304 = 620.0
-```
-
-**The old, wrong constant predicts 4,400 for the same rate** — so this experiment discriminates
-sharply between them.
-
-**Procedure:** `I` = 620 on axis 1, tracking mode, `J`. Poll `:j` for 60 s. Compute counts/second.
-**Prediction:** **104.73 ± 0.5 counts/s.** If instead you measure ~743 counts/s (7.1× fast), then
-64,935 is wrong and everything downstream must stop until it is resolved.
-**Feeds:** M3-T03's speed math, and final confirmation of PRD §4.2.
-
-### E9 · rate linearity
-Repeat E8 at step periods 310, 620, 1240, 2480. Rate should scale inversely and linearly. Confirms the formula rather than a single lucky point.
+### E10 · sidereal in slew mode
+`G` = `"10"` (SLEW, low speed, forward), `I` = 620, `J`. Unbounded, so this requires `K` proven
+(Phase 3). Poll `:j` for 300 s, linear-fit, compare against **104.7304 counts/s**.
+**Prediction:** matches E5's goto-mode figure to within measurement error. A discrepancy means the
+two modes scale the step period differently, which the driver must then encode explicitly.
+**Feeds:** MNT-04 tracking rates; the sidereal/lunar/solar step-period table in M3-T03.
 
 ---
 
@@ -133,26 +164,26 @@ Repeat E8 at step periods 310, 620, 1240, 2480. Rate should scale inversely and 
 
 `K` is proven by Phase 3, so open-ended slews are acceptable from here.
 
-### E10 · slew speeds
+### E11 · slew speeds
 Each speed class from `G`, low to high, each axis, each direction. Measure actual counts/s per class. **Run the high-speed classes last**, and note the fence is coarse at those rates.
 
-### E11 · backlash
+### E12 · backlash
 Move + 5,000 counts, stop, settle, reverse. Count the commanded steps before the counter starts changing. That dead zone is the backlash figure — it feeds guiding (Phase 3) and goto accuracy now.
 
-### E12 · goto accuracy vs distance
+### E13 · goto accuracy vs distance
 Gotos of 1,000 / 10,000 / 100,000 / 1,000,000 counts, both directions, five repeats each. Record final error. **Feeds the `tolerance` value in SDD §5.2.3**, which is currently a guessed "default 10 counts".
 
-### E13 · do `d`, `h`, `r`, `m` track the goto target?
+### E14 · do `d`, `h`, `r`, `m` track the goto target?
 Read them before and after `H`/`M`. Phase 0 makes this sharper: `H` and `M` are the goto-increment and break-point setters, so lowercase `h` and `m` are plausibly their readbacks. The survey found them sitting at or near home, suggesting target/breakpoint registers. If confirmed, the driver gains a way to **read back what a goto was programmed with before `J` is ever sent** — a pre-motion safety check the design does not currently have.
 
-### E14 · guide pulses
+### E15 · guide pulses
 `P` sets the autoguide rate; issue a pulse and measure displacement in counts. Validates MNT-12 and the `GuideRate` newtype added in SDD §5.1.
 
 ---
 
 ## Phase 6 — e-stop latency on the wire
 
-### E15 · PRF-12 budget (b)
+### E16 · PRF-12 budget (b)
 **Question:** how long from API call to motion actually ceasing?
 **Procedure:** requires `scripts/synta-sniff` from T-HIL-1 step 1 — polling `:j` cannot resolve this, since the 16 ms round trip *is* the measurement floor. Timestamp bytes on the wire, and separately timestamp the last changing counter value.
 **Budget:** ADD §9.1 (b) — ≤ 100 ms from API call to motion ceasing, which adds 9600-baud transmission and motor response on top of the ≤ 20 ms handler-to-wire figure verified in CI.
@@ -161,10 +192,10 @@ Read them before and after `H`/`M`. Phase 0 makes this sharper: `H` and `M` are 
 
 ## Phase 7 — endurance
 
-### E16 · tracking soak
+### E17 · tracking soak
 Sidereal on axis 1 for 8 hours with 1 Hz polling. Record drift from predicted counts, comms errors, timeouts. Compare against the 2000-exchange baseline (zero failures, 14.7–17.2 ms).
 
-### E17 · repeated goto cycling
+### E18 · repeated goto cycling
 200 alternating gotos. Watch for cumulative position error, thermal effects, comms degradation.
 
 ---
@@ -177,7 +208,7 @@ Phase 2a. Physical USB-unplug recovery still needs a hand on the cable.
 
 ## Feedback into the documents
 
-E1/E2 → SDD §5.2.2 status decoding · E5/E6 → `K`/`L` overshoot, PRF-12 · **E8 → final
-confirmation of PRD §4.2** · E10 → speed-class table · E11 → backlash constant, new · E12 → SDD
-§5.2.3 goto tolerance · E13 → possible new pre-motion safety check · E14 → MNT-12 · E15 → ADD
-§9.1 budget (b) · E16 → REL-02 timeout and heartbeat tuning.
+E1/E2 → SDD §5.2.2 status decoding · **E5/E6 → final confirmation of PRD §4.2** · E7/E8 → `K`/`L`
+overshoot, PRF-12 · E10 → tracking rates, MNT-04 · E11 → speed-class table · E12 → backlash
+constant, new · E13 → SDD §5.2.3 goto tolerance · E14 → possible new pre-motion safety check ·
+E15 → MNT-12 · E16 → ADD §9.1 budget (b) · E17 → REL-02 timeout and heartbeat tuning.
