@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.10.0
+**Version:** 1.11.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -42,6 +42,8 @@
 **Change note (1.9.0):** **WebSocket authentication designed** — a browser cannot send an `Authorization` header on a WS upgrade, which §4.5 previously required and nothing had noticed. Resolved with a single-use 30 s ticket from `POST /api/auth/ws-ticket`, so the long-lived token never enters a URL and therefore never reaches the field node's own access log. Written into §4.5, the §5.8.1 route table, the §5.9 connect flow, and M1-T03/M1-T04. Also §4.2 gains `NODE_UNREACHABLE`, `DISK_LOW` and `NOT_IMPLEMENTED`: the closed enum had no way to say "the other node is not answering", and borrowing `DEVICE_TRANSPORT` tells the operator to check a cable when the problem is a tunnel. Surfaced by M0-T05.
 
 **Change note (1.10.0):** §5.9 given a layout, and it is not the obvious one. The subsystem decomposition — mount panel, camera panel, stack panel — mirrors the backend rather than the operator, whose sequence is pick a target, slew, frame, capture, watch. Manual mount control is not a destination but a brief step after a slew settles, so a permanent panel for it wastes space for most of a session. Layout now follows the session FSM. Three specifics: the D-pad **overlays the image** because nudging is framing and the control must share a field of view with its effect; the nudge affordance is contextual but always summonable, auto-expanding when a slew completes; and the target region is a **slot with a stable contract** holding manual RA/DEC entry in M1, into which Phase 2a's catalog drops without restructuring anything.
+
+**Change note (1.11.0):** the accumulating stack is promoted from a status readout to a **primary view**. PRD §2 promises "immediate visual feedback as signal accumulates" — that is the payoff the two-node architecture exists for, and filing it under status was wrong. `FRAME` and `STACK` are now two sources sharing one image surface, switching to `STACK` when a sequence starts. The stack view is a slot like the target region: no knobs in M1 (the stub worker does no stacking), stats and the first controls in 2b, the post-chain in 2c. Also specifies the **rebuilding state**: IPP-16 re-stacks in the background while the preview keeps serving the pre-rebuild image, so a knob change correctly does nothing visible for a while and looks like a bug unless the panel says so.
 
 ---
 
@@ -757,10 +759,55 @@ Three consequences worth stating explicitly, because each is easy to get wrong:
    Phase 2a's catalog (PLN-03/04) drops into the same slot without restructuring anything around
    it — it changes how a target is *chosen*, not what the rest of the UI does with one.
 
-Phone navigation follows the same three concerns rather than the five subsystems: **Target**
-(what to point at), **Frame** (the image, nudge, capture controls) and **Session** (progress,
-frames, stack, alerts). Connect and settings hang off the header. On tablet all three are visible
-at once and the navigation disappears.
+**The accumulating stack is a primary view, not a status readout.** PRD §2 promises "immediate
+visual feedback as signal accumulates — no waiting until post-processing to know if the session is
+working." That is the payoff the whole two-node architecture exists to deliver, so it gets
+first-class screen real estate rather than a queue-depth badge.
+
+`FRAME` and `STACK` are therefore **two sources sharing one image surface**, not two panels:
+
+```
+┌───────────────┬──────────────────────────────────────────┐
+│ M42           │           [ FRAME │ STACK ]              │
+│ Orion Nebula  │  ┌────────────────────────────────────┐  │
+│ alt 47° ↑     │  │                                    │  │
+│ transit 1h20  │  │       accumulating stack           │  │
+│               │  │                                    │  │
+│ ── STACK ──   │  └────────────────────────────────────┘  │
+│ 47 frames     │  stretch ▁▃▅   σ-clip 2.5/3.0  [apply]   │
+│ 23m30s integ  │                                          │
+│ queue 3       ├──────────────────────────────────────────┤
+│ FWHM 3.1" ↓   │ ⊕nudge   ISO1600 30s RAW    [ CAPTURE ]  │
+└───────────────┴──────────────────────────────────────────┘
+```
+
+They answer different questions at different times — live view is for framing and focus, the stack
+is for "is this working" — so the app switches to `STACK` when a capture sequence starts, and the
+operator can switch back at will.
+
+**The stack view is a slot with a stable contract**, exactly like the target region:
+
+| | What the operator sees | Requirements |
+|---|---|---|
+| **M1** | Preview from the stub worker, queue depth, frame count, last-preview age. **No knobs** — the stub does no stacking, so there is nothing to tune | USB-06 subset |
+| **Phase 2b** | Real accumulating stack, live statistics, and the first knobs: method, rejection thresholds, stretch | STK-05, STK-10, IPP-07 |
+| **Phase 2c** | Post-processing chain, before/after comparison, presets, reprocessing of past sessions | PPR-*, IPP-13 |
+
+**A knob change must show that it is working.** IPP-16 rebuilds the accumulator in the background
+while capture continues, and ADD §5.4.2 keeps the preview serving the *pre-rebuild* stack until the
+swap. So adjusting sigma and seeing the image not change is the correct behaviour — and looks
+exactly like a bug. The panel needs an explicit rebuilding state with progress ("re-stacking
+34/120"), or the operator turns the knob again, and again.
+
+**This is where night mode's true-colour toggle earns its place.** The stack preview is the largest
+image on screen and the most greyscale-white thing in the app; it is also precisely what you are
+looking at when judging a stretch. Filtering it red by default protects dark adaptation; being able
+to check it honestly, briefly, is what stops the operator disabling night mode altogether.
+
+Phone navigation is therefore three concerns rather than five subsystems: **Target** (what to point
+at), **Frame** (acquire) and **Stack** (the result). Connection status and alerts live in the
+header where USB-04 already puts them. On tablet all three are visible at once and the navigation
+disappears.
 
 **Connect flow.** Before each `WebSocket` construction — the first and every reconnect — the PWA
 POSTs `/api/auth/ws-ticket` with its bearer token and opens the socket with the returned ticket

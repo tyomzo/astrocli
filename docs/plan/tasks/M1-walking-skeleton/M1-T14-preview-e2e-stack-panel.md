@@ -14,7 +14,9 @@ Close the two-node loop the demo is built on: ingested frame → stub worker pre
 - On successful ingest: submit preview job (T13); on result, push JPEG over stack WS `/ws` (binary preview topic on stack side mirrors field's liveview socket pattern — separate binary socket `/ws/preview`)
 - Field proxy: extend `/stack/*` HTTP proxy with WS proxying for the stack sockets (operator keeps single origin — ADR-07); auth forwarded
 - Stack status into field UI: field polls/subscribes stack health + stats, republishes as `stack.status` events (connected, queue depth from T11, frame count, last preview ts — USB-06)
-- PWA stack panel: connection state, transfer queue depth + oldest age, last preview image with session frame count overlay
+- **PWA stack view as a primary destination** (SDD §5.9), not a status strip: `FRAME` and `STACK` are two sources sharing **one image surface**, with the app switching to `STACK` when a capture sequence starts. Shows connection state, transfer queue depth and oldest age, frame count, last-preview age, and the preview itself at full size
+- **No knobs in M1** — the stub worker does no stacking, so there is nothing to tune. Build the panel so Phase 2b's controls (method, rejection, stretch — IPP-07) drop into a reserved region rather than forcing a re-layout; the same slot discipline as the target region
+- **Reserve the rebuilding state now even though nothing triggers it yet.** From 2b, IPP-16 re-stacks in the background while the preview keeps serving the *pre-rebuild* image, so a knob change correctly produces no visible effect for a while — and looks like a bug. The panel needs a rebuilding indicator with progress; designing it in later means discovering the problem as a support question
 - Single-machine mode verified: both binaries on one host, loopback config (STK-20 degenerate case)
 
 ## PR split
