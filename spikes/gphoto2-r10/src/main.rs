@@ -49,7 +49,11 @@ fn main() {
             println!("[connect] autodetect OK in {:?}", t.elapsed());
             c
         }
-        Err(e) => return println!("FATAL: autodetect failed: {e}\n  (camera on? PTP mode? gvfs holding it?)"),
+        Err(e) => {
+            println!("FATAL: autodetect failed: {e}");
+            diagnose_claim_failure();
+            return;
+        }
     };
 
     for s in &steps {
@@ -69,6 +73,45 @@ fn main() {
     }
     println!("\n=== end ===");
 }
+
+/// libgphoto2 reports "Could not claim the USB device" for several distinct causes and gives
+/// no hint which. The commonest on a desktop is a gvfs auto-mount holding the claim. Detect it
+/// and say so, rather than leaving the operator to guess. (Observed for real, 2026-07-29.)
+fn diagnose_claim_failure() {
+    println!("\n--- diagnosing ---");
+    let uid = unsafe { libc_getuid() };
+    let gvfs = format!("/run/user/{uid}/gvfs");
+    let mut culprit = None;
+    if let Ok(rd) = fs::read_dir(&gvfs) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.contains("gphoto2") {
+                culprit = Some(n);
+            }
+        }
+    }
+    match culprit {
+        Some(mount) => {
+            println!("  CAUSE FOUND: gvfs has the camera mounted and holds the USB claim.");
+            println!("    mount: {gvfs}/{mount}");
+            println!("  Release it now:");
+            println!("    gio mount -u \"gphoto2://{}/\"",
+                     mount.trim_start_matches("gphoto2:host="));
+            println!("  Prevent it permanently (no root needed):");
+            println!("    systemctl --user mask gvfs-gphoto2-volume-monitor.service");
+            println!("    plus a shadowing D-Bus service file, see FINDINGS.md");
+            println!("  On a headless field node this does not arise — there is no gvfs.");
+        }
+        None => {
+            println!("  No gvfs gphoto2 mount found. Other causes to check:");
+            println!("    - camera powered off, asleep, or not in PTP mode");
+            println!("    - another process holds the device (lsof /dev/bus/usb/...)");
+            println!("    - insufficient permissions on the USB node");
+        }
+    }
+}
+
+extern "C" { #[link_name = "getuid"] fn libc_getuid() -> u32; }
 
 // ---------------------------------------------------------------- step 1
 

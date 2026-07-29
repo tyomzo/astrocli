@@ -362,6 +362,49 @@ Mid-session the camera became unreachable with "Could not claim the USB device".
 the USB claim exclusively. Releasing the gvfs mount restored access immediately.
 
 **The field node must prevent this** — a desktop environment silently taking the camera is a
-guaranteed field failure, and the error message points nowhere useful. Either run the field node
-headless, mask the gvfs gphoto2 volume monitor, or add a udev rule. This belongs in M2-T02's
-connect path as a detected-and-explained condition rather than a bare "could not claim".
+guaranteed field failure, and the error message points nowhere useful.
+
+### Detection — implemented and verified
+
+`spikes/gphoto2-r10` now diagnoses the claim failure instead of reporting it bare. Reproduced
+deliberately (`gio mount "gphoto2://[usb:005,007]/"`), the spike output becomes:
+
+```
+FATAL: autodetect failed: Could not claim the USB device
+--- diagnosing ---
+  CAUSE FOUND: gvfs has the camera mounted and holds the USB claim.
+    mount: /run/user/1000/gvfs/gphoto2:host=%5Busb%3A005%2C007%5D
+  Release it now:
+    gio mount -u "gphoto2://%5Busb%3A005%2C007%5D/"
+```
+
+Both the URL-encoded and decoded unmount forms were tested and both work; the camera reconnects
+immediately afterwards (autodetect 108 ms). When no gvfs mount is present the diagnostic lists the
+other causes — camera off or asleep, not in PTP mode, another process holding the node,
+permissions — rather than claiming a cause it has not established.
+
+### Prevention on the field node — mechanism verified, deliberately not applied here
+
+**Masking the systemd user unit alone is not sufficient**, and this is the part worth knowing.
+`/usr/lib/systemd/user/gvfs-gphoto2-volume-monitor.service` is `Type=dbus`, and
+`/usr/share/dbus-1/services/org.gtk.vfs.GPhoto2VolumeMonitor.service` carries a direct
+`Exec=/usr/libexec/gvfs-gphoto2-volume-monitor`. D-Bus can therefore activate the binary even with
+the unit masked. Both paths must be closed:
+
+```sh
+systemctl --user mask gvfs-gphoto2-volume-monitor.service
+mkdir -p ~/.local/share/dbus-1/services
+cat > ~/.local/share/dbus-1/services/org.gtk.vfs.GPhoto2VolumeMonitor.service <<'EOD'
+[D-BUS Service]
+Name=org.gtk.vfs.GPhoto2VolumeMonitor
+Exec=/bin/false
+EOD
+```
+
+Both are user-level — **no root required** — and reversible (`systemctl --user unmask`, delete the
+override). A headless field node has no gvfs at all and needs neither.
+
+**Not applied to the development workstation**, where gvfs camera integration is wanted and this
+would only break the file manager. The full hotplug path could not be exercised without physically
+replugging, so the mechanism is verified (unit is `Type=dbus`, D-Bus file has a direct `Exec`,
+override directory is user-writable) while end-to-end hotplug suppression remains untested.
