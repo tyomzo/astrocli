@@ -68,23 +68,30 @@ additionally out of reach — on shared hosting the private key is not normally 
 here. (An earlier draft of this task offered it, before the certificates were checked.)
 
 - **Name.** `field.diirc.lt`, resolving to the field node's VPN address. Does not resolve today.
-- **Issuance — the part that needs a decision.** DNS for `diirc.lt` is at Hostinger
-  (`ns1/ns2.dns-parking.com`). DNS-01 (SEC-06) needs an ACME client that can write a TXT record
-  there, and Hostinger's DNS API support in the common clients is the thing to verify **before**
-  committing to this route. There is no `_acme-challenge` delegation in the zone today.
+- **Issuance — settled: Let's Encrypt via `acme.sh --dns dns_hostinger`.** DNS for the zone is at
+  Hostinger (`ns1/ns2.dns-parking.com`), and `acme.sh` ships a **native Hostinger DNS plugin**, so
+  DNS-01 automates against the zone as it stands. No migration to another DNS provider, no
+  `_acme-challenge` CNAME delegation, no `acme-dns` instance — all of which an earlier draft of this
+  task proposed before the plugin was found.
 
-  Three ways through, in the order worth trying:
+  Verify the credential variable against the installed version before scripting it: the project
+  wiki documents `HOSTINGER_COM_Username` / `HOSTINGER_COM_Password`, while more recent material
+  describes a `HOSTINGER_Token` against the official API at `developers.hostinger.com`. Both refer
+  to the same `dns_hostinger` plugin; the plugin appears to have moved from credentials to an API
+  token. Prefer the token if the installed version supports it.
 
-  1. **Delegate only the challenge.** `CNAME _acme-challenge.field.diirc.lt` to a zone with a real
-     API (Cloudflare is free and universally supported) or to an `acme-dns` instance. One static
-     record at Hostinger, set once; renewals then never touch Hostinger again. This is the standard
-     answer to exactly this situation and it keeps the zone where it is.
-  2. **Issue on the Azure host and ship the certificate.** `through.diirc.lt` already runs a working
-     ACME client, so the machinery exists. Costs a copy step every 90 days unless automated, which
-     is real toil — see SEC-07, whose whole point is that a lapse is silent until the operator is
-     in a field.
-  3. **Move the zone** to a provider with an API. Cleanest long-term, largest blast radius, and it
-     touches the live website — not worth it just for this.
+  **Choosing a different CA buys nothing.** Every publicly trusted CA is bound by CA/Browser Forum
+  ballot SC-081v3: maximum validity fell to **200 days on 15 March 2026**, drops to **100 days in
+  March 2027** and **47 days in March 2029**. Nobody sells a set-and-forget certificate any more, so
+  the choice is not "which CA" but "is renewal automated" — and once it is automated, Let's Encrypt
+  is free and already understood by every client.
+
+- **Where renewal runs.** The field node needs only *outbound* internet to renew, which it has
+  whenever the rig is home. That is the fewest moving parts and the default for this task. The risk
+  is a rig that sits in storage past the renewal window — which is exactly what SEC-07's expiry
+  warning is for. If the 2027 move to 100-day certificates makes that uncomfortable, issue centrally
+  on the always-on Azure host (it already runs ACME) and push to the field node over the VPN; that
+  is a change of one script, not of this design.
 
 - **Resolution (SEC-08).** The name must resolve **through the VPN's DNS, not only the public
   zone**. If resolution depends on reaching public DNS, the UI becomes unreachable precisely when
@@ -92,8 +99,9 @@ here. (An earlier draft of this task offered it, before the certificates were ch
   deliberately: with the uplink down, the phone must still resolve `field.diirc.lt`.
 - A private address in a public A record is acceptable and is not exposure. Note it in the setup
   document so it does not later read as a leak.
-- **Renewal is every 90 days**, not annually — Let's Encrypt throughout. SEC-07's expiry reporting
-  is doing real work here rather than guarding a hypothetical.
+- **Renewal is every 90 days**, and the industry ceiling is falling (200 days today, 100 in March
+  2027, 47 in March 2029). SEC-07's expiry reporting is doing real work rather than guarding a
+  hypothetical, and it will matter more each year.
 
 ## Acceptance criteria
 
