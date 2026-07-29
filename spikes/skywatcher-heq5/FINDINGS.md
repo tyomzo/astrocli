@@ -264,8 +264,30 @@ is always meaningfully faster.
 5. **Stop overshoot is dominated by link latency**, so it scales with rate rather than with the
    choice of `K` versus `L`. At 817× sidereal the same 16 ms becomes ~1,370 counts.
 
+## IMPORTANT CAVEAT — none of this proves the axis physically rotated
+
+The position counter is **an open-loop stepper step count, not encoder feedback** (PRD §4.2: the
+HEQ5 Pro has no position encoders). It reports steps the controller believes it has issued. If a
+motor had not turned at all — unpowered, stalled, driver fault — **every measurement above would
+look exactly the same.**
+
+So what these experiments establish is that *the motor controller accepted the commands and
+executed the step sequence at the commanded rate*. That is genuinely what the driver needs: the
+counter is the value the driver reads and converts to coordinates, so the step-period-to-counter-rate
+relation confirmed in E10 is directly load-bearing. But it is not evidence of physical rotation,
+and it is certainly not evidence that the mount tracks at sidereal in the sky.
+
+Total commanded travel across the whole session was **14,394 counts = 0.574°** on the RA axis —
+barely perceptible on a bare mount head with nothing attached for visual reference. And if the
+clutches were loose, as the plan calls for, the motor and gear turn while the output shaft
+deliberately does not.
+
+**To close this, one of:** listen for the stepper (at 5,350 steps/s it should be clearly audible);
+mark the shaft and command a large, unmistakable move; or watch supply current during motion.
+Until then, treat every figure above as characterising the *controller*, not the *mechanism*.
+
 ## Still open
 
-Phase 5 characterisation (backlash, per-class slew speeds, goto accuracy across distances, the
+Physical-rotation confirmation (see the caveat above), Phase 5 characterisation (backlash, per-class slew speeds, goto accuracy across distances, the
 `d`/`h`/`r`/`m` readback hypothesis, guide pulses), Phase 6 e-stop latency on the wire with the
 sniffer, and Phase 7 endurance. High-speed classes remain unrun.
