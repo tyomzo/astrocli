@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.11.0
+**Version:** 1.11.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -44,6 +44,8 @@
 **Change note (1.10.0):** §5.9 given a layout, and it is not the obvious one. The subsystem decomposition — mount panel, camera panel, stack panel — mirrors the backend rather than the operator, whose sequence is pick a target, slew, frame, capture, watch. Manual mount control is not a destination but a brief step after a slew settles, so a permanent panel for it wastes space for most of a session. Layout now follows the session FSM. Three specifics: the D-pad **overlays the image** because nudging is framing and the control must share a field of view with its effect; the nudge affordance is contextual but always summonable, auto-expanding when a slew completes; and the target region is a **slot with a stable contract** holding manual RA/DEC entry in M1, into which Phase 2a's catalog drops without restructuring anything.
 
 **Change note (1.11.0):** the accumulating stack is promoted from a status readout to a **primary view**. PRD §2 promises "immediate visual feedback as signal accumulates" — that is the payoff the two-node architecture exists for, and filing it under status was wrong. `FRAME` and `STACK` are now two sources sharing one image surface, switching to `STACK` when a sequence starts. The stack view is a slot like the target region: no knobs in M1 (the stub worker does no stacking), stats and the first controls in 2b, the post-chain in 2c. Also specifies the **rebuilding state**: IPP-16 re-stacks in the background while the preview keeps serving the pre-rebuild image, so a knob change correctly does nothing visible for a while and looks like a bug unless the panel says so.
+
+**Change note (1.11.1):** the nudge control is **summoned, never automatic** — a badge in the bottom-right of the image surface that expands only on tap. Auto-expanding on slew completion contradicted the decision to overlay the image: it covers the frame the operator waited through the slew to see. The badge also signals availability before it is tapped, encoded **redundantly** rather than by colour alone, since night mode collapses hues toward red and a green/red badge becomes red/red.
 
 ---
 
@@ -751,10 +753,24 @@ Three consequences worth stating explicitly, because each is easy to get wrong:
 1. **The D-pad overlays the image; it does not sit beside it.** Nudging *is* framing, so the
    control and the thing it affects must be in one field of view. A separate panel makes the
    operator look back and forth between their hand and the result.
-2. **Contextual by default, always summonable.** The `⊕nudge` affordance is permanently present
-   but compact, and expands automatically when a slew completes. Hiding a control the operator
-   wants is a worse failure than showing one they do not — progressive disclosure must never
-   become a guessing game at 2 a.m.
+2. **Summoned, never automatic.** The nudge affordance is a small badge in the **bottom-right
+   corner of the image surface**, and the D-pad appears only when the operator taps it. It does
+   **not** auto-expand when a slew completes: the operator has just waited through a slew to see
+   the frame, and popping a D-pad over it covers precisely what they were waiting for. The badge
+   itself is always visible, so nothing is hidden — only the expansion is deliberate.
+
+   Bottom-right is where a thumb naturally rests on a phone, which suits a frequent action. That
+   it is diagonally distant from the e-stop's fixed header position is the point: the frequent
+   control should be easy, and the irreversible one should take a deliberate reach.
+
+   **The badge shows whether nudging is possible before it is tapped** — the mount may be
+   disconnected, mid-goto, or against a limit, and discovering that by tapping and getting nothing
+   is the frustrating case. Colour carries this (green available, red not) **but colour cannot
+   carry it alone**: night mode collapses every hue toward red, so red-versus-green becomes
+   red-versus-red, and roughly 8% of men have a red-green deficiency in any lighting. The state
+   must therefore be encoded redundantly — a **filled** badge when available, **hollow with a
+   slash** when not — so the distinction survives both night mode and the operator. Tapping an
+   unavailable badge explains why rather than doing nothing.
 3. **The target region is a slot with a stable contract.** In M1 it holds manual RA/DEC entry.
    Phase 2a's catalog (PLN-03/04) drops into the same slot without restructuring anything around
    it — it changes how a target is *chosen*, not what the rest of the UI does with one.
