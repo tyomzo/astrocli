@@ -87,7 +87,13 @@ speed. It is not a substitute for the bounded-motion discipline below.
 ### E4 · repeat on axis 2
 Same, DEC. Direction conventions frequently differ between axes.
 
-### E5 · step-period relation, measured inside a bounded goto
+### E5 · step-period relation, measured inside a bounded goto — **PREMISE FALSIFIED, see FINDINGS.md**
+> **Executed and disproved.** GOTO ignores the step period — a 10× change left the rate unchanged
+> at 5,350 counts/s. The rate can only be measured in SLEW mode (E10), which is unbounded and
+> therefore does genuinely require `K` proven first. The original Phase 4 placement was correct;
+> this restructure was wrong and the hardware said so. E10 subsequently confirmed the timer
+> frequency at 0.11% agreement.
+
 **This was originally Phase 4 and has been moved forward.** It does not need unbounded tracking,
 and therefore does not need `K` proven — a goto self-terminates, so the highest-value measurement
 in the series can happen before we rely on the stop path at all.

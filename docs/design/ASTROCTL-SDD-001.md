@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.11.1 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.12.0 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -22,6 +22,8 @@
 **Change note (1.3.0):** §5.2.2 rewritten from a read-only hardware survey (`spikes/skywatcher-heq5/FINDINGS.md`): the opcode case convention stated as the safety boundary, seven undocumented inquiries recorded, real `!` error codes captured, and the mount's failure to validate the axis digit promoted to a codec correctness requirement. §5.2.4 gains hardware-validated timings — 2000 clean exchanges confirm the 3-miss heartbeat threshold, and back-to-back frames are shown to corrupt the reply stream, which is why single request-response is required rather than merely tidy.
 
 **Change note (1.4.0):** §5.2.2 action-opcode encodings derived from vendor and reference-implementation sources (`spikes/skywatcher-heq5/ENCODINGS.md`) and two design errors corrected: the goto target is a **relative increment (`H`)**, not an absolute position (`S`, which the protocol does not have), and **`M` set-break-point-increment was missing entirely** from the command table despite being part of every goto. The `G` motion-mode bit layout and the `f` status decoding are now specified, the latter validated against our own hardware capture. §5.2.3's goto description updated for relative targeting.
+
+**Change note (1.5.0):** §5.2.2/§5.2.3/§5.2.4 updated from executed motion experiments: goto ignores the step period (so no goto-speed calculation should be built around it), the goto tolerance is measurably generous, and `L` versus `K` is shown to be indistinguishable at low speed — stop overshoot is link latency scaling with rate, which is the real argument for the priority lane.
 
 ---
 
@@ -316,7 +318,11 @@ counterintuitive — `0` is *high* speed and `1` is *low* — so a transposed di
 error rather than a direction error. Never construct this byte from an unvalidated integer.
 
 **Goto command sequence**: `G` (mode) → `I` (step period) → `H` (target increment) → `M`
-(break-point increment) → `J` (start). The mount decelerates and stops itself at the target;
+(break-point increment) → `J` (start). **`I` is sent for protocol completeness but does not
+control goto speed** — measured on hardware, a 10× step-period change left the rate unchanged at
+5,350 counts/s. Goto speed comes solely from the `G` mode digit and offers exactly two values (low
+≈ 51× sidereal, high ≈ 817×). Do not build a goto-speed calculation around the step period; it
+governs SLEW and tracking only. The mount decelerates and stops itself at the target;
 this self-terminating property is what makes a bounded goto the correct first motion during
 bring-up (see `spikes/skywatcher-heq5/MOTION-PLAN.md`).
 
@@ -361,7 +367,7 @@ dec_counts→deg:   dec_d = ((counts - counts_home) / CPR) * 360.0
 
 RA axis position is mechanical hour angle; conversion to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
 
-Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts), then restores tracking if it was active (SES-06).
+Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts — measured goto error at low speed is 0 counts, so this is generous; tighten once E13 samples more distances), then restores tracking if it was active (SES-06).
 
 #### 5.2.4 Serial task and lanes
 
@@ -375,7 +381,12 @@ enum SerialRequest { Normal(Cmd, oneshot::Sender<Result<Resp>>),
 // no new normal request starts while priority queue is non-empty.
 ```
 
-Per-request timeout 500 ms (≈30× the measured 16.6 ms worst case — deliberately generous, not a guess), one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). **Threshold validated against hardware**: 2000 consecutive exchanges produced zero timeouts and zero malformed replies, with a 2.5 ms spread, so three consecutive misses is an unambiguous fault signal rather than noise-triggering. Framing resilience was also measured — the mount resynchronises on `:` after junk, and a truncated frame times out without wedging the link. Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`; measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
+Per-request timeout 500 ms (≈30× the measured 16.6 ms worst case — deliberately generous, not a guess), one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). **Threshold validated against hardware**: 2000 consecutive exchanges produced zero timeouts and zero malformed replies, with a 2.5 ms spread, so three consecutive misses is an unambiguous fault signal rather than noise-triggering. Framing resilience was also measured — the mount resynchronises on `:` after junk, and a truncated frame times out without wedging the link. Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`. **Note what `L` does and does not buy:**
+measured at low speed, `L` and `K` arrest motion identically (85 vs 84 counts of overshoot) because
+at that rate the overshoot is one serial round trip of command latency, not deceleration. The
+instant-stop advantage is real only at high slew rates where momentum exists. Stop overshoot
+therefore scales with rate — the same 16 ms becomes ~1,370 counts at 817× sidereal — which is the
+actual argument for the priority lane. measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
 
 ### 5.3 Canon gPhoto2 camera driver (`astroctl-drivers::gphoto2`)
 

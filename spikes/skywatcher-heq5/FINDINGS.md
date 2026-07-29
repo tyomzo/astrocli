@@ -184,3 +184,88 @@ unplug case still needs a hand on the cable.
 
 Everything requiring motion (T-HIL-1 steps 3–6), the semantics of the seven undocumented
 inquiries, the `F` initialise path, and physical-unplug recovery.
+
+---
+
+# MOTION FINDINGS — Phases 1–4 executed
+
+**Date:** 2026-07-29 · Bare HEQ5, no OTA, no counterweight · `motion.py` · Every experiment ran
+behind the opcode allowlist, the position fence and a wall-clock deadline. No fence trip, no
+emergency stop, no unexpected motion at any point.
+
+## The headline: the timer frequency correction is confirmed on the wire
+
+**E10** — SLEW mode, step period 620, 1,863 samples over 30 s:
+
+| | |
+|---|---|
+| Measured rate | **104.617 counts/s** |
+| Sidereal rate | 104.7304 counts/s → **0.999×** |
+| Implied timer frequency | 620 × 104.617 = **64,862** |
+| Our corrected value | 64,935 → **0.11% agreement** |
+| The old documented value | 460,800 → would predict 743.2 c/s. Off by 7.1× |
+
+**Step period 620 is the sidereal tracking constant.** Synta chose the timer frequency so that
+sidereal lands on a round step period, exactly as suspected. The risk that opened this whole
+thread is now closed by measurement rather than inference.
+
+## GOTO ignores the step period — the plan's premise was wrong
+
+E3 was run twice with a 10× change in step period:
+
+| step period | plateau rate | duration for 1,000 counts |
+|---|---|---|
+| 620 | 5,350 counts/s | 0.19 s |
+| 6,200 | 5,335 counts/s | 0.19 s |
+
+Identical. **`I` does not control goto speed.** GOTO uses fixed internal speeds selected by the
+mode digit of `G`; `I` governs SLEW and tracking only.
+
+This falsified the restructure that moved the rate measurement into Phase 2 as a bounded goto. The
+original ordering was right: the rate can only be measured in SLEW mode, which is unbounded, which
+genuinely requires `K` proven first. Recorded rather than quietly reverted — the plan was wrong and
+the hardware said so.
+
+**Goto speeds, measured:** low ≈ **5,350 counts/s = 51.1× sidereal**. Applying the verified 16×
+high-speed ratio gives 85,600 c/s = **817× sidereal**, against PRD §4.2's stated 800× maximum slew.
+Independent corroboration of both the ratio and the speed model.
+
+## Per-experiment results
+
+**E1 · `F` initialise** — `:F1` and `:F2` both returned a bare `=`. Status went `100` → `101` on
+each axis: the initialised bit, exactly as the Phase 0 bit table predicts. **Zero counter movement
+on both axes.** The status decoder is now validated in two distinct states.
+
+**E3 · first bounded goto** — `G`/`I`/`H`/`M`/`J` all accepted. Commanded +1,000 counts, travelled
++1,000 counts, **goto error 0**. Self-terminated with no stop command sent, which was the whole
+point of going bounded-first. Constant-velocity plateau with deceleration confined to the final
+sample.
+
+**E7 · `K` mid-travel** — sent at +5,044, motion ceased at +5,128. **Overshoot +84 counts**
+(12.1 arcsec). Did not reach the 10,000 target, so `K` genuinely arrested the motion.
+
+**E8 · `L` mid-travel** — sent at +5,038, ceased at +5,123. **Overshoot +85 counts** (12.2 arcsec).
+
+**`K` and `L` are indistinguishable at low speed.** One count apart is noise. At 5,350 c/s, 84
+counts is 15.7 ms of travel — essentially one serial round trip, so the overshoot is *command
+latency, not deceleration*. The ramped-versus-instant distinction only has physical meaning at
+high speed, where real momentum exists. PRF-12's rationale should say so rather than implying `L`
+is always meaningfully faster.
+
+## Design consequences
+
+1. **PRD §4.2 timer frequency 64,935 — confirmed empirically.** Close the risk.
+2. **Sidereal step period is 620.** Record it; it is the tracking constant M3-T03 needs.
+3. **The driver must not attempt to control goto speed via `I`.** Goto speed is selected solely by
+   the `G` mode digit, which offers exactly two speeds. Any design that computes a goto step period
+   is wasting effort and will mislead whoever reads it.
+4. **SDD §5.2.3's goto tolerance of "default 10 counts" is generous** — we measured 0 counts of
+   error. It can be tightened, though more samples across distances (E13) should inform the value.
+5. **Stop overshoot is dominated by link latency**, so it scales with rate rather than with the
+   choice of `K` versus `L`. At 817× sidereal the same 16 ms becomes ~1,370 counts.
+
+## Still open
+
+Phase 5 characterisation (backlash, per-class slew speeds, goto accuracy across distances, the
+`d`/`h`/`r`/`m` readback hypothesis, guide pulses), Phase 6 e-stop latency on the wire with the
+sniffer, and Phase 7 endurance. High-speed classes remain unrun.

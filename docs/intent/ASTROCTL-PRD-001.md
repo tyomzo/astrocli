@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.11.1  
+**Version:** 1.12.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -19,6 +19,8 @@
 **Change note (1.11.0):** §4.2 mount parameters verified against the operator's own HEQ5 by read-only handshake (`spikes/skywatcher-heq5/FINDINGS.md`). **Timer interrupt frequency corrected from ~460,800 Hz to 64,935 Hz** — wrong by a factor of 7.1. CPR (9,024,000) and counter home (`0x800000`) confirmed exactly. The high-speed ratio remains unverified. The protocol-documentation risk in §10 is marked as having *occurred and been contained*.
 
 **Change note (1.11.1):** §4.2 high-speed ratio verified as 16× by read-only survey (`:g`, both axes) — the last unverified mount constant. All §4.2 parameters are now hardware-confirmed.
+
+**Change note (1.12.0):** §4.2 timer frequency **confirmed under motion** — slewing at step period 620 measured 104.617 counts/s (0.999× sidereal), implying 64,862 against the corrected 64,935. The 460,800 figure would have predicted 743 c/s. Sidereal step period (620) and measured goto speeds recorded; goto speed is fixed per mode digit and not settable via the step period.
 
 ---
 
@@ -212,14 +214,26 @@ Key parameters. **Read from the operator's own HEQ5 Pro on 2026-07-29** — see
 `spikes/skywatcher-heq5/FINDINGS.md`. The driver reads these at handshake and never hardcodes
 them (SDD §5.2.3); the values below are for test fixtures and hand-verification:
 - Counts per revolution: **9,024,000** — verified, both axes
-- Timer interrupt frequency: **64,935 Hz** — verified, both axes. *Previously documented here as
-  ~460,800 Hz, which was wrong by a factor of 7.1. Any fixture or hand-computed step period built
-  on the old figure is invalid.*
+- Timer interrupt frequency: **64,935 Hz** — read at handshake and **confirmed under motion**:
+  slewing at step period 620 measured 104.617 counts/s against a sidereal rate of 104.7304, giving
+  an implied timer frequency of 64,862 (0.11% agreement). *Previously documented here as ~460,800 Hz,
+  which was wrong by a factor of 7.1 and would have predicted 743 counts/s. Any fixture or
+  hand-computed step period built on the old figure is invalid.*
+- **Sidereal tracking step period: 620** (= timer frequency ÷ sidereal rate). Measured directly
+- **Goto speeds are fixed and NOT settable via the step period** — see §4.2 note below
 - Counter home position: **`0x800000`** — verified, both axes read exactly home
 - High-speed ratio: **16×** — verified via `:g`, both axes. Note the encoding: it returns two hex
   characters (`10`), *not* a byte-swapped u24, so the codec must not apply the u24 rule to it
 
 Capabilities reported: `has_pec=False, has_pulse_guide=True, has_tracking_rates=[sidereal, lunar, solar], max_slew_speed=800x_sidereal, position_resolution=24bit`
+
+**Measured motion behaviour** (`spikes/skywatcher-heq5/FINDINGS.md`). GOTO mode **ignores the step
+period** — a 10× change produced an identical 5,350 counts/s. Goto speed is selected solely by the
+mode digit of `G`, which offers two fixed speeds: low ≈ 5,350 counts/s (51× sidereal) and, applying
+the verified 16× ratio, high ≈ 85,600 counts/s (817× sidereal) — corroborating the 800× figure
+above. The step period governs SLEW and tracking only. Goto lands on target with 0 counts of error
+at low speed, and both `K` and `L` arrest motion with ~84 counts of overshoot, which at that rate
+is one serial round trip of command latency rather than deceleration.
 
 ### 4.3 Camera — Canon EOS R10 (reference implementation)
 
