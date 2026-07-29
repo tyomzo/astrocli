@@ -14,7 +14,9 @@ ever see or send is producible and parseable here first.
 
 - Frame encode: `:` + cmd + axis + payload + `\r`; decode: `=data\r` / `!err\r` with error-code enum
 - `encode_u24`/`decode_u24` with the byte-swap quirk (0x123456 ↔ "563412"); also u16/u8 variants used by some commands
-- Typed command layer: one type per SDD §5.2.2 table row (`GetPosition(Axis)`, `SetGotoTarget(Axis, Counts)`, …) with encode + typed response parse; motion-mode byte semantics (direction/speed-class bits) as documented enums
+- Typed command layer: one type per SDD §5.2.2 table row (`GetPosition(Axis)`, `SetGotoIncrement(Axis, Counts)`, `SetBreakPointIncrement(Axis, Counts)`, …) with encode + typed response parse. **The goto target is a relative increment (`H`), not an absolute position** — the protocol has no absolute-target opcode; see `spikes/skywatcher-heq5/ENCODINGS.md`
+- **Motion mode (`G`) is the highest-risk encoding in the protocol** and must be a typed enum, never an integer formatted into a string. The packing is counterintuitive — mode `0` is GOTO *high* speed and `1` is SLEW *low* speed — so a transposed digit is a 16× speed error, not a direction error. Encode as `MotionMode { slew_or_goto, speed_class, direction }` with a table-driven test covering all eight combinations against the reference values
+- `f` status decode per the ENCODINGS.md bit table, with `=100` (uninitialised, at rest) as a verified fixture from the real mount
 - **Golden vectors**: `spikes/skywatcher-heq5/FINDINGS.md` already contains **nine `verified` pairs read from the operator's own HEQ5** (handshake, CPR, timer freq, position, axis status, both axes) — seed `testdata/synta_vectors.txt` with those, then extend from EQMOD/indi-eqmod traces. Mark anything without a real trace `derived`; T05 step 2 upgrades the rest
 - The `!` error frame **is** now covered by real captures: `!0` unknown command (`:z1`), `!1` missing/invalid parameter (`:j`), `!3` malformed frame (`:`) — all `verified`
 - **Width is not uniform**: `:g` returns 2 hex chars and `:f` returns 3; only the u24 fields are byte-swapped. A single "decode payload" path that assumes 6 chars will silently mis-decode both

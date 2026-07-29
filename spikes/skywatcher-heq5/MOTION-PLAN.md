@@ -28,8 +28,10 @@ direction and speed class into a byte whose layout we do not know.
 Guessing the `G` encoding is precisely how a low-speed test becomes a high-speed slew. Trial and
 error is acceptable for a read-only sweep; it is not acceptable for the byte that selects speed.
 
-Deliverables: documented bit layout for `G`; frame formats for `S`, `I`, `J`, `K`, `L`, `P`, `F`;
-and the `:f` status bit meanings. Cross-check against the nine verified vectors we already hold.
+**Status: COMPLETE** — see `ENCODINGS.md`. `G` confirmed against three independent sources, `f`
+status bits decoded and validated against our own capture, and two corrections found: the goto uses
+`H` (relative increment), not `S` (absolute), and `M` (break-point increment) was missing from the
+design entirely. The `I` step-period relation remains a hypothesis that E8 tests.
 
 ## The software fence
 
@@ -60,7 +62,7 @@ speed. It is not a substitute for the bounded-motion discipline below.
 
 ### E1 · `F` initialise, both axes
 **Question:** does `F` move anything, and what does it do to `:f`?
-**Procedure:** read `:j` and `:f` on both axes. Send `F` to axis 1 only. Re-read both. Repeat for axis 2.
+**Procedure:** read `:j` and `:f` on both axes, decoding `:f` per the Phase 0 bit table. Send `F` to axis 1 only. Re-read both. Repeat for axis 2.
 **Prediction:** no counter movement; `:f` changes from the at-rest `100` to an initialised pattern.
 **Abort:** any counter movement at all — `F` is not supposed to be a motion command.
 **Feeds:** SDD §5.2.2 status decoding; the connect handshake in M3-T04.
@@ -75,8 +77,8 @@ speed. It is not a substitute for the bounded-motion discipline below.
 ## Phase 2 — first motion, bounded, stop NOT yet trusted
 
 ### E3 · smallest self-terminating goto
-**Question:** do `G`/`S`/`J` encode correctly, does the mount move, and does it stop *itself*?
-**Procedure:** axis 1 only. `G` low-speed mode, `S` target = current + 1,000 counts (**0.0399° ≈ 2.4 arcmin**), `J` start. **Do not send `K`.** Poll `:j` at max rate throughout. Let the mount terminate on its own.
+**Question:** do `G`/`I`/`H`/`M`/`J` encode correctly, does the mount move, and does it stop *itself*?
+**Procedure:** axis 1 only. `G` = `"20"` (GOTO, low speed, forward) → `I` step period → `H` increment = **+1,000 counts** (**0.0399° ≈ 2.4 arcmin**) → `M` break-point → `J` start. **Do not send `K`.** Note the goto target is a *relative increment*, not an absolute position (Phase 0 correction). Poll `:j` at max rate throughout. Let the mount terminate on its own.
 **Prediction:** axis advances 1,000 counts and stops without further command.
 **Records:** direction sign, elapsed time, final counter vs target (the goto error), the `:f` pattern while moving.
 **Abort:** fence at 20,000 counts.
@@ -140,8 +142,8 @@ Move + 5,000 counts, stop, settle, reverse. Count the commanded steps before the
 ### E12 · goto accuracy vs distance
 Gotos of 1,000 / 10,000 / 100,000 / 1,000,000 counts, both directions, five repeats each. Record final error. **Feeds the `tolerance` value in SDD §5.2.3**, which is currently a guessed "default 10 counts".
 
-### E13 · do `d`, `h`, `r` track the goto target?
-Read them before and after `S`. The survey found them sitting at or near home, suggesting target/breakpoint registers. If confirmed, the driver gains a way to **read back what a goto was programmed with before `J` is ever sent** — a pre-motion safety check the design does not currently have.
+### E13 · do `d`, `h`, `r`, `m` track the goto target?
+Read them before and after `H`/`M`. Phase 0 makes this sharper: `H` and `M` are the goto-increment and break-point setters, so lowercase `h` and `m` are plausibly their readbacks. The survey found them sitting at or near home, suggesting target/breakpoint registers. If confirmed, the driver gains a way to **read back what a goto was programmed with before `J` is ever sent** — a pre-motion safety check the design does not currently have.
 
 ### E14 · guide pulses
 `P` sets the autoguide rate; issue a pulse and measure displacement in counts. Validates MNT-12 and the `GuideRate` newtype added in SDD §5.1.

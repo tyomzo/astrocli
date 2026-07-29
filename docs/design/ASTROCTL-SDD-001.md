@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.3.0
+**Version:** 1.4.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -20,6 +20,8 @@
 **Change note (1.2.1):** §5.2.4 serial timings replaced with measurements from a real HEQ5 — round trip 14.4–16.6 ms, so the in-flight-normal-request assumption behind the e-stop priority lane is a third of what was budgeted.
 
 **Change note (1.3.0):** §5.2.2 rewritten from a read-only hardware survey (`spikes/skywatcher-heq5/FINDINGS.md`): the opcode case convention stated as the safety boundary, seven undocumented inquiries recorded, real `!` error codes captured, and the mount's failure to validate the axis digit promoted to a codec correctness requirement. §5.2.4 gains hardware-validated timings — 2000 clean exchanges confirm the 3-miss heartbeat threshold, and back-to-back frames are shown to corrupt the reply stream, which is why single request-response is required rather than merely tidy.
+
+**Change note (1.4.0):** §5.2.2 action-opcode encodings derived from vendor and reference-implementation sources (`spikes/skywatcher-heq5/ENCODINGS.md`) and two design errors corrected: the goto target is a **relative increment (`H`)**, not an absolute position (`S`, which the protocol does not have), and **`M` set-break-point-increment was missing entirely** from the command table despite being part of every goto. The `G` motion-mode bit layout and the `f` status decoding are now specified, the latter validated against our own hardware capture. §5.2.3's goto description updated for relative targeting.
 
 ---
 
@@ -295,13 +297,35 @@ Command set used in Phase 1 (**all opcodes to be verified against the EQMOD sour
 | `f` | Get axis status | status, slew-complete detection |
 | `F` | Initialize axis | connect |
 | `G` | Set motion mode (dir + speed class) | tracking, slew, goto |
-| `S` | Set goto target (absolute counts) | goto |
+| `H` | Set goto target **increment** (relative counts) | goto |
+| `M` | Set break-point increment (deceleration point) | goto |
 | `I` | Set step period (speed) | tracking rates, slew speeds |
 | `J` | Start motion | tracking, slew, goto |
 | `K` | Stop motion (ramped) | stop_slew, stop_tracking |
 | `L` | Instant stop | **emergency_stop only** |
 | `P` | Set autoguide rate | guide_pulse setup |
 | `g` | High-speed ratio | connect handshake — **2 hex chars, not a byte-swapped u24** |
+
+`E` (set axis position), `O` (set switch) and `U` (set break steps) exist in the vendor protocol
+but are unused by this design.
+
+**`G` motion-mode encoding** — `:G<axis><mode><dir>\r`, confirmed against three independent
+sources (`spikes/skywatcher-heq5/ENCODINGS.md`). Mode: `0` GOTO high-speed, `1` SLEW low-speed,
+`2` GOTO low-speed, `3` SLEW high-speed. Direction: `0` forward, `1` backward. Note the packing is
+counterintuitive — `0` is *high* speed and `1` is *low* — so a transposed digit is a 16× speed
+error rather than a direction error. Never construct this byte from an unvalidated integer.
+
+**Goto command sequence**: `G` (mode) → `I` (step period) → `H` (target increment) → `M`
+(break-point increment) → `J` (start). The mount decelerates and stops itself at the target;
+this self-terminating property is what makes a bounded goto the correct first motion during
+bring-up (see `spikes/skywatcher-heq5/MOTION-PLAN.md`).
+
+**`f` axis status decoding** — reply `=<n1><n2><n3>`; bit tests apply directly to the ASCII
+characters, valid because status nibbles never exceed 7. `n1 & 0x01` slew mode (1 = SLEW,
+0 = GOTO); `n1 & 0x02` direction (1 = backward); `n1 & 0x04` speed (1 = high); `n2 & 0x01`
+running; `n3 & 0x01` initialised. Validated against our own capture: the mount returned `=100`
+powered-but-uninitialised and at rest, which the decoder reproduces exactly. **This is the field
+slew-complete detection (§5.2.3) depends on.**
 
 **Opcode case is the safety boundary.** Lowercase opcodes are inquiries; uppercase are actions
 (`F G S I J K L P`). Everything the driver sends before a deliberate motion decision must be
@@ -337,7 +361,7 @@ dec_counts→deg:   dec_d = ((counts - counts_home) / CPR) * 360.0
 
 RA axis position is mechanical hour angle; conversion to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
 
-Goto: absolute target counts computed from target RaDec + LST + chosen pier side; long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts), then restores tracking if it was active (SES-06).
+Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts), then restores tracking if it was active (SES-06).
 
 #### 5.2.4 Serial task and lanes
 
