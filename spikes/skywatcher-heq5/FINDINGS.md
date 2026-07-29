@@ -89,3 +89,98 @@ the mount.
 
 Also unverified: the `!` error-frame path, `F` axis initialisation behaviour, and the high-speed
 ratio (PRD §4.2 assumes ~16× — untested, and now under suspicion given the timer-frequency result).
+
+---
+
+# T-SER-4 FINDINGS — read-only protocol surface and resilience
+
+**Date:** 2026-07-29 · Same rig · `survey.py`, lowercase opcodes only. The write gate rejects any
+uppercase byte on the raw stream, so no misaligned frame can form an action opcode; every probe is
+bracketed by a both-axis position read. **Final motion check: counters never moved.**
+
+## The last §4.2 unknown is closed
+
+`:g1` and `:g2` both return `'10'` — two hex characters, not six, so no byte-swap applies:
+0x10 = **16**. PRD §4.2's assumed ~16× high-speed ratio is **confirmed**. Note the width: the
+codec must not apply the u24 byte-swap rule to this field.
+
+## The command table is less than half the real surface
+
+SDD §5.2.2 documents five inquiries (`e a b j f`). The mount supports **thirteen**:
+
+| Opcode | Response | Decoded (byte-swapped u24) | Status |
+|--------|----------|---------------------------|--------|
+| `a` | `00B289` | 9,024,000 | documented — CPR |
+| `b` | `A7FD00` | 64,935 | documented — timer frequency |
+| `c` | `008800` | 34,816 | **undocumented** |
+| `d` | `000080` | 8,388,608 — exactly home | **undocumented** |
+| `e` | `020401` | — | documented — firmware version |
+| `f` | `100` | — (3 chars, status bits) | documented — axis status |
+| `g` | `10` | 16 (2 chars, plain hex) | **undocumented** — high-speed ratio |
+| `h` | `000080` | 8,388,608 — exactly home | **undocumented** |
+| `i` | `A787F6` | 16,156,583 | **undocumented** |
+| `j` | `000080` | 8,388,608 | documented — position |
+| `m` | `66C59F` | 10,470,758 | **undocumented** |
+| `r` | `AE0080` | 8,388,782 (home + 174) | **undocumented** |
+| `s` | `1C0501` | 66,844 | **undocumented** |
+
+`k l n o p q t u v w x y z` all return `!`. Notably `:q` errors, so this firmware has no extended
+status block.
+
+`d` and `h` reading exactly home, and `r` reading home + 174, suggest target/breakpoint registers —
+if so they give the driver a way to *read back* what a goto was actually programmed with, which is
+directly useful for verifying `S` before `J` is ever sent. Semantics must come from the EQMOD
+source (PRD §4.2's standing requirement); this survey establishes only that they exist and what
+they return at rest.
+
+## The mount does not validate the axis digit
+
+`:j9` returned `=000080` — a valid position response for a nonexistent axis 9. The device accepts
+any digit and answers anyway. **The codec must validate the axis itself**, because the mount will
+not reject a corrupted digit; it will silently return plausible data. This is a strong argument
+for the typed command layer M3-T01 already specifies (`GetPosition(Axis)` rather than a free
+string).
+
+## Real error frames — three distinct codes
+
+T-COD-1 previously had no genuine error sample. Now:
+
+| Sent | Response | Meaning |
+|------|----------|---------|
+| `:z1`, `:y1` (undefined opcode) | `!0` | unknown command |
+| `:j` (missing axis digit) | `!1` | missing/invalid parameter |
+| `:` (bare colon) | `!3` | malformed frame |
+
+Framing confirmed as `!` + single digit + `\r`.
+
+## Framing resilience — better than assumed
+
+| Case | Behaviour |
+|------|-----------|
+| Truncated frame, no `\r` | No response; times out at ~400 ms. **Does not wedge** — the next well-formed command succeeds |
+| Junk prefix `zzz:j1\r` | `=000080` — **resyncs on `:`**, junk discarded |
+| Two frames in one write | `=0000=000080` — **response stream corrupts** |
+
+The last one matters. Back-to-back frames produce an interleaved, unparseable reply. SDD §5.2.4
+already specifies strict single request-response with no pipelining; this is the hardware evidence
+for why that is not merely tidy but required.
+
+## Timing — the design's assumptions were conservative, and are now measured
+
+2000 consecutive `:j1` exchanges: **0 timeouts, 0 malformed**, min 14.7 ms, p50 15.8 ms,
+p99 16.9 ms, max 17.2 ms, sustained 62.5 exchanges/s.
+
+- 2.5 ms total spread across 2000 samples — the link is extremely predictable.
+- The 500 ms per-request timeout (§5.2.4) is ~29× the observed maximum.
+- **The heartbeat threshold is validated.** §5.2.4 fires the watchdog after 3 consecutive
+  failures; against a zero-failure baseline over 2000 exchanges, 3 consecutive misses is an
+  unambiguous signal of real trouble rather than noise.
+- 1 Hz polling is a 1.6% duty cycle; even 2 Hz goto monitoring leaves ~30× headroom.
+
+Port close and reopen: 38 ms, first exchange succeeds. Half of REL-03 confirmed; the physical
+unplug case still needs a hand on the cable.
+
+## Still open
+
+Everything requiring motion (T-HIL-1 steps 3–6), the semantics of the seven undocumented
+inquiries, the `F` initialise path, and physical-unplug recovery.

@@ -16,7 +16,9 @@ ever see or send is producible and parseable here first.
 - `encode_u24`/`decode_u24` with the byte-swap quirk (0x123456 ↔ "563412"); also u16/u8 variants used by some commands
 - Typed command layer: one type per SDD §5.2.2 table row (`GetPosition(Axis)`, `SetGotoTarget(Axis, Counts)`, …) with encode + typed response parse; motion-mode byte semantics (direction/speed-class bits) as documented enums
 - **Golden vectors**: `spikes/skywatcher-heq5/FINDINGS.md` already contains **nine `verified` pairs read from the operator's own HEQ5** (handshake, CPR, timer freq, position, axis status, both axes) — seed `testdata/synta_vectors.txt` with those, then extend from EQMOD/indi-eqmod traces. Mark anything without a real trace `derived`; T05 step 2 upgrades the rest
-- The `!` error frame is **not** covered by the captured vectors (none was provoked) — construct those cases from the EQMOD reference and mark them `derived`
+- The `!` error frame **is** now covered by real captures: `!0` unknown command (`:z1`), `!1` missing/invalid parameter (`:j`), `!3` malformed frame (`:`) — all `verified`
+- **Width is not uniform**: `:g` returns 2 hex chars and `:f` returns 3; only the u24 fields are byte-swapped. A single "decode payload" path that assumes 6 chars will silently mis-decode both
+- **Validate the axis digit in the codec.** The mount does not: `:j9` returns a well-formed response for a nonexistent axis. Typed constructors (`GetPosition(Axis)`) are the mechanism; a test must assert an invalid axis is rejected before transmission
 - Fuzz: decoder must never panic on arbitrary bytes (cargo-fuzz target or proptest)
 
 ## Acceptance criteria

@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.2.1
+**Version:** 1.3.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.11.0 (requirements), ASTROCTL-ADD-001 v1.2.5 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.11.1 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -18,6 +18,8 @@
 **Change note (1.2.0):** Thread-isolation gaps closed. **T-ISO-1 added (§9)** — PRF-04 ("image download must not block mount tracking or UI responsiveness") was designed for but never verified, and now has a dedicated regression test rather than being inferred from the topology (§10). §5.3.1 documents the measured live-view/capture contention on the single gphoto2 context and how the UI must surface it; §5.7 and §5.9 follow through. §7 specifies explicit tokio runtime sizing per node. §2 makes "no blocking on the runtime" enforceable via clippy gates rather than convention alone.
 
 **Change note (1.2.1):** §5.2.4 serial timings replaced with measurements from a real HEQ5 — round trip 14.4–16.6 ms, so the in-flight-normal-request assumption behind the e-stop priority lane is a third of what was budgeted.
+
+**Change note (1.3.0):** §5.2.2 rewritten from a read-only hardware survey (`spikes/skywatcher-heq5/FINDINGS.md`): the opcode case convention stated as the safety boundary, seven undocumented inquiries recorded, real `!` error codes captured, and the mount's failure to validate the axis digit promoted to a codec correctness requirement. §5.2.4 gains hardware-validated timings — 2000 clean exchanges confirm the 3-miss heartbeat threshold, and back-to-back frames are shown to corrupt the reply stream, which is why single request-response is required rather than merely tidy.
 
 ---
 
@@ -299,6 +301,30 @@ Command set used in Phase 1 (**all opcodes to be verified against the EQMOD sour
 | `K` | Stop motion (ramped) | stop_slew, stop_tracking |
 | `L` | Instant stop | **emergency_stop only** |
 | `P` | Set autoguide rate | guide_pulse setup |
+| `g` | High-speed ratio | connect handshake — **2 hex chars, not a byte-swapped u24** |
+
+**Opcode case is the safety boundary.** Lowercase opcodes are inquiries; uppercase are actions
+(`F G S I J K L P`). Everything the driver sends before a deliberate motion decision must be
+lowercase, and test harnesses that talk to real hardware should enforce this on the raw byte
+stream rather than by convention — a misaligned frame must not be able to form an action opcode.
+
+**The mount supports more inquiries than this table uses.** A read-only sweep of the real HEQ5
+(`spikes/skywatcher-heq5/FINDINGS.md`) found thirteen supported lowercase opcodes:
+`a b c d e f g h i j m r s`. The seven this design does not use — `c d h i m r s` — are recorded
+with their at-rest values in the findings. `d`, `h` and `r` read at or near the home counter,
+suggesting target/breakpoint registers; if the EQMOD source confirms that, they would let the
+driver *read back* what a goto was programmed with before `J` is ever sent, which is a cheap
+safety check worth adopting. Semantics require the EQMOD cross-reference (PRD §4.2); the survey
+establishes only existence and at-rest values.
+
+**Error frames** — `!` + single digit + `\r`, with three codes observed on real hardware:
+`!0` unknown command, `!1` missing or invalid parameter, `!3` malformed frame.
+
+**The mount does not validate the axis digit.** `:j9` returns a well-formed position response for
+a nonexistent axis. The codec must therefore validate the axis before transmitting — the device
+will not reject a corrupted digit, it will answer with plausible data. This is why the typed
+command layer (`GetPosition(Axis)`, not a formatted string) is a correctness requirement rather
+than an ergonomic preference.
 
 #### 5.2.3 Position math
 
@@ -321,11 +347,11 @@ One tokio task owns the `serialport` handle exclusively.
 enum SerialRequest { Normal(Cmd, oneshot::Sender<Result<Resp>>),
                      Priority(Cmd, oneshot::Sender<Result<Resp>>) }
 // two mpsc channels; the task select!s with bias: priority drained first,
-// in-flight normal request completes (single request-response — **measured 14.4–16.6 ms** on a real HEQ5 over an EQDIR stick, against the ≤ ~50 ms this design assumed, so e-stop's worst-case wait behind a normal command is a third of budget) but
+// in-flight normal request completes (single request-response — **never pipelined; two frames in one write provably corrupt the reply stream on real hardware** — **measured 14.4–17.2 ms** over 2000 exchanges on a real HEQ5 over an EQDIR stick, against the ≤ ~50 ms this design assumed, so e-stop's worst-case wait behind a normal command is a third of budget) but
 // no new normal request starts while priority queue is non-empty.
 ```
 
-Per-request timeout 500 ms (≈30× the measured 16.6 ms worst case — deliberately generous, not a guess), one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`; measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
+Per-request timeout 500 ms (≈30× the measured 16.6 ms worst case — deliberately generous, not a guess), one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). **Threshold validated against hardware**: 2000 consecutive exchanges produced zero timeouts and zero malformed replies, with a 2.5 ms spread, so three consecutive misses is an unambiguous fault signal rather than noise-triggering. Framing resilience was also measured — the mount resynchronises on `:` after junk, and a truncated frame times out without wedging the link. Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`; measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
 
 ### 5.3 Canon gPhoto2 camera driver (`astroctl-drivers::gphoto2`)
 
