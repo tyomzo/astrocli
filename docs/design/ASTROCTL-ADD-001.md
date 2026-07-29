@@ -1,7 +1,7 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.3.0
+**Version:** 1.3.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -21,6 +21,8 @@
 **Change note (1.2.6):** Pin advanced to PRD v1.11.1.
 
 **Change note (1.3.0):** §5.6 dependency rules 1 and 6 disambiguated during M0-T01, when they turned out not to be mechanically enforceable as written. Rule 1's "except the registry" had no literal implementation — `DriverRegistry` is a HAL type, so `astroctl-hal` cannot depend on the drivers it registers without a cycle; the rule now states that only the two binaries may name concrete drivers. Rule 6 conflicted with rule 5 over `astroctl-ipc`, which is worker-*related* but is inert protocol definitions; rule 6 now excludes GPU/ML runtimes and worker process management specifically, not the protocol crate.
+
+**Change note (1.3.1):** §5.5 gains the development/CI topology — two containers on separate network namespaces, which is how a single workstation exercises the two-node shape honestly and how the §9.1 latency and head-of-line-blocking requirements become automatically testable. Distinct from the STK-20 degenerate single-host case, which proves nothing about the deployment.
 
 ---
 
@@ -315,6 +317,7 @@ Design rules: the e-stop endpoint has a dedicated route with no queuing or middl
 - The operator device talks **only** to the field node (`:8470`); `/stack/*` is proxied (STK-19, ARC-13). Direct browser→stack connection is a permitted optimization when VPN topology allows (PRD §5.7) but is not required.
 - Both services bind the VPN interface (SEC-01) and require the shared token (SEC-02); each node has one YAML config file (ARC-05).
 - Single-machine deployment: both services on one host with in-memory transfer shortcut — same code paths, loopback transport (STK-20, ARC-08 degenerate case).
+- **Development and CI topology: two containers on separate network namespaces** (M0-T08), addressed by service name over a bridge network. This is not the degenerate case above — it exercises real TCP between nodes, the proxy host-to-host, and two independent tokens, on a single workstation. It also permits `tc` shaping of the inter-node link, which is how the latency and head-of-line-blocking requirements of §9.1 and SDD §8.3 get tested automatically rather than on a bench. What it does not cover is the VPN itself (MTU, NAT traversal, reconnection) or Pi hardware; those remain field-deployment gates.
 - Time discipline on the field node via chrony/NTP or GPS (REL-14) is a deployment prerequisite checked at startup.
 
 ### 5.6 Development View

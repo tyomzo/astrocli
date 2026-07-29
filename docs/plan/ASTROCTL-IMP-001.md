@@ -1,11 +1,11 @@
 # AstroCtl — Implementation Plan
 
 **Document ID:** ASTROCTL-IMP-001
-**Version:** 1.1.8
+**Version:** 1.2.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
-**Governing documents:** ASTROCTL-PRD-001 v1.12.2, ASTROCTL-ADD-001 v1.3.0, ASTROCTL-SDD-001 v1.6.1
+**Governing documents:** ASTROCTL-PRD-001 v1.12.2, ASTROCTL-ADD-001 v1.3.1, ASTROCTL-SDD-001 v1.6.1
 **Change note (1.1.1):** Governing pins advanced after the dependency survey (PRD v1.7.0). §6 gains the risk that Phase 2a's star detection has no existing Rust binding.
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 after the crates were actually built (`docs/evidence/dependency-survey-2026-07-29.md`). §6: the RAW-decoder risk is resolved to `rawler` with only speed/memory left to confirm, and a toolchain-drift risk is added — the 1.97.1 pin is a hard floor, not a preference.
 **Change note (1.1.0):** Governing-document pins updated — SDD v1.1.0 now designs the M1 stack-side elements this plan always required (transfer, ingest, worker IPC), so §1's contract table no longer points at deferred design. Auth added as the third declared phase deviation. M0 crate scaffolding now references ADD §5.6 (the complete 14-crate layout, which gained `astroctl-guiding` in ADD v1.2.0) rather than SDD §3 (a subset), and the M0 deliverable list names the stack proxy its exit criterion already assumed.
@@ -21,6 +21,8 @@
 **Change note (1.1.7):** Pin advanced to SDD v1.4.0 (mount action-opcode corrections).
 
 **Change note (1.1.8):** Pins advanced; mount motion Phases 1–4 executed.
+
+**Change note (1.2.0):** M0 gains T08, a two-node container harness, and its exit criterion is restated in those terms. Development is single-host; containers are how one machine tests the two-machine shape. This replaces a ranked ladder of loopback fallbacks that would have proved nothing about the deployment. The VPN and the Pi remain real-hardware gates landing with field deployment rather than M0.
 
 ---
 
@@ -56,7 +58,8 @@ Repo + workspace + toolchain so that every later PR is small.
 - Both binaries start, load config, refuse to start without auth token (SEC-01/02 startup check), serve `/api/system/health`
 - Field node reverse-proxies `/stack/*` to the stack node with auth forwarded (ADR-07) — the exit criterion below depends on it
 - CI: fmt, clippy, test, frontend build, dependency-rule lint
-- **Exit:** `astroctl-field` and `astroctl-stack` run on two machines; PWA shell loads over the VPN from the field node and shows both nodes' health via the proxy. This criterion exists to prove the two-node VPN topology before any feature code depends on it; if the hardware or tunnel is not ready, the M0 README defines the permitted partial exits and requires the shortfall be carried as named debt into M1.
+- Two-node container harness (M0-T08): field and stack as separate containers on their own network namespaces, with a shapeable link between them
+- **Exit:** the two containers run, and the PWA loads from the field container showing both nodes' health through the proxy. Development is single-host — containers are how one workstation exercises the two-machine shape honestly, and they make the shaped-link tests CI-runnable. The VPN and the Pi stay real-hardware gates that land with field deployment, not M0.
 
 ### M1 — Walking skeleton (the GUI + two-node orchestration delivery)
 

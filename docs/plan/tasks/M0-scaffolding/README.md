@@ -5,26 +5,27 @@ machines, load validated config, refuse to run without an auth token, and serve 
 PWA shell loads over the VPN from the field node and shows both nodes' health via the proxy.
 
 **Exit criteria (IMP §2/M0):**
-- `astroctl-field` and `astroctl-stack` run on separate hosts
-- PWA shell loads from the field node over VPN; both nodes' health visible
+- `astroctl-field` and `astroctl-stack` run as **two containers on separate network namespaces**
+  (M0-T08); the PWA loads from the field container and shows both nodes' health via the proxy
 - Quality gate green: fmt, clippy, tests, frontend build, dependency-rule lint
 
-**If the second host or the VPN is not ready yet.** The exit criterion exists to prove the
-two-node VPN topology early, because it is the assumption most expensive to discover broken
-later. It is not a code gate — all M0 *code* completes without it. If the stacking machine or
-the tunnel is not up, take the partial exit in this order of preference:
+**Why containers rather than two physical hosts.** Development happens on one workstation; the
+field deployment is two real machines. Containers let a single host exercise the two-machine shape
+honestly — real TCP across a network boundary, the proxy working host-to-host, two independent
+tokens, and node-death as a testable event rather than a thought experiment. They also make
+`tc`-shaped links available, which is what turns T-HOL-1 from a manual bench exercise into a CI
+job.
 
-1. **Two hosts, no VPN** — both binaries on separate machines over the LAN. Proves the proxy,
-   the two-token auth story, and cross-host config. Only the tunnel is unproven.
-2. **One host, VPN to the phone** — both binaries on the dev machine (loopback, the documented
-   STK-20 degenerate case), but the PWA loaded on a real phone over the VPN. Proves the half
-   that touches the UI, service worker, and remote auth.
-3. **One host, localhost only** — everything works, nothing about the deployment shape is
-   proven. Acceptable, but the debt is real.
+This replaces an earlier ranked ladder of loopback compromises. Loopback would have proved nothing
+about the deployment shape; containers prove everything about it except the tunnel.
 
-Whichever you take, record it in the M1 README as explicit debt and clear it before M1's demo —
-M1's exit criterion is a phone-over-VPN two-node demo, so an untested tunnel does not survive
-past M1 regardless.
+**What still needs real hardware,** and is therefore *not* an M0 gate:
+- The VPN itself — NetBird/Tailscale MTU, NAT traversal, tunnel reconnection
+- The Raspberry Pi — ARM, USB under load, the PRF-05 512 MB budget in practice
+- A phone on the actual tunnel, which is M1's demo and remains the human-facing proof
+
+Those land with the field deployment. Recording them here so nobody mistakes a green M0 for a
+proven tunnel.
 
 ## Tasks and order
 

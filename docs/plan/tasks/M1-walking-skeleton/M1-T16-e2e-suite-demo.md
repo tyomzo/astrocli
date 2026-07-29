@@ -12,10 +12,10 @@ permanent health signal for all later work.
 
 ## Scope
 
-- E2E harness: spawns both binaries (temp dirs, ephemeral ports, single-machine mode) + drives the REST/WS API as a client; helper lib for scenario scripts
+- E2E harness: drives the **M0-T08 container pair** (two network namespaces, service-name addressing) rather than two processes on loopback, and speaks the REST/WS API as a client; helper lib for scenario scripts. Containers give real cross-host traffic, make node-death a `compose stop`, and are what make the shaped-link test below feasible at all
 - T-E2E-1: connect sims → goto → capture ×3 → assert event sequences, durable frames, transfer acks, preview arrival ≤ 10 s each
 - Fault scenarios (using FaultPlans + process kills): stack death mid-session (queue/drain), field restart (session + journal recovery), mount disconnect during slew (watchdog alert)
-- T-HOL-1 full: `tc`/`toxiproxy`-shaped 1 Mbit link; saturate liveview; assert `/ws` cadence and e-stop POST ≤ 2× baseline
+- T-HOL-1 full: `scripts/shape-link.sh` (M0-T08) applies `tc` to the veth pair for a genuine 1 Mbit link; saturate liveview; assert `/ws` cadence and e-stop POST ≤ 2× baseline. This is the test that most needed containers — shaping loopback is awkward and unconvincing
 - **T-ISO-1** (SDD §9): configure `SimulatorCamera` with a ~2 s blocking capture and a slow download to mimic the measured R10 behaviour, then assert *during* it — `mount.position` cadence holds 1 Hz with no gap > 1.5 s, `/api/mount/position` and `/api/system/health` p99 ≤ 2× idle baseline, e-stop still meets its ≤ 20 ms budget, no bus subscriber lags. Repeat with the decode pool saturated. Baselines are captured in the same run, never hardcoded
 - Session JSONL log verification: every scenario's event log replayable — parse full file, reconstruct final state, compare to API state (SES-07 basic)
 - `scripts/demo-m1.sh`: launches two nodes with demo config, prints the phone URL + token QR; demo walkthrough doc `docs/plan/tasks/M1-walking-skeleton/DEMO.md` matching the IMP exit narrative
