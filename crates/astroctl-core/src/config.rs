@@ -1319,11 +1319,23 @@ pub struct FieldServerConfig {
     /// one home screen, one of which drives a real mount. This label is what makes them tell
     /// apart: the manifest name becomes `AstroCtl <label>` and the UI carries a persistent marker.
     pub deployment_label: Option<DeploymentLabel>,
+    /// TLS terminated by this process (SEC-05), or `None` for plain HTTP.
+    ///
+    /// `#[serde(default)]` rather than a required `tls: null`, because **an absent block has to
+    /// mean plain HTTP**: `localhost` development and the M0-T08 container harness both run
+    /// without a certificate and neither should have to name a key to say so. That is also why
+    /// the shipped example carries the block commented out — an operator needs to see the schema,
+    /// and a node that ships with TLS half-configured would refuse to start.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
 }
 
 impl FieldServerConfig {
     fn normalize(&mut self, c: &mut Check) {
         c.expand("log_dir", &mut self.log_dir);
+        if let Some(tls) = &mut self.tls {
+            c.section("tls", |c| tls.normalize(c));
+        }
     }
 
     fn validate(&self, c: &mut Check) {
@@ -1338,6 +1350,9 @@ impl FieldServerConfig {
         if let Some(label) = &self.deployment_label {
             label.validate(c, "deployment_label");
         }
+        if let Some(tls) = &self.tls {
+            c.section("tls", |c| tls.validate(c));
+        }
     }
 
     /// Worker threads to build the runtime with, resolving `null` to the field-node default
@@ -1346,6 +1361,54 @@ impl FieldServerConfig {
     pub fn resolved_worker_threads(&self, available_cores: usize) -> usize {
         self.runtime_worker_threads
             .unwrap_or_else(|| 2.min(available_cores.saturating_sub(2)).max(1))
+    }
+}
+
+/// Certificate and key for the TLS the field node terminates itself (PRD §8.1 `server.tls`).
+///
+/// SEC-05: the operator-facing origin must be a *secure context* or Chrome withholds the Screen
+/// Wake Lock API, service-worker registration and `beforeinstallprompt` — USB-09 and USB-10 are
+/// unreachable without it, and a VPN does not substitute because the browser judges the origin.
+/// ADD §4 puts termination in this process rather than behind a proxy: the field node is the only
+/// thing that must be up for the system to work, so it is where the certificate belongs.
+///
+/// Whether the files are *readable and parseable* is deliberately not checked here. This layer
+/// checks shape and range (SDD §4.4); the loader in `astroctl-field` has to read both files
+/// anyway, and it can say "the PEM file holds no certificate" where an existence check could only
+/// say "missing". Both paths fail startup — SEC-05 is not satisfied by quietly serving plaintext.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM certificate chain, leaf first — acme.sh's `fullchain.cer`. The chain matters: a leaf
+    /// alone validates on a desktop that has cached the intermediate and fails on a phone that
+    /// has not, which is the harder failure to reproduce.
+    pub cert_path: PathBuf,
+    /// PEM private key. PKCS#8, PKCS#1 or SEC1 (`BEGIN EC PRIVATE KEY`) — Let's Encrypt via
+    /// acme.sh issues ECDSA by default, and that is a SEC1 key.
+    pub key_path: PathBuf,
+    /// Days before `notAfter` at which `/api/system/health` degrades to `warn` (SEC-07).
+    pub warn_days_before_expiry: u32,
+}
+
+impl TlsConfig {
+    fn normalize(&mut self, c: &mut Check) {
+        c.expand("cert_path", &mut self.cert_path);
+        c.expand("key_path", &mut self.key_path);
+    }
+
+    fn validate(&self, c: &mut Check) {
+        c.absolute("cert_path", &self.cert_path);
+        c.absolute("key_path", &self.key_path);
+        // Upper bound of 60 because acme.sh renews at 60 days remaining by default: a threshold
+        // at or above that is latched on from the moment the renewal window opens, and a warning
+        // that is always lit carries no information. 0 is excluded because "warn on the day it
+        // expires" is not a warning.
+        c.range(
+            "warn_days_before_expiry",
+            self.warn_days_before_expiry,
+            1,
+            60,
+        );
     }
 }
 
@@ -2043,6 +2106,109 @@ mod tests {
             16,
             "stack: one per core"
         );
+    }
+
+    // --- server.tls (SEC-05, M0-T09) ------------------------------------------------------
+
+    /// The one property everything else depends on: no block means plain HTTP. `localhost`
+    /// development and the M0-T08 container harness both ship configs derived from this example,
+    /// and a required `tls:` key would break both.
+    #[test]
+    fn the_shipped_example_configures_no_tls_and_still_loads() {
+        let f = field(FIELD_EXAMPLE).expect("loads");
+        assert!(
+            f.server.tls.is_none(),
+            "the example must document the block without enabling it"
+        );
+    }
+
+    fn with_tls(body: &str) -> String {
+        // `server` is the last section of the example, so appending lands inside it.
+        format!("{FIELD_EXAMPLE}  tls:\n{body}")
+    }
+
+    #[test]
+    fn a_tls_block_is_parsed_whole() {
+        let yaml = with_tls(
+            "    cert_path: /etc/astroctl/tls/fullchain.pem\n\
+             \x20   key_path: /etc/astroctl/tls/privkey.pem\n\
+             \x20   warn_days_before_expiry: 21\n",
+        );
+        let tls = field(&yaml)
+            .expect("a well-formed tls block loads")
+            .server
+            .tls
+            .clone()
+            .expect("the block is present");
+        assert_eq!(
+            tls.cert_path,
+            PathBuf::from("/etc/astroctl/tls/fullchain.pem")
+        );
+        assert_eq!(tls.key_path, PathBuf::from("/etc/astroctl/tls/privkey.pem"));
+        assert_eq!(tls.warn_days_before_expiry, 21);
+    }
+
+    #[test]
+    fn a_typo_inside_the_tls_block_is_rejected_like_any_other() {
+        let yaml = with_tls(
+            "    cert_path: /etc/astroctl/tls/fullchain.pem\n\
+             \x20   key_path: /etc/astroctl/tls/privkey.pem\n\
+             \x20   warn_days_before_expiry: 14\n\
+             \x20   warn_days: 14\n",
+        );
+        let err = field(&yaml).expect_err("an unknown key inside tls must not be accepted");
+        assert!(err.to_string().contains("warn_days"), "{err}");
+    }
+
+    /// A relative path resolves against whatever directory systemd happened to start the unit in,
+    /// which is the class of bug that only appears in production.
+    #[test]
+    fn a_relative_certificate_path_is_rejected_naming_the_key() {
+        let yaml = with_tls(
+            "    cert_path: tls/fullchain.pem\n\
+             \x20   key_path: /etc/astroctl/tls/privkey.pem\n\
+             \x20   warn_days_before_expiry: 14\n",
+        );
+        let err = field(&yaml).expect_err("a relative path must not be accepted");
+        let text = err.to_string();
+        assert!(text.contains("server.tls.cert_path"), "no path in: {text}");
+        assert!(text.contains("absolute"), "unclear message: {text}");
+    }
+
+    #[test]
+    fn a_warning_threshold_that_could_never_switch_off_is_rejected() {
+        let yaml = with_tls(
+            "    cert_path: /etc/astroctl/tls/fullchain.pem\n\
+             \x20   key_path: /etc/astroctl/tls/privkey.pem\n\
+             \x20   warn_days_before_expiry: 120\n",
+        );
+        let err = field(&yaml).expect_err("120 days outlives acme.sh's renewal window");
+        let text = err.to_string();
+        assert!(
+            text.contains("server.tls.warn_days_before_expiry"),
+            "no path in: {text}"
+        );
+        assert!(text.contains("1..=60"), "no expected range in: {text}");
+    }
+
+    #[test]
+    fn tls_paths_get_the_same_tilde_expansion_as_every_other_path() {
+        let yaml = with_tls(
+            "    cert_path: ~/tls/fullchain.pem\n\
+             \x20   key_path: ~/tls/privkey.pem\n\
+             \x20   warn_days_before_expiry: 14\n",
+        );
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return; // No HOME: `expand` reports its own error, covered by expand_tilde's tests.
+        };
+        let tls = field(&yaml)
+            .expect("`~` expands")
+            .server
+            .tls
+            .clone()
+            .expect("present");
+        assert_eq!(tls.cert_path, home.join("tls/fullchain.pem"));
+        assert_eq!(tls.key_path, home.join("tls/privkey.pem"));
     }
 
     // --- fixture: unknown key ------------------------------------------------------------

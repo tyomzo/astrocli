@@ -120,3 +120,13 @@ server:
                             #   carries a persistent marker. Origin already separates the installs;
                             #   this is what makes them distinguishable once installed, so a dev
                             #   app driving a real mount cannot be mistaken for the production one
+  # TLS terminated by this process (SEC-05), commented out because absent means plain HTTP — which
+  # is what localhost development and the container harness run on. Present but unreadable is a
+  # startup failure naming the path, never a silent downgrade. Chrome gates the wake lock, service
+  # workers and the install prompt behind a secure context, so any node an operator reaches at an
+  # address other than localhost needs this. Procedure: docs/ops/tls-setup.md
+  # tls:
+  #   cert_path: /etc/astroctl/tls/fullchain.pem  # PEM chain, leaf first (acme.sh fullchain.cer)
+  #   key_path: /etc/astroctl/tls/privkey.pem     # PEM key: PKCS#8, PKCS#1 or SEC1 ("EC PRIVATE
+  #                                               #   KEY") — acme.sh issues ECDSA by default
+  #   warn_days_before_expiry: 14                 # health degrades to `warn` inside this (SEC-07)

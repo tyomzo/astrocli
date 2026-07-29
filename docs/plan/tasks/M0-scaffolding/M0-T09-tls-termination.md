@@ -1,7 +1,7 @@
 # M0-T09 — TLS termination on the field node
 
 **Milestone:** M0 · **Depends on:** M0-T05, M0-T06 · **Crates:** astroctl-field
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** PRD SEC-05/06/07/08, USB-09, USB-10; ADD §4 (context diagram note); SDD §5.9 (target platform)
 
 ## Objective
@@ -53,96 +53,102 @@ That is what makes it worth a task rather than a footnote.
 
 ## The concrete deployment
 
-The field node is **`field.diirc.online`**. What is actually deployed today, checked rather than
-assumed (2026-07-29):
+**The procedure now lives in [`docs/ops/tls-setup.md`](../../../ops/tls-setup.md)** — issuance,
+configuration, renewal, resolution and a symptom table, with the traps that actually cost time.
+It is written to be repeatable from it alone, which is what this section was drafted towards and
+what an operator needs at 2am. Kept here is only what a *task* record should keep: the decisions
+and why they were taken, so a later reader does not re-litigate them.
 
-| Name | Cert | Issuer | Where it lives |
-|------|------|--------|----------------|
-| `diirc.online` | none yet | — | registered 2026-07-29 at Hostinger; NS `athena`/`apollo.dns-parking.com`, not yet resolving publicly |
-| `diirc.lt` | SAN `diirc.lt`, `www.diirc.lt` | Let's Encrypt | Hostinger shared hosting (`2.57.91.91`, `server: hcdn`), auto-provisioned and auto-renewed |
-| `through.diirc.lt` | SAN `through.diirc.lt` only | Let's Encrypt | Azure host (`4.223.171.38`), own ACME client — the VPN endpoint, unchanged unless it is deliberately moved |
+- **Issuance: Let's Encrypt via `acme.sh --dns dns_hostinger`.** DNS for the zone is at Hostinger
+  and `acme.sh` ships a native Hostinger plugin, so DNS-01 automates against the zone as it
+  stands. No migration to another DNS provider, no `_acme-challenge` CNAME delegation, no
+  `acme-dns` instance — all of which earlier drafts of this task proposed before the plugin was
+  found. Credential is `HOSTINGER_Token`, in the environment, never in a config file (SEC-04).
+- **Traps, all three found by running it rather than reading about it**, and all three now in the
+  ops document: `acme.sh` defaults to **ZeroSSL**, which requires external account binding and
+  fails at account registration with an error that never mentions the CA; the **distribution
+  package is v3.1.1** and has no `dns_hostinger`; and after installing upstream,
+  `/usr/bin/acme.sh` still **shadows** `~/.acme.sh/acme.sh` on `PATH` in non-interactive shells —
+  which is exactly where the renewal cron runs.
+- **Choosing a different CA buys nothing.** CA/Browser Forum ballot SC-081v3 took maximum validity
+  to 200 days on 15 March 2026, 100 days in March 2027 and 47 days in March 2029. Nobody sells a
+  set-and-forget certificate any more, so the choice is not "which CA" but "is renewal automated".
+- **Renewal runs on the field node**, which needs only outbound internet and has it whenever the
+  rig is home. The risk is a rig that sits in storage past the window — which is what SEC-07's
+  expiry reporting is for.
+- **A private address in a public A record is acceptable** and is not exposure. Recorded in the
+  ops document so it does not later read as a leak.
 
-**Nothing existing can be reused.** `diirc.online` is new and has no certificate at all. The two
-`diirc.lt` certificates are single-name, cover only the names they serve, and the Hostinger one is
-additionally out of reach — on shared hosting the private key is not normally exportable. There is
-no wildcard anywhere. `field.diirc.online` therefore needs its own certificate; the "copy an
-existing wildcard" shortcut an earlier draft of this task offered does not exist.
+### What actually exists, and the name
 
-**`diirc.online` is at Hostinger as well** (`athena`/`apollo.dns-parking.com`), so moving to it
-changes no decision below — the `dns_hostinger` route applies unchanged. Note it was registered on
-the day this was written and was not yet resolving; **delegation has to propagate before ACME can
-validate anything**, which is a first-attempt failure worth expecting rather than debugging.
+The certificate issued is for **`astrocli-dev.diirc.online`** (Let's Encrypt, ECDSA P-256, to
+2026-10-27), not the `field.diirc.online` this task was written naming. That is the dev node,
+which is what exists; the procedure is identical for either name and nothing in the design depends
+on which. `diirc.online` itself was registered the day this task was written and had to propagate
+before ACME could validate anything — a first-attempt failure worth expecting rather than
+debugging.
 
-- **Name.** `field.diirc.online`, resolving to the field node's VPN address.
-- **Issuance — settled: Let's Encrypt via `acme.sh --dns dns_hostinger`.** DNS for the zone is at
-  Hostinger (`athena`/`apollo.dns-parking.com`), and `acme.sh` ships a **native Hostinger DNS plugin**, so
-  DNS-01 automates against the zone as it stands. No migration to another DNS provider, no
-  `_acme-challenge` CNAME delegation, no `acme-dns` instance — all of which an earlier draft of this
-  task proposed before the plugin was found.
-
-  The plugin reads one variable, **`HOSTINGER_Token`**, and calls
-  `https://developers.hostinger.com/api/dns/v1/zones`. (The project wiki also shows an older
-  `HOSTINGER_COM_Username`/`HOSTINGER_COM_Password` pair; the plugin on master uses the API token.)
-  The token is a secret and belongs in the environment, never in a config file — SEC-04.
-
-  **acme.sh defaults to ZeroSSL, not Let's Encrypt.** A bare `--issue` picks
-  `https://acme.zerossl.com/v2/DV90`, which sets `externalAccountRequired`, so it stops at "Please
-  update your account with an email address first" before it ever looks at DNS — an error that says
-  nothing about the CA being the surprise. Set the CA explicitly once:
-  `acme.sh --set-default-ca --server letsencrypt`. Let's Encrypt is what this task specifies, needs
-  no EAB, and is what the operator's other certificates already use.
-
-  **The distribution package is too old.** The `acme.sh` in Debian/Ubuntu at the time of writing is
-  **v3.1.1**, which ships 157 DNS plugins and `dns_hostinger` is not one of them — it was added
-  upstream later. `--issue --dns dns_hostinger` against the packaged version fails with an unknown
-  DNS API rather than anything that points at the cause. Install upstream into `~/.acme.sh`
-  (which also installs the renewal cron) rather than dropping the single plugin file into
-  `/usr/share/acme.sh/dnsapi/`, where a package upgrade would silently remove it and where the
-  plugin's expectations may not match a v3.1.1 core. The packaged build is also broken in its own
-  right — `--log` dies with `shift: can't shift that many` under dash. After installing upstream,
-  invoke `~/.acme.sh/acme.sh` by path: `/usr/bin/acme.sh` stays on `PATH` and shadows it in any
-  non-interactive shell, which is precisely where a renewal cron runs.
-
-  **Choosing a different CA buys nothing.** Every publicly trusted CA is bound by CA/Browser Forum
-  ballot SC-081v3: maximum validity fell to **200 days on 15 March 2026**, drops to **100 days in
-  March 2027** and **47 days in March 2029**. Nobody sells a set-and-forget certificate any more, so
-  the choice is not "which CA" but "is renewal automated" — and once it is automated, Let's Encrypt
-  is free and already understood by every client.
-
-- **Where renewal runs.** The field node needs only *outbound* internet to renew, which it has
-  whenever the rig is home. That is the fewest moving parts and the default for this task. The risk
-  is a rig that sits in storage past the renewal window — which is exactly what SEC-07's expiry
-  warning is for. If the 2027 move to 100-day certificates makes that uncomfortable, issue centrally
-  on the always-on Azure host (it already runs ACME) and push to the field node over the VPN; that
-  is a change of one script, not of this design.
-
-- **Resolution (SEC-08).** The name must resolve **through the VPN's DNS, not only the public
-  zone**. If resolution depends on reaching public DNS, the UI becomes unreachable precisely when
-  the field node is operating standalone with no internet — which is ARC-06's whole premise. Verify
-  deliberately: with the uplink down, the phone must still resolve `field.diirc.online`.
-- A private address in a public A record is acceptable and is not exposure. Note it in the setup
-  document so it does not later read as a leak.
-- **Renewal is every 90 days**, and the industry ceiling is falling (200 days today, 100 in March
-  2027, 47 in March 2029). SEC-07's expiry reporting is doing real work rather than guarding a
-  hypothetical, and it will matter more each year.
+**Nothing existing could be reused.** The two `diirc.lt` certificates are single-name, and the
+Hostinger one is on shared hosting where the private key is not exportable. There is no wildcard
+anywhere, so the "copy an existing wildcard" shortcut an earlier draft offered does not exist.
 
 ## Acceptance criteria
 
-- [ ] `https://field.diirc.online:8470/` serves the PWA with no certificate warning on Android Chrome
-- [ ] `window.isSecureContext` is `true`; `navigator.wakeLock` is defined
-- [ ] With TLS configured, plain HTTP on the same port is refused rather than served
-- [ ] Config without a `tls` block still serves HTTP — `localhost` development and M0-T08 unchanged
-- [ ] A `tls` block naming an unreadable or malformed certificate **fails at startup** with a
-      diagnostic naming the path; it does not fall back to HTTP
-- [ ] `/api/system/health` reports `cert_expires_at` and `cert_days_remaining`; a certificate
-      inside the warning threshold degrades `status` to `warn` (test with a short-dated cert)
+- [x] `https://astrocli-dev.diirc.online:8470/` serves the PWA and the API against the **system
+      trust store** — `curl` without `-k` returns 200 with `ssl_verify_result=0`, TLS 1.3, ECDSA,
+      ALPN `http/1.1`. (Name is the dev node's; see above.)
+- [ ] `window.isSecureContext` is `true`; `navigator.wakeLock` is defined — **needs a browser**
+- [x] With TLS configured, plain HTTP on the same port is refused rather than served: the port
+      answers a plaintext request with a TLS alert, which curl reports as `Received HTTP/0.9 when
+      not allowed`. No page is served
+- [x] Config without a `tls` block still serves HTTP — verified on a copy of the dev config with
+      the block removed: `scheme="http"`, 200, and `cert_*` reported as `null` rather than 0
+- [x] A `tls` block naming an unreadable or malformed certificate **fails at startup** with a
+      diagnostic naming the path, and leaves nothing listening. Verified for six cases: missing
+      file, a readable file that is not a certificate, a readable file that is not a key, a
+      truncated PEM, a certificate/key pair from different issuances, and a relative path (caught
+      by the config validator before any file is opened)
+- [x] `/api/system/health` reports `cert_expires_at` and `cert_days_remaining`; a short-dated
+      certificate degrades `status` to `warn`. Verified live with a 5-day certificate
+      (`status: "warn"`, `cert_days_remaining: 4`) and in tests with a certificate that expired in
+      2020 — an expiry in the past is permanently inside any threshold, so the test cannot rot
 - [ ] With the internet uplink down, the operator's phone still resolves the hostname and loads
-      the app (SEC-08 — the criterion most likely to be skipped, and the one that fails in a field)
-- [ ] `docs/ops/tls-setup.md` is complete enough for the procedure to be repeated from it alone
+      the app (SEC-08) — **needs a phone and the uplink down**. The name currently resolves via
+      public DNS to `192.168.1.109`; the VPN-DNS half is unverified
+- [x] `docs/ops/tls-setup.md` is complete enough for the procedure to be repeated from it alone
 
 **Then close out M0-T06's four device gates**, which have been unrunnable until now: Lighthouse
 installability, add-to-home-screen on Android, Screen Wake Lock held/released, and offline shell
-start. Record the device model and Chrome version in the M0-T06 task file.
+start. Record the device model and Chrome version in the M0-T06 task file. **Still outstanding** —
+the blocker is removed, the gates themselves need the device.
+
+## What was built
+
+- `crates/astroctl-field/src/tls.rs` — loading, expiry, and a `TlsListener` implementing
+  `axum::serve::Listener`. That trait is the whole reason `main` still has **one** `axum::serve`
+  call and one graceful-shutdown path: HTTP and HTTPS differ by the listener and by nothing else,
+  so SDD §7's shutdown ordering — including the deliberate omission of stopping tracking — exists
+  once rather than twice.
+- The handshake runs in a spawned task, not inline in `accept`. Inline is the obvious
+  implementation and it is wrong: a peer that opens a socket and sends nothing would hold the
+  accept loop for as long as it liked. Bounded at 64 in flight so the fix is not itself an
+  unbounded queue.
+- `server.tls` in PRD §8.1 / the shipped example / `FieldServerConfig`, in one change set, with
+  the block **commented out** so absence keeps meaning plain HTTP.
+- SEC-07 in `/api/system/health`, with `warn` as a *third health value* derived at response time
+  rather than a third lifecycle state — see the SDD 1.13.0 change note for why that distinction
+  is load-bearing.
+
+## Reload: deliberately not implemented
+
+The scope note offered "reload without a restart if it is cheap". It is not, and more to the
+point it buys less here than it looks. Shutdown is specified to leave tracking alone (SDD §7), so
+restarting the service does not stop the mount — a renewal restart costs a browser reconnect, not
+a session. `--reloadcmd 'systemctl restart astroctl-field'` is the documented path.
+
+The one honest gap: `acme.sh`'s cron fires at a time it picks, so a renewal restart could land
+mid-night. Nothing to interrupt in M0; when M1 lands the session orchestrator, `--reloadcmd`
+should defer while a session is active. Recorded in the ops document rather than left implicit.
 
 ## Notes for whoever picks this up
 

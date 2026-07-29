@@ -9,6 +9,7 @@
 //! ```text
 //! config load + validate   →  a bad key is a startup error naming it, never a default (§4.4)
 //! auth check               →  SEC-01: no token + a non-loopback bind address refuses to start
+//! TLS materials            →  SEC-05: a `server.tls` block that will not load refuses to start
 //! tracing init             →  console + rolling file under `server.log_dir`
 //! runtime built            →  explicitly sized from `server.runtime_worker_threads` (§7)
 //! API up, health `starting`
@@ -40,6 +41,7 @@ mod route_meta;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod tls;
 mod vitals;
 mod watchdog;
 
@@ -106,7 +108,20 @@ fn main() -> ExitCode {
         }
     };
 
-    // --- 3. tracing ------------------------------------------------------------------------
+    // --- 3. TLS materials (SEC-05) -----------------------------------------------------------
+    // Before the runtime, the log files or the listener: an operator who configured TLS and got
+    // plain HTTP has a PWA that will not install and nothing in the logs pointing at why, so the
+    // one thing this must never do is continue. No block at all is a supported mode — `localhost`
+    // development and the M0-T08 container harness both run on it (ADD §4, SEC-09).
+    let tls = match config.server.tls.as_ref().map(tls::load).transpose() {
+        Ok(tls) => tls,
+        Err(error) => {
+            eprintln!("astroctl-field: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // --- 4. tracing ------------------------------------------------------------------------
     let telemetry = telemetry::init(
         config.server.log_level,
         &config.server.log_dir,
@@ -114,7 +129,7 @@ fn main() -> ExitCode {
     );
     telemetry.report();
 
-    // --- 4. the explicitly sized runtime (SDD §7) -------------------------------------------
+    // --- 5. the explicitly sized runtime (SDD §7) -------------------------------------------
     let available_cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
     let sizing = RuntimeSizing {
         worker_threads: config.server.resolved_worker_threads(available_cores),
@@ -147,7 +162,7 @@ fn main() -> ExitCode {
         error: telemetry.error().map(str::to_owned),
     };
 
-    match runtime.block_on(serve(config, policy, sizing, logging, uptime)) {
+    match runtime.block_on(serve(config, policy, tls, sizing, logging, uptime)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(%error, "the field node stopped with an error");
@@ -176,6 +191,7 @@ fn resolve_auth(config: &FieldConfig) -> Result<AuthPolicy, auth::StartupRefusal
 async fn serve(
     config: Arc<FieldConfig>,
     policy: AuthPolicy,
+    tls: Option<tls::Materials>,
     sizing: RuntimeSizing,
     logging: LoggingInfo,
     uptime: Uptime,
@@ -218,10 +234,11 @@ async fn serve(
         routes: declarations.into(),
         logging,
         config: Arc::clone(&config),
+        certificate: tls.as_ref().map(tls::Materials::status),
     };
     let app = assemble(router, state);
 
-    // --- 5. API up, health `starting` (SDD §8.1) ---------------------------------------------
+    // --- 6. API up, health `starting` (SDD §8.1) ---------------------------------------------
     let addr = SocketAddr::new(
         config.server.host.parse().map_err(|e| {
             format!(
@@ -234,18 +251,55 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
-    tracing::info!(%addr, auth_enforced, "API listening");
 
-    let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
-    });
+    // One `axum::serve`, two listeners. The TLS listener satisfies `axum::serve::Listener`
+    // (see [`tls::TlsListener`]) precisely so the graceful-shutdown ordering of SDD §7 below is
+    // written once — a second server stack for HTTPS would be a second place for that ordering
+    // to be got wrong, and the omission it encodes is the easiest thing in this file to lose.
+    let server = match tls {
+        Some(materials) => {
+            let certificate = materials.status();
+            tracing::info!(
+                %addr,
+                auth_enforced,
+                scheme = "https",
+                cert_expires_at = %certificate.expires_at_rfc3339(),
+                cert_days_remaining = certificate.days_remaining(chrono::Utc::now()),
+                "API listening"
+            );
+            if certificate.is_warning(chrono::Utc::now()) {
+                // Logged as well as reported by SEC-07's health field, because a certificate that
+                // is already inside the window at boot is the case where nobody is watching
+                // `/api/system/health` yet.
+                tracing::warn!(
+                    cert_expires_at = %certificate.expires_at_rfc3339(),
+                    "the TLS certificate is close to expiry; renew it before the secure context \
+                     lapses and the installed app stops working (SEC-07)"
+                );
+            }
+            let listener = materials.into_listener(listener);
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+            })
+        }
+        None => {
+            // A supported mode, not a legacy branch: `localhost` is a secure context to a
+            // browser, and two containers on a bridge network (M0-T08) have no name to certify.
+            tracing::info!(%addr, auth_enforced, scheme = "http", "API listening");
+            tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(shutdown_signal())
+                    .await
+            })
+        }
+    };
 
-    // --- 6. watchdogs on (SDD §8.1) ----------------------------------------------------------
+    // --- 7. watchdogs on (SDD §8.1) ----------------------------------------------------------
     let watchdog = tokio::spawn(watchdog::run(bus.clone(), config.storage.clone(), uptime));
 
-    // --- 7. health `ok` ----------------------------------------------------------------------
+    // --- 8. health `ok` ----------------------------------------------------------------------
     status.set(NodeStatus::Ok);
     bus.publish(Alert::info(
         "NODE_STARTED",

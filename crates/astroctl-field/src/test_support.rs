@@ -60,6 +60,24 @@ impl TestNode {
         self
     }
 
+    /// Turn on `server.tls`, pointing at a fixture under `testdata/`.
+    ///
+    /// The example ships the block commented out (absence is what makes plain HTTP the default),
+    /// so this appends rather than substitutes.
+    pub fn with_tls(mut self, cert: &str, key: &str, warn_days: u32) -> Self {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata");
+        self.yaml = append_under_server(
+            &self.yaml,
+            &format!(
+                "  tls:\n    cert_path: {}\n    key_path: {}\n    warn_days_before_expiry: \
+                 {warn_days}\n",
+                dir.join(cert).display(),
+                dir.join(key).display()
+            ),
+        );
+        self
+    }
+
     /// Point `stacking_server` at a running test server.
     pub fn with_stack_upstream(mut self, host: &str, port: u16) -> Self {
         self.yaml = self
@@ -92,12 +110,39 @@ impl TestNode {
     }
 }
 
+/// Append a block to the end of the example, which lands it inside `server`.
+///
+/// Asserted rather than assumed: a future PRD §8.1 edit that adds a section after `server` would
+/// otherwise reparent these keys silently, and `deny_unknown_fields` would report the failure
+/// against whatever that new section is — which is a long way from the cause.
+fn append_under_server(yaml: &str, block: &str) -> String {
+    let last_section = yaml
+        .lines()
+        .rfind(|line| !line.starts_with([' ', '\t', '#']) && line.contains(':'))
+        .expect("the example has top-level sections");
+    assert_eq!(
+        last_section, "server:",
+        "`server` is no longer the last section of config/field-node.example.yaml, so appending \
+         no longer lands inside it"
+    );
+    format!("{yaml}{block}")
+}
+
 /// Build application state for a node, with the route table the router just declared.
 pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
     let config = node.config();
     let auth = AuthPolicy::resolve("ASTROCTL_TOKEN", node.token.as_deref(), node.bind())
         .expect("the fixture posture must be startable");
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+
+    // Loaded through the real `tls::load`, so a test that asserts on SEC-07's health fields is
+    // asserting on a certificate that was actually parsed, not on a hand-built value.
+    let certificate = config
+        .server
+        .tls
+        .as_ref()
+        .map(|tls| crate::tls::load(tls).expect("the fixture certificate must load"))
+        .map(|materials| materials.status());
 
     AppState {
         proxy: Arc::new(StackProxy::new(&config.stacking_server)),
@@ -106,6 +151,7 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
             configured: config.server.runtime_worker_threads,
             available_cores: cores,
         },
+        certificate,
         config,
         bus: EventBus::new(),
         status: Arc::new(StatusCell::starting()),

@@ -95,5 +95,28 @@ tower = { version = "0.5", features = ["util"] }
 # Absence of `frontend/dist` is handled by astroctl-field's build.rs, not by this crate.
 include_dir = { version = "0.7" }
 
+# --- added by M0-T09 (TLS termination on the field node, SEC-05) ---
+# `ring` rather than the default `aws-lc-rs` provider. Both are pure enough, but aws-lc-rs needs
+# cmake and a bindgen-capable toolchain at build time, which is a poor trade on the Pi of SDD §5.9
+# — and `ring` already carries every suite this needs, including the ECDSA P-256 that Let's
+# Encrypt issues by default. `default-features = false` is what drops aws-lc-rs; `tls12` stays
+# because a browser is not the only client (curl, a shell script, an older Android WebView).
+# `rustls` itself is not named here: it arrives through tokio-rustls, which re-exports it, so
+# there is exactly one place the version can be set.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "logging",
+    "ring",
+    "tls12",
+] }
+# PEM → DER for the certificate chain and the private key. Used rather than hand-rolling the
+# base64/label parsing because it handles all three key encodings — PKCS#1, PKCS#8 and **SEC1**.
+# The last one matters: an ECDSA key from acme.sh is `-----BEGIN EC PRIVATE KEY-----`, and a
+# loader that only knows PKCS#8 fails on the only certificate this deployment actually has.
+rustls-pemfile = { version = "2.2" }
+# `notAfter` out of the certificate, for SEC-07's expiry reporting. rustls parses certificates
+# only as far as it needs to make a handshake work and exposes no validity accessor, so reading
+# the expiry needs a real X.509 parser. Pure Rust, no OpenSSL.
+x509-parser = { version = "0.18" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

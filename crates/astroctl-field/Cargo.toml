@@ -34,6 +34,12 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 rustix = { workspace = true }
+# M0-T09: TLS termination (SEC-05). The field node is the only process that must be up for the
+# system to work, so the certificate lives here rather than behind a proxy (ADD §4).
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+x509-parser = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }

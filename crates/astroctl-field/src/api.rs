@@ -81,6 +81,38 @@ impl NodeStatus {
     }
 }
 
+/// What `/api/system/health` puts in `status`.
+///
+/// [`NodeStatus`]'s two lifecycle states plus `warn`, which is **derived when the response is
+/// built and never stored**. SEC-07 degrades a perfectly running node whose certificate is inside
+/// the expiry threshold, and that is a property of the clock rather than a transition the node
+/// makes — putting it in [`StatusCell`] would collapse "the node is up" and "the node is healthy"
+/// into one variable, and then nothing could turn the warning off again when the certificate is
+/// renewed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// The API is up; the watchdogs are not running yet.
+    Starting,
+    /// Fully started, nothing degraded.
+    Ok,
+    /// Serving normally, but something needs the operator before it stops being true.
+    Warn,
+}
+
+impl HealthStatus {
+    /// Lifecycle first: `starting` lasts milliseconds and "not ready yet" is the more actionable
+    /// of the two readings while it does. The warning is still in `cert_days_remaining`, and it
+    /// reaches `status` a moment later.
+    fn of(lifecycle: NodeStatus, degraded: bool) -> Self {
+        match (lifecycle, degraded) {
+            (NodeStatus::Starting, _) => Self::Starting,
+            (NodeStatus::Ok, false) => Self::Ok,
+            (NodeStatus::Ok, true) => Self::Warn,
+        }
+    }
+}
+
 /// The `starting` → `ok` transition of SDD §8.1, shared between `main` and the handlers.
 #[derive(Debug)]
 pub struct StatusCell(AtomicU8);
@@ -145,6 +177,12 @@ pub struct AppState {
     pub proxy: Arc<StackProxy>,
     /// Logging destination, for support questions.
     pub logging: LoggingInfo,
+    /// The served certificate's expiry (SEC-07), or `None` on a plain-HTTP node.
+    ///
+    /// A value rather than a handle to the loader: the expiry is fixed once the certificate is
+    /// loaded, and this node has no reload path — a renewal restarts the service (see
+    /// `docs/ops/tls-setup.md`), which is what makes a `Copy` snapshot honest here.
+    pub certificate: Option<crate::tls::CertificateStatus>,
 }
 
 /// Wraps an [`ApiError`] so it can be returned from a handler.
@@ -231,26 +269,43 @@ impl Versions {
     }
 }
 
-/// `GET /api/system/health` — SDD §5.8.1.
+/// `GET /api/system/health` — SDD §5.8.1, plus SEC-07's certificate expiry.
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     v: u16,
-    status: NodeStatus,
+    status: HealthStatus,
     /// `null` when the volume cannot be interrogated — never a fabricated 0.0 (see
     /// [`crate::vitals::disk_free_gb`]).
     disk_free_gb: Option<f64>,
     clock_synced: bool,
     uptime_s: u64,
+    /// `notAfter` of the served certificate as UTC RFC 3339 (SDD §2), or `null` on a node
+    /// serving plain HTTP — which is a supported mode, so `null` is not a fault.
+    cert_expires_at: Option<String>,
+    /// Whole days until that moment, **negative once it has passed**. An expired certificate
+    /// revokes the secure context exactly as a missing one does, so it disables the wake lock and
+    /// the installed app; SEC-07 exists so the operator does not discover that in a field.
+    cert_days_remaining: Option<i64>,
     versions: Versions,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    // One `now` for both fields, so the reported expiry and the reported status can never
+    // disagree about which side of the threshold this instant is on.
+    let now = chrono::Utc::now();
+    let certificate = state.certificate;
+
     Json(HealthResponse {
         v: API_SCHEMA_VERSION,
-        status: state.status.get(),
+        status: HealthStatus::of(
+            state.status.get(),
+            certificate.is_some_and(|c| c.is_warning(now)),
+        ),
         disk_free_gb: vitals::disk_free_gb(&state.config.storage.sessions_dir),
         clock_synced: vitals::clock_synced(),
         uptime_s: state.uptime.seconds(),
+        cert_expires_at: certificate.map(|c| c.expires_at_rfc3339()),
+        cert_days_remaining: certificate.map(|c| c.days_remaining(now)),
         versions: Versions::current(),
     })
 }
@@ -314,6 +369,10 @@ pub struct ServerInfo {
     /// `false` means this node is running under the SDD §4.5 loopback exception, unauthenticated.
     auth_enforced: bool,
     max_command_age_ms: u64,
+    /// Whether this node terminates TLS (SEC-05). The operator's first question when the PWA
+    /// will not install is "is this origin actually https", and the answer should not require
+    /// reading the startup log of a process that has been running for a week.
+    tls: bool,
 }
 
 /// The parts of the configuration that answer "what is this node set up to do".
@@ -367,6 +426,7 @@ async fn info(State(state): State<AppState>) -> Json<InfoResponse> {
             bind: format!("{}:{}", config.server.host, config.server.port),
             auth_enforced: state.auth.is_enforced(),
             max_command_age_ms: config.server.max_command_age_ms,
+            tls: state.certificate.is_some(),
         },
         logging: state.logging.clone(),
         config: ConfigSummary {
@@ -520,6 +580,119 @@ mod tests {
             .expect("body reads");
         let body: Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(body["status"], "ok");
+    }
+
+    // --- SEC-07: certificate expiry in health -----------------------------------------
+
+    /// A node with no `tls` block is a supported deployment, not a broken one, so the fields are
+    /// `null` rather than absent or zero — a dashboard that reads 0 days remaining would be
+    /// wrong in the alarming direction.
+    #[tokio::test]
+    async fn a_plain_http_node_reports_no_certificate_rather_than_a_fabricated_one() {
+        let node = TestNode::authenticated("s3cret");
+        let (_, body) = call(&node, "/api/system/health", Some("s3cret")).await;
+        assert_eq!(body["cert_expires_at"], Value::Null, "{body}");
+        assert_eq!(body["cert_days_remaining"], Value::Null, "{body}");
+        assert_eq!(body["status"], "starting", "{body}");
+
+        let (_, info) = call(&node, "/api/system/info", Some("s3cret")).await;
+        assert_eq!(info["server"]["tls"], false, "{info}");
+    }
+
+    #[tokio::test]
+    async fn a_tls_node_reports_its_certificates_expiry() {
+        let node = TestNode::authenticated("s3cret").with_tls(
+            "ecdsa-sec1.crt.pem",
+            "ecdsa-sec1.key.pem",
+            14,
+        );
+        let (status, body) = call(&node, "/api/system/health", Some("s3cret")).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let expires_at = body["cert_expires_at"]
+            .as_str()
+            .expect("a timestamp: {body}");
+        assert!(expires_at.ends_with('Z'), "UTC per SDD §2: {expires_at}");
+        // The fixture is long-dated, so this also asserts the threshold is not simply always on.
+        assert!(
+            body["cert_days_remaining"].as_i64().is_some_and(|d| d > 14),
+            "{body}"
+        );
+
+        let (_, info) = call(&node, "/api/system/info", Some("s3cret")).await;
+        assert_eq!(info["server"]["tls"], true, "{info}");
+    }
+
+    /// Drive the health handler on a started node, which `call` cannot do — it builds state at
+    /// `starting`, and the degraded reading only applies once the lifecycle has reached `ok`.
+    async fn health_of_started(node: &TestNode) -> Value {
+        let (router, declarations) = router();
+        let state = state_with(node, declarations);
+        state.status.set(NodeStatus::Ok);
+        let auth = Arc::clone(&state.auth);
+        let app = with_auth(router.with_state(state), auth);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/system/health")
+                    .header(header::AUTHORIZATION, "Bearer s3cret")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body reads");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The acceptance criterion, through the real handler. The fixture certificate expired in
+    /// 2020, so it is permanently inside any threshold — a certificate short-dated at test time
+    /// would assert the same thing today and start failing on the day it lapsed.
+    #[tokio::test]
+    async fn a_certificate_inside_the_threshold_degrades_status_to_warn() {
+        let node =
+            TestNode::authenticated("s3cret").with_tls("expired.crt.pem", "expired.key.pem", 14);
+        let body = health_of_started(&node).await;
+
+        assert_eq!(body["status"], "warn", "{body}");
+        assert!(
+            body["cert_days_remaining"]
+                .as_i64()
+                .is_some_and(|days| days < 0),
+            "an expiry in the past must read as negative days, not as zero: {body}"
+        );
+        assert_eq!(
+            body["cert_expires_at"], "2020-04-01T00:00:00.000Z",
+            "{body}"
+        );
+    }
+
+    /// The other half of the same criterion: a healthy certificate must not degrade anything,
+    /// or `warn` would carry no information.
+    #[tokio::test]
+    async fn a_healthy_certificate_leaves_a_started_node_ok() {
+        let node = TestNode::authenticated("s3cret").with_tls(
+            "ecdsa-sec1.crt.pem",
+            "ecdsa-sec1.key.pem",
+            14,
+        );
+        let body = health_of_started(&node).await;
+        assert_eq!(body["status"], "ok", "{body}");
+    }
+
+    /// `warn` must not mask "not ready yet": during the milliseconds before the watchdogs are up,
+    /// the lifecycle is the more actionable of the two readings.
+    #[test]
+    fn a_starting_node_reports_starting_even_with_an_expiring_certificate() {
+        assert_eq!(
+            HealthStatus::of(NodeStatus::Starting, true),
+            HealthStatus::Starting
+        );
+        assert_eq!(HealthStatus::of(NodeStatus::Ok, true), HealthStatus::Warn);
+        assert_eq!(HealthStatus::of(NodeStatus::Ok, false), HealthStatus::Ok);
     }
 
     // --- info -------------------------------------------------------------------------

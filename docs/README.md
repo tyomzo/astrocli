@@ -17,9 +17,9 @@ are expected to be exact.
 
 | Document | ID | Version | Path | Answers |
 |----------|-----|---------|------|---------|
-| Product Requirements | ASTROCTL-PRD-001 | 1.16.0 | [`intent/`](intent/ASTROCTL-PRD-001.md) | *What must be true?* 292 numbered requirements (`HAL-01`, `PRF-12`, …), hardware scope, configuration schema, phase plan, risk register |
+| Product Requirements | ASTROCTL-PRD-001 | 1.17.0 | [`intent/`](intent/ASTROCTL-PRD-001.md) | *What must be true?* 292 numbered requirements (`HAL-01`, `PRF-12`, …), hardware scope, configuration schema, phase plan, risk register |
 | Architecture Design | ASTROCTL-ADD-001 | 1.5.0 | [`design/`](design/ASTROCTL-ADD-001.md) | *What are the parts and why these parts?* Views, component responsibilities, 13 ADRs with rejected alternatives, crate layout and dependency rules |
-| Software Design | ASTROCTL-SDD-001 | 1.12.0 | [`design/`](design/ASTROCTL-SDD-001.md) | *How is each part built?* Rust types, trait signatures, wire protocols, task topology, route tables, storage formats, verification design |
+| Software Design | ASTROCTL-SDD-001 | 1.13.0 | [`design/`](design/ASTROCTL-SDD-001.md) | *How is each part built?* Rust types, trait signatures, wire protocols, task topology, route tables, storage formats, verification design |
 | Implementation Plan | ASTROCTL-IMP-001 | 1.3.0 | [`plan/`](plan/ASTROCTL-IMP-001.md) | *In what order, and how do we know it works?* Milestones M0–M3, workstreams, sizing, definition of done |
 | Task breakdown | — | — | [`plan/tasks/`](plan/tasks/README.md) | *What do I do next?* 34 task files, one per reviewable change set |
 
@@ -35,6 +35,9 @@ All four are **Draft** status.
 - **Checking how something is meant to behave at runtime** → SDD §5 for the element, §8.3 for
   behavior over a slow or lossy link, §9 for what test proves it.
 - **Understanding the shape of the system in five minutes** → ADD §4 and §5.1.
+- **Running a node rather than building one** → [`ops/`](ops/). Procedures, not specifications:
+  what an operator does, in the order they do it. Currently
+  [`ops/tls-setup.md`](ops/tls-setup.md) (M0-T09).
 
 ## Conventions that matter
 

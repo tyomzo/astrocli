@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.16.0  
+**Version:** 1.17.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -35,6 +35,8 @@
 **Change note (1.15.1):** the `disk_*_free_gb` thresholds now state their unit — GiB, 2^30 bytes, matching `df -h`. The unit was never defined and 10^9 versus 2^30 differ by 7%, which is not acceptable ambiguity on a threshold that pauses capture. Surfaced by M0-T05.
 
 **Change note (1.15.2):** Phase 2a's target catalog is noted as filling the target slot M1 already builds (SDD §5.9) rather than arriving as new layout. PLN-03/04 stay in 2a; only the shell shape is settled early.
+
+**Change note (1.17.0):** **§8.1 gains the `server.tls` block**, landed by M0-T09 together with the config struct and the shipped example — the three artefacts 1.16.0 said would move in one change set, and did. `cert_path`, `key_path`, `warn_days_before_expiry`. It ships **commented out**, because absence has to mean plain HTTP: `localhost` development is already a secure context to a browser, and the two-container harness of M0-T08 has no name to certify. A block that is present but unreadable is a startup failure naming the path, never a silent downgrade. SEC-07's expiry now appears in `/api/system/health` as `cert_expires_at`/`cert_days_remaining`, with `status` degrading to `warn` inside the threshold and staying there past it. Operator procedure, with the traps that cost time in practice, is `docs/ops/tls-setup.md`.
 
 **Change note (1.16.0):** **TLS on the operator↔field connection promoted from a "Could" to a Must**, and the reason recorded, after testing the M0-T06 PWA on a real Android phone over the LAN. Chrome gates the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 were unreachable over plain HTTP at any address other than `localhost` — and a VPN does not substitute, because the browser judges the origin and a tunnelled `http://` origin is still insecure. SEC-05 previously called TLS optional while ADD §4 already drew `HTTPS/WSS` on that link; the two now agree. New: SEC-06 (issuance must not require inbound exposure — DNS-01 or an externally issued certificate, so SEC-01 holds), SEC-07 (certificate expiry in `/api/system/health`, because an expired certificate revokes the secure context exactly as a missing one does), SEC-08 (the hostname must resolve through the VPN's DNS, or the UI becomes unreachable precisely when the field node runs standalone — defeating ARC-06). Inter-node TLS stays optional as SEC-09; no browser is involved on that path. §8.1 deliberately does **not** yet carry the `server.tls` block: a drift test holds the PRD schema, the shipped example and the config struct identical, and the config denies unknown fields, so the schema moves in M0-T09 with the implementation rather than ahead of it. An absent block will mean plain HTTP; an unreadable one a startup failure, never a silent downgrade.
 
@@ -1031,7 +1033,7 @@ The VPN is the trust boundary: AstroCtl services are never exposed to the public
 | SEC-04 | Secrets (LLM API keys, auth tokens) are supplied via environment variables, never stored in the main config file or written to logs | Must |
 | SEC-05 | **TLS on the operator↔field-node connection, terminated by the field node itself.** Not a hardening option: browsers gate the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 are unreachable over plain HTTP at any address other than `localhost`. A VPN does not help — a tunnelled `http://` origin is still insecure to the browser. The certificate must be one the operator's device already trusts (a real certificate for a name the operator controls), because a warning interstitial and a secure context are mutually exclusive | Must |
 | SEC-06 | Certificate acquisition must not require inbound exposure of the field node — DNS-01 or an externally issued certificate copied to the node, never HTTP-01 or port forwarding, so SEC-01 holds | Must |
-| SEC-07 | The field node reports its certificate's expiry in `/api/system/health` and warns before it lapses. An expired certificate revokes the secure context exactly as a missing one does, so it disables wake lock and the installed app — a failure the operator must not discover in the dark. **§8.1 gains the `server.tls` block in M0-T09**, together with the config struct and the shipped example: the three are held identical by a drift test and the config denies unknown fields, so a schema entry landing ahead of the implementation would ship an example the binary refuses to parse | Must |
+| SEC-07 | The field node reports its certificate's expiry in `/api/system/health` and warns before it lapses. An expired certificate revokes the secure context exactly as a missing one does, so it disables wake lock and the installed app — a failure the operator must not discover in the dark. §8.1 carries the `server.tls` block as of 1.17.0 (M0-T09); the operator procedure is `docs/ops/tls-setup.md` | Must |
 | SEC-08 | The operator-facing hostname resolves without internet access, via the VPN's own DNS rather than the public zone. Public-DNS-only resolution would make the UI unreachable precisely when the field node is operating standalone, defeating ARC-06 | Must |
 | SEC-09 | TLS on the field↔stack inter-node connection remains optional, for transports the operator doesn't fully trust. No browser is involved on that path, so no secure context is at stake | Could |
 
@@ -1219,6 +1221,16 @@ server:
                             #   carries a persistent marker. Origin already separates the installs;
                             #   this is what makes them distinguishable once installed, so a dev
                             #   app driving a real mount cannot be mistaken for the production one
+  # TLS terminated by this process (SEC-05), commented out because absent means plain HTTP — which
+  # is what localhost development and the container harness run on. Present but unreadable is a
+  # startup failure naming the path, never a silent downgrade. Chrome gates the wake lock, service
+  # workers and the install prompt behind a secure context, so any node an operator reaches at an
+  # address other than localhost needs this. Procedure: docs/ops/tls-setup.md
+  # tls:
+  #   cert_path: /etc/astroctl/tls/fullchain.pem  # PEM chain, leaf first (acme.sh fullchain.cer)
+  #   key_path: /etc/astroctl/tls/privkey.pem     # PEM key: PKCS#8, PKCS#1 or SEC1 ("EC PRIVATE
+  #                                               #   KEY") — acme.sh issues ECDSA by default
+  #   warn_days_before_expiry: 14                 # health degrades to `warn` inside this (SEC-07)
 ```
 
 ### 8.2 Stacking Server Configuration

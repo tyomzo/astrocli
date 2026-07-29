@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.12.0
+**Version:** 1.13.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.16.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.17.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -50,6 +50,8 @@
 **Change note (1.11.2):** §5.9's layout consolidated into three sketches — the three phone destinations, the summoned D-pad with its two badge states, and the tablet arrangement — replacing the partial ones accumulated while the design was being worked out. Added the four-slot table (target chooser, stack controls, rebuilding indicator, nudge availability) stating what M1 builds and what 2a/2b/2c fill, so the boundary between fixed layout and deferred content is explicit rather than inferred. M1-T04 and M1-T14 now point at it directly.
 
 **Change note (1.12.0):** §5.9's target-platform paragraph named the three Android capabilities the PWA relies on without recording that all three require a **secure context**. Added, with the trap that makes it worth stating: every one of them works on `http://localhost` and none work on a phone over the VPN, so a capability check passing on the workstation says nothing about the field. Found by testing M0-T06 on a real phone after it reported the shell working. Also records that an expired certificate revokes the secure context as thoroughly as a missing one, which is why SEC-07 puts expiry in the health payload.
+
+**Change note (1.13.0):** §5.8.1's field health response gains SEC-07's certificate expiry — `cert_expires_at`, `cert_days_remaining`, and a third `status` value `warn`. `warn` is derived when the response is built and never stored: it is a property of the clock rather than a lifecycle transition, so the `starting`→`ok` cell of §8.1 keeps exactly the two states it names, and a renewed certificate turns the warning off without anything having to reset it. TLS itself terminates in `astroctl-field` (ADD §4); the operator procedure is `docs/ops/tls-setup.md`. Landed by M0-T09.
 
 ---
 
@@ -650,7 +652,7 @@ All routes under bearer auth (§4.5); tier annotations present from Phase 1 (enf
 
 | Route | Method | Tier | Body → Response |
 |-------|--------|------|-----------------|
-| `/api/system/health` | GET | read | → `{status, disk_free_gb, clock_synced, versions}` |
+| `/api/system/health` | GET | read | → `{status, disk_free_gb, clock_synced, uptime_s, cert_expires_at, cert_days_remaining, versions}` — `status` is `starting`\|`ok`\|`warn`; the certificate fields are `null` on a plain-HTTP node and `warn` is what SEC-07 degrades to inside `server.tls.warn_days_before_expiry` |
 | `/api/system/info` | GET | read | → config summary, driver list, capabilities |
 | `/api/mount/connect` | POST | low | `{port?}` → status |
 | `/api/mount/disconnect` | POST | low | → status |
