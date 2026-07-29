@@ -1,0 +1,26 @@
+# Build context for deploy/Dockerfile.field and deploy/Dockerfile.stack (M0-T08).
+#
+# Two reasons to keep this tight, and the second is the one that matters:
+#
+#   1. Every excluded byte is a byte not sent to the daemon on each build.
+#   2. The context is hashed. Anything in it that changes for reasons unrelated to the image —
+#      a docs commit, a local `cargo build`, a git operation — invalidates layers that contain
+#      none of it. CI builds these images on every run, and a build that is slow for no visible
+#      reason is a build somebody eventually stops running.
+
+# Compiled locally; the image builds its own.
+target/
+
+# The image builds the PWA in its own node stage, so the host's node_modules is dead weight and
+# the host's dist/ is worse than that: embedding a bundle somebody built on a workstation would
+# make the image's contents depend on a machine nobody can inspect. Both are git-ignored anyway.
+frontend/node_modules/
+frontend/dist/
+
+.git/
+
+# Not inputs to either image.
+docs/
+spikes/
+.claude/
+deploy/.env

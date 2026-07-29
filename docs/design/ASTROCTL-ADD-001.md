@@ -1,7 +1,7 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.5.0
+**Version:** 1.5.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -29,6 +29,8 @@
 **Change note (1.4.1):** §5.6 records a watch item — rules 5 and the core/axum boundary together leave the two binaries with no shared home for HTTP-layer code, so ~700 lines are duplicated. Fine at M0 size; if M1 grows it, an `astroctl-api` crate between core and the binaries closes the drift risk without violating any rule.
 
 **Change note (1.5.0):** §4's context diagram already showed `HTTPS/WSS` on the operator link but never said where TLS terminates or why it was not optional. Both are now recorded: termination is **in `astroctl-field`**, because a cloud proxy would put a WAN round trip in front of every live-view frame on the cellular link the two-node split exists to work around (and contradicts ARC-06), while a sidecar adds a second process to supervise on a Pi already running the mount and camera. The reason it is mandatory is browser secure-context gating of wake lock, service workers and installability — not confidentiality, which the VPN already provides. Aligns with PRD 1.16.0's SEC-05/06/07/08.
+
+**Change note (1.5.1):** §5.5 said the container topology exercises "two independent tokens". It does not, and neither does any deployment: PRD §8.1 and §8.2 both name `ASTROCTL_TOKEN`, SDD §4.5 calls it the shared token, and ADR-07 has the field node forward the operator's credential when it proxies — there is no key anywhere for a second one. Corrected during M0-T08, which is the task that had to build against it.
 
 ---
 
@@ -336,7 +338,7 @@ Design rules: the e-stop endpoint has a dedicated route with no queuing or middl
 - The operator device talks **only** to the field node (`:8470`); `/stack/*` is proxied (STK-19, ARC-13). Direct browser→stack connection is a permitted optimization when VPN topology allows (PRD §5.7) but is not required.
 - Both services bind the VPN interface (SEC-01) and require the shared token (SEC-02); each node has one YAML config file (ARC-05).
 - Single-machine deployment: both services on one host with in-memory transfer shortcut — same code paths, loopback transport (STK-20, ARC-08 degenerate case).
-- **Development and CI topology: two containers on separate network namespaces** (M0-T08), addressed by service name over a bridge network. This is not the degenerate case above — it exercises real TCP between nodes, the proxy host-to-host, and two independent tokens, on a single workstation. It also permits `tc` shaping of the inter-node link, which is how the latency and head-of-line-blocking requirements of §9.1 and SDD §8.3 get tested automatically rather than on a bench. What it does not cover is the VPN itself (MTU, NAT traversal, reconnection) or Pi hardware; those remain field-deployment gates.
+- **Development and CI topology: two containers on separate network namespaces** (M0-T08), addressed by service name over a bridge network. This is not the degenerate case above — it exercises real TCP between nodes, the proxy host-to-host, and the **one shared token** both nodes name (SEC-02), on a single workstation. It also permits `tc` shaping of the inter-node link, which is how the latency and head-of-line-blocking requirements of §9.1 and SDD §8.3 get tested automatically rather than on a bench. What it does not cover is the VPN itself (MTU, NAT traversal, reconnection) or Pi hardware; those remain field-deployment gates.
 - Time discipline on the field node via chrony/NTP or GPS (REL-14) is a deployment prerequisite checked at startup.
 
 ### 5.6 Development View

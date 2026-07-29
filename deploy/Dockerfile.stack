@@ -1,0 +1,127 @@
+# astroctl-stack — the stacking-server half of the M0-T08 two-node harness.
+#
+# Build from the repository root:  docker build -f deploy/Dockerfile.stack -t astroctl-stack:dev .
+# Normally you want scripts/dev-up.sh, which builds both images and starts the pair.
+#
+# This is a test and development harness, not a deployment artefact (M0-T08 scope). The real
+# stacking server is a Ryzen 9 with an RTX 4090 and a CUDA runtime; nothing here pretends to
+# stand in for that. What this image is for is the half of the topology that has to be *reachable
+# over a network boundary* for the other half to be worth testing.
+#
+# Deliberate decisions — the ones this file does not share with Dockerfile.field:
+#
+#   * `workers/` ships here and only here (ADD §5.6 rule 6). The field binary must build and run
+#     with no GPU or ML runtime and no worker process management; packaging the workers with it
+#     would make that rule unverifiable at the only place it can be checked, which is the image.
+#
+#   * python3 is installed. `workers.python_interpreter` has to name a real interpreter or M1-T13's
+#     first spawn becomes a puzzle. The production shape is the venv the example config names;
+#     the harness runs no worker code, so the system interpreter is the honest stand-in and the
+#     requirements.txt CUDA stack is deliberately not installed.
+#
+#   * No PWA stage. The operator's browser never loads anything from this node — it talks to the
+#     field node and reaches this one through /stack/* (ADR-07).
+#
+# Everything above the "diverges" line in stage 2 is byte-identical to Dockerfile.field so the
+# two images share the dependency layer. Keep it that way, or building the pair compiles the
+# third-party graph twice.
+
+# --------------------------------------------------------------------------------------------
+# 1. The binary.
+# --------------------------------------------------------------------------------------------
+FROM rust:1.97.1-slim-bookworm AS build
+WORKDIR /src
+
+# --- dependency layer ---
+# Manifests and a stub source tree, so this layer compiles every third-party crate and nothing of
+# ours. It stays cached until Cargo.lock or a Cargo.toml changes; without it, a one-line edit to
+# any .rs file recompiles the entire dependency graph and the E2E job becomes the slowest thing in
+# CI, which is how E2E jobs get switched off.
+#
+# The 14 manifests are listed one by one because Docker's COPY cannot preserve a directory shape
+# through a glob. A new workspace crate that nobody adds here is not silent: if a binary depends on
+# it, cargo fails at once on the missing path dependency; if nothing does, the only cost is that
+# its dependencies land in the slow layer instead of this one.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/astroctl-core/Cargo.toml crates/astroctl-core/
+COPY crates/astroctl-hal/Cargo.toml crates/astroctl-hal/
+COPY crates/astroctl-drivers/Cargo.toml crates/astroctl-drivers/
+COPY crates/astroctl-safety/Cargo.toml crates/astroctl-safety/
+COPY crates/astroctl-session/Cargo.toml crates/astroctl-session/
+COPY crates/astroctl-pipeline/Cargo.toml crates/astroctl-pipeline/
+COPY crates/astroctl-solver/Cargo.toml crates/astroctl-solver/
+COPY crates/astroctl-planning/Cargo.toml crates/astroctl-planning/
+COPY crates/astroctl-guiding/Cargo.toml crates/astroctl-guiding/
+COPY crates/astroctl-transfer/Cargo.toml crates/astroctl-transfer/
+COPY crates/astroctl-llm/Cargo.toml crates/astroctl-llm/
+COPY crates/astroctl-ipc/Cargo.toml crates/astroctl-ipc/
+COPY crates/astroctl-field/Cargo.toml crates/astroctl-field/
+COPY crates/astroctl-stack/Cargo.toml crates/astroctl-stack/
+RUN set -eu; \
+    for dir in crates/*/; do \
+        mkdir -p "$dir/src"; \
+        printf '//! placeholder for the dependency layer\n' >"$dir/src/lib.rs"; \
+    done; \
+    for bin in field stack; do \
+        printf '//! placeholder for the dependency layer\nfn main() {}\n' \
+            >"crates/astroctl-$bin/src/main.rs"; \
+    done; \
+    cargo build --release --workspace --locked
+
+# --- the real sources ---
+COPY crates/ crates/
+# cargo decides what to rebuild by mtime, and COPY preserves the mtimes from the build context —
+# which are older than the stub build above whenever the checkout is. Without this the stubs would
+# be considered current and the image would ship a binary that does nothing.
+RUN find crates -name '*.rs' -exec touch {} +
+
+# ---------------- diverges from Dockerfile.field here ----------------
+RUN cargo build --release --locked -p astroctl-stack
+
+# --------------------------------------------------------------------------------------------
+# 2. What actually runs.
+# --------------------------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# curl, iproute2 and netcat are the harness, not the product — see Dockerfile.field for what each
+# one is for. python3 is this image's own: it is what `workers.python_interpreter` names.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        iproute2 \
+        netcat-openbsd \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --system --no-create-home --user-group --uid 10001 astroctl
+
+# The stacking server's copy of a session is the authoritative one (IPP-09, REL-13), so this is
+# the volume that must survive a restart. Ownership is set here because a fresh named volume
+# inherits what the image has at the mount point.
+RUN install -d -o astroctl -g astroctl \
+        /data/astro \
+        /data/astro/sessions \
+        /data/astro/logs \
+        /data/astro/stacks \
+        /data/astro/calibration \
+        /data/astro/ml_models \
+        /data/astro/references
+
+WORKDIR /opt/astroctl
+COPY --from=build /src/target/release/astroctl-stack /usr/local/bin/astroctl-stack
+# ADD §5.6 rule 6: the stacking server is the only place the Python workers are packaged. The
+# config names them by a path relative to the working directory, which is why WORKDIR is above.
+COPY workers/ /opt/astroctl/workers/
+COPY deploy/config/stacking-server.yaml /etc/astroctl/stacking-server.yaml
+
+ENV ASTROCTL_STACK_CONFIG=/etc/astroctl/stacking-server.yaml
+
+# Documentation only, and compose deliberately does not publish it: nothing but the field node has
+# any business talking to this port (ADD §5.5).
+EXPOSE 8471
+
+USER astroctl
+# No shell wrapper: PID 1 is the binary, so SIGTERM from `docker stop` reaches the graceful
+# shutdown path instead of being absorbed by a shell that ignores it.
+ENTRYPOINT ["/usr/local/bin/astroctl-stack"]

@@ -1,0 +1,104 @@
+# The M0-T08 two-node harness: the field node and the stacking server as two containers on
+# separate network namespaces, addressed by service name over a user-defined bridge.
+#
+# Use scripts/dev-up.sh and scripts/dev-down.sh. They exist because bringing the pair up needs a
+# token, and waiting for it needs that same token — see dev-up.sh.
+#
+# Development happens on one workstation and the field deployment is two real machines. This file
+# is what lets one machine test the two-machine shape honestly: real TCP across a namespace
+# boundary, name resolution instead of loopback, the /stack/* proxy host-to-host, and a link that
+# `tc` can constrain (scripts/shape-link.sh). What it does not test is the VPN and the Pi; those
+# stay real-hardware gates (M0-T08, ADD §5.5).
+#
+# Compose spec only — no Docker-specific extension is used, so `podman compose` should work.
+#
+# Deliberate decisions:
+#
+#   * **No `restart:` policy.** A container that quietly comes back hides the one behaviour this
+#     harness exists to observe: stop the stacking server and watch the field node carry on.
+#
+#   * **No `depends_on`.** The field node must start, and stay up, whether or not the stacking
+#     server is reachable (ADD §5.4.4). Ordering the two would make the harness prove the
+#     opposite of the design.
+#
+#   * **One token, not two.** PRD §8.1 and §8.2 both name ASTROCTL_TOKEN, and the field node
+#     forwards the operator's credential when it proxies (ADR-07, SDD §4.5). Two independent
+#     tokens would leave the proxy — and M1's transfer agent — with nothing to present.
+#
+#   * **The stacking server publishes no port.** The operator device talks only to the field node
+#     (STK-19, ARC-13). Reach the stack node by hand with `docker compose exec stack curl ...`,
+#     or through /stack/* like the PWA does.
+
+name: astroctl
+
+services:
+  field:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.field
+    image: astroctl-field:dev
+    hostname: field
+    environment:
+      # The shared token (SEC-02). Absent or empty, the node refuses to start rather than serving
+      # a non-loopback bind unauthenticated (SEC-01) — which is the correct failure, but dev-up.sh
+      # gets you a token before you meet it.
+      ASTROCTL_TOKEN: ${ASTROCTL_TOKEN:-}
+    ports:
+      # The only published port in the harness. 18470 rather than 8470 so a node already running
+      # on the workstation keeps its port; override with ASTROCTL_FIELD_HOST_PORT.
+      - "${ASTROCTL_FIELD_HOST_PORT:-18470}:8470"
+    volumes:
+      # Named, so `dev-down.sh` then `dev-up.sh` is a restart with the session data still there —
+      # which is what makes restart-recovery testable at all (REL-06, REL-08).
+      - field-data:/data/astro
+    networks: [astro]
+    healthcheck:
+      # Addressed by service name, resolving to this container's own interface, because the
+      # alternative is writing `localhost` into the harness and M0-T08 asks that no config in
+      # these images contain one. Nothing depends on this check — it is here so
+      # `docker compose ps` tells the truth; readiness is decided by dev-up.sh over the
+      # published port, which is the operator's actual path.
+      # `$$` escapes compose's own interpolation so the shell inside the container expands it.
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -o /dev/null -H \"Authorization: Bearer $$ASTROCTL_TOKEN\" http://field:8470/api/system/health",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  stack:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.stack
+    image: astroctl-stack:dev
+    hostname: stack
+    environment:
+      ASTROCTL_TOKEN: ${ASTROCTL_TOKEN:-}
+    volumes:
+      - stack-data:/data/astro
+    networks: [astro]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -o /dev/null -H \"Authorization: Bearer $$ASTROCTL_TOKEN\" http://stack:8471/api/system/health",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+networks:
+  astro:
+    # A user-defined bridge, which is what gives the two containers a DNS server that resolves
+    # service names. The default bridge does not, and the whole point of this harness is that the
+    # field node reaches the other node by name (`stacking_server.host: stack`) rather than by a
+    # hardcoded address.
+    driver: bridge
+
+volumes:
+  field-data:
+  stack-data:

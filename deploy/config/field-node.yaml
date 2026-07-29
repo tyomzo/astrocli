@@ -1,0 +1,147 @@
+# field-node.yaml — the M0-T08 two-node container harness.
+#
+# Derived from config/field-node.example.yaml, which is the annotated reference. Only the keys
+# that *differ* from it are commented here: what this file is is a set of deltas, and repeating
+# the example's annotations would give every one of them a second place to go stale.
+#
+# Deltas, and why:
+#
+#   * `stacking_server.host: stack` — the compose service name, resolved by the bridge network's
+#     DNS. A literal address here would prove exactly what the loopback compromise this harness
+#     replaces proved: nothing (ADD §5.5).
+#   * `server.host: 0.0.0.0` is unchanged and means something different here than on a
+#     workstation: inside a network namespace it is the container's own interface, and the only
+#     way in from outside is the port compose publishes.
+#   * no `server.tls` block — absent means plain HTTP (SEC-05). Two containers on a bridge network
+#     have no name a certificate could attest to, and the secure-context requirements it exists
+#     for (USB-09, USB-10) are gated on a real phone, not on this harness (IMP §2/M0 exit).
+#   * simulator drivers — there is no serial port and no camera in a container. Nothing connects
+#     at startup either way (SDD §8.1), but a harness config naming a Sky-Watcher would be a claim
+#     about hardware that is not there.
+#   * `llm.enabled: false` — the harness holds one secret, the shared token. Nothing in M0 calls a
+#     provider, and requiring a second credential to bring the pair up would be a reason not to.
+#   * `deployment_label` — the PWA installs as "AstroCtl Harness" with the dev icon, so a browser
+#     tab pointed at this can never be mistaken for the field node.
+site:
+  latitude: 59.9139      # Oslo, Norway
+  longitude: 10.7522
+  elevation: 25
+  timezone: Europe/Oslo
+
+mount:
+  driver: simulator
+  port: auto                # "auto" for detection, or "/dev/ttyUSB0"
+  baud: 9600
+  park_position:
+    ra_hours: 0.0
+    dec_degrees: 90.0
+  settle_time_seconds: 3    # pause after slew before capture
+  serial:
+    request_timeout_ms: 500   # per request/response exchange
+    request_retries: 1        # retries before DeviceError::Timeout
+    heartbeat_misses: 3       # consecutive poll failures before watchdog fires (REL-02)
+    poll_hz: 1                # position poll rate, minimum 1 (MNT-02)
+  limits:
+    min_altitude_degrees: 15    # reject goto/slew targets below this altitude (MNT-15)
+    meridian_limit_minutes: 15  # stop tracking this long past the meridian (MNT-16)
+    slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
+    slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
+  # indi_device: "EQMod Mount"    # if driver=indi
+  # ascom_host: "http://..."      # if driver=ascom_alpaca
+
+camera:
+  driver: simulator
+  default_iso: "1600"
+  default_shutter: "30"
+  default_format: "RAW+JPEG"
+  ops_via_cli: []            # operations routed through the `gphoto2` binary instead of the
+                             #   crate bindings, e.g. ["bulb"] — populated from the M2 spike
+  timeouts:                  # operation-class timeouts; a breach declares the thread wedged (REL-03)
+    config_seconds: 5        # get/set a setting
+    capture_extra_seconds: 30  # added to the exposure duration
+    download_seconds: 120
+  # indi_device: "Canon DSLR"     # if driver=indi
+
+# Where sessions, frames and logs live on the field node (PRD §5.9 layout)
+storage:
+  sessions_dir: /data/astro/sessions
+  disk_warn_free_gb: 20      # warning alert threshold (REL-12). GiB = 2^30 bytes, matching
+  disk_critical_free_gb: 5   #   `df -h`; capture pauses after the in-flight frame (REL-12)
+
+guide_camera:
+  driver: null               # "asi", "qhy", "indi", "simulator", or null (disabled)
+  # asi_index: 0             # if driver=asi
+  # qhy_id: "QHY5III178M"   # if driver=qhy
+  # indi_device: "ASI 120MM" # if driver=indi
+
+guider:
+  dither_pixels: 5        # dither offset in guide pixels
+  dither_settle: 5        # seconds to settle after dither
+  # Phase 3:
+  # exposure: 2.0
+  # aggressiveness_ra: 0.7
+  # aggressiveness_dec: 0.5
+
+solver:
+  backend: astap           # "astap" or "astrometry"
+  astap_path: /usr/local/bin/astap
+  astap_database: /opt/astap/g17
+  astrometry_config: /etc/astrometry.cfg
+  search_radius: 15        # degrees from hint position
+  downsample: 2            # reduce image resolution for faster solve
+  timeout: 30              # seconds
+  center_threshold: 60     # arcsec — re-slew if offset exceeds this
+  center_max_iterations: 3
+
+# Equipment profile for this session (used to tag frames for calibration matching)
+equipment:
+  telescope: "SW 200PDS f/5"
+  camera: "Canon R10"
+  filter: "none"
+
+stacking_server:
+  enabled: true
+  host: stack              # the compose service name, resolved over the bridge network
+  port: 8471
+  transfer_method: http     # "http" (upload endpoint) or "rsync"
+  retry_interval: 10        # seconds between retries if server unreachable (backoff base)
+  queue_dir: /data/astro/transfer_queue  # local spool for unsent frames
+  pacing:                   # keep bulk uploads from queueing operator commands behind them
+    bandwidth_cap_mbps: null   # null = uncapped; set on constrained links
+    interactive_floor_pct: 20  # % of cap allowed while the operator is actively commanding
+    interactive_window_seconds: 10  # motion command within this window triggers the floor
+
+llm:
+  enabled: false
+  provider: anthropic       # "anthropic", "openai", or "ollama"
+  model: claude-sonnet-5    # example — pin to a current model at deploy time
+  api_key_env: ANTHROPIC_API_KEY  # read key from environment variable (SEC-04)
+  confirmation_tiers:
+    read: auto              # execute immediately
+    low: auto               # execute immediately
+    medium: confirm         # require operator confirmation
+    high: confirm_warn      # confirm with warning
+  voice_input: true         # enable Web Speech API voice commands
+  voice_output: false       # text-to-speech for responses
+  session_history: true     # maintain conversation context per session
+
+server:
+  host: 0.0.0.0             # bind to the VPN interface IP in production (SEC-01)
+  port: 8470
+  auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
+  max_command_age_ms: 2000  # motion-initiating commands older than this are rejected
+                            #   COMMAND_STALE; stopping commands are never age-rejected
+  runtime_worker_threads: null  # tokio async workers; null = min(2, cores-2), floor 1.
+                            #   Deliberately NOT one-per-core: the camera OS thread and the
+                            #   decode pool need cores reserved on a 4-core Pi (SDD §7)
+  log_level: INFO
+  log_dir: /data/astro/logs
+  deployment_label: Harness # null = production. A short name ("Dev", "Bench") for a non-production
+                            #   node: the PWA installs as "AstroCtl Dev" with its own icon and
+                            #   carries a persistent marker. Origin already separates the installs;
+                            #   this is what makes them distinguishable once installed, so a dev
+                            #   app driving a real mount cannot be mistaken for the production one
+  # No `tls:` block, and no commented-out one either. The example config carries the annotated
+  # version; a harness config that has decided against TLS should not also ship the instructions
+  # for it, and M0-T08 asks that grepping these images for a loopback literal in any config find
+  # nothing — which those comments, and the `ollama_host` one above, defeated by talking about it.

@@ -1,0 +1,155 @@
+# astroctl-field — the field-node half of the M0-T08 two-node harness.
+#
+# Build from the repository root:  docker build -f deploy/Dockerfile.field -t astroctl-field:dev .
+# Normally you want scripts/dev-up.sh, which builds both images and starts the pair.
+#
+# This is a test and development harness, not a deployment artefact (M0-T08 scope). The field node
+# ships as a systemd unit on Ubuntu; what this image exists for is to put the two nodes in separate
+# network namespaces on one workstation, so the things that are really about *two nodes talking*
+# get exercised on every machine and in CI.
+#
+# Deliberate decisions:
+#
+#   * Three stages. The PWA needs npm, the binary needs the pinned Rust toolchain, and the thing
+#     that runs needs neither — carrying either toolchain into the runtime image would be ~1.5 GB
+#     of attack surface and download that never executes a line.
+#
+#   * The builder stages of this file and Dockerfile.stack are byte-identical up to the dependency
+#     layer, so the two images share it: building the pair costs one compilation of the ~250 third-
+#     party crates, not two. Keep them identical, or quietly pay for it twice.
+#
+#   * The toolchain is pinned to the same version as rust-toolchain.toml. It is written out twice
+#     because a `FROM` cannot read a TOML file; if they disagree, the image builds with a compiler
+#     nobody else uses, which is the exact failure rust-toolchain.toml exists to prevent.
+#
+#   * The configuration is baked in rather than mounted. Two reasons: `docker run astroctl-field:dev`
+#     then works with nothing else present, which is what "no host toolchain assumptions" means at
+#     run time as well as at build time; and M0-T08's "no hardcoded 127.0.0.1 or localhost in any
+#     config in the image" is a check you can actually run. compose.yaml shows how to mount over it
+#     when iterating on config is what you are doing.
+#
+#   * No `# syntax=` directive. It would make every build fetch a frontend image from Docker Hub,
+#     and the harness has to keep building with a warm cache and no network.
+
+# --------------------------------------------------------------------------------------------
+# 1. The PWA bundle (M0-T06). Only this image gets it: the stacking server has no operator UI.
+# --------------------------------------------------------------------------------------------
+FROM node:20-bookworm-slim AS pwa
+WORKDIR /src
+
+# The lockfile alone first, so `npm ci` is cached against dependency changes rather than against
+# every edit to a .tsx file.
+COPY frontend/package.json frontend/package-lock.json frontend/
+RUN cd frontend && npm ci --no-audit --no-fund
+
+COPY frontend/ frontend/
+COPY scripts/build-frontend.sh scripts/
+# The same script a developer runs, not a reimplementation of it: `npm run build` inlined here
+# would be a second definition of how the bundle is produced, free to drift from the first.
+RUN scripts/build-frontend.sh --no-install
+
+# --------------------------------------------------------------------------------------------
+# 2. The binary. Everything above the "diverges here" line must match Dockerfile.stack exactly.
+# --------------------------------------------------------------------------------------------
+FROM rust:1.97.1-slim-bookworm AS build
+WORKDIR /src
+
+# --- dependency layer ---
+# Manifests and a stub source tree, so this layer compiles every third-party crate and nothing of
+# ours. It stays cached until Cargo.lock or a Cargo.toml changes; without it, a one-line edit to
+# any .rs file recompiles the entire dependency graph and the E2E job becomes the slowest thing in
+# CI, which is how E2E jobs get switched off.
+#
+# The 14 manifests are listed one by one because Docker's COPY cannot preserve a directory shape
+# through a glob. A new workspace crate that nobody adds here is not silent: if a binary depends on
+# it, cargo fails at once on the missing path dependency; if nothing does, the only cost is that
+# its dependencies land in the slow layer instead of this one.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/astroctl-core/Cargo.toml crates/astroctl-core/
+COPY crates/astroctl-hal/Cargo.toml crates/astroctl-hal/
+COPY crates/astroctl-drivers/Cargo.toml crates/astroctl-drivers/
+COPY crates/astroctl-safety/Cargo.toml crates/astroctl-safety/
+COPY crates/astroctl-session/Cargo.toml crates/astroctl-session/
+COPY crates/astroctl-pipeline/Cargo.toml crates/astroctl-pipeline/
+COPY crates/astroctl-solver/Cargo.toml crates/astroctl-solver/
+COPY crates/astroctl-planning/Cargo.toml crates/astroctl-planning/
+COPY crates/astroctl-guiding/Cargo.toml crates/astroctl-guiding/
+COPY crates/astroctl-transfer/Cargo.toml crates/astroctl-transfer/
+COPY crates/astroctl-llm/Cargo.toml crates/astroctl-llm/
+COPY crates/astroctl-ipc/Cargo.toml crates/astroctl-ipc/
+COPY crates/astroctl-field/Cargo.toml crates/astroctl-field/
+COPY crates/astroctl-stack/Cargo.toml crates/astroctl-stack/
+RUN set -eu; \
+    for dir in crates/*/; do \
+        mkdir -p "$dir/src"; \
+        printf '//! placeholder for the dependency layer\n' >"$dir/src/lib.rs"; \
+    done; \
+    for bin in field stack; do \
+        printf '//! placeholder for the dependency layer\nfn main() {}\n' \
+            >"crates/astroctl-$bin/src/main.rs"; \
+    done; \
+    cargo build --release --workspace --locked
+
+# --- the real sources ---
+COPY crates/ crates/
+# cargo decides what to rebuild by mtime, and COPY preserves the mtimes from the build context —
+# which are older than the stub build above whenever the checkout is. Without this the stubs would
+# be considered current and the image would ship a binary that does nothing.
+RUN find crates -name '*.rs' -exec touch {} +
+
+# ---------------- diverges from Dockerfile.stack here ----------------
+# The bundle is embedded by build.rs when frontend/dist exists (M0-T06); it must land before the
+# compile, not after.
+COPY --from=pwa /src/frontend/dist frontend/dist
+RUN cargo build --release --locked -p astroctl-field
+
+# --------------------------------------------------------------------------------------------
+# 3. What actually runs.
+# --------------------------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
+# curl, iproute2 and netcat are the harness, not the product. A container that cannot be poked at
+# is a debugging dead end, and this one exists to be poked at:
+#   curl        — the compose healthcheck, and reaching the other node by service name by hand
+#   iproute2    — `tc`, for scripts/shape-link.sh. It is in the image so the shaper can run as a
+#                 throwaway sidecar in this container's network namespace; the service itself
+#                 never holds NET_ADMIN. See the script's header.
+#   netcat      — the throughput probe that makes "the link is genuinely 1 Mbit" a measurement
+# ca-certificates is for the outbound HTTPS an LLM provider will need (PRD §8.1 `llm`); nothing in
+# M0 uses it, and discovering its absence at 2 a.m. under a clear sky is not the way to learn.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        iproute2 \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Unprivileged, as the systemd unit will be. The binary binds 8470, which needs no privilege, and
+# a harness that only works as root teaches the deployment nothing.
+RUN useradd --system --no-create-home --user-group --uid 10001 astroctl
+
+# Created here rather than left to the runtime, because a fresh named volume mounted over this
+# path inherits the ownership and mode of what the image has at it — an empty root-owned volume is
+# how an unprivileged process ends up unable to write its own session log.
+RUN install -d -o astroctl -g astroctl \
+        /data/astro \
+        /data/astro/sessions \
+        /data/astro/logs \
+        /data/astro/transfer_queue
+
+COPY --from=build /src/target/release/astroctl-field /usr/local/bin/astroctl-field
+COPY deploy/config/field-node.yaml /etc/astroctl/field-node.yaml
+
+# The binary's own default is this path (cli.rs); naming it explicitly means a change to that
+# default cannot silently change which file this image reads.
+ENV ASTROCTL_FIELD_CONFIG=/etc/astroctl/field-node.yaml
+
+# Documentation only — compose publishes it. The operator device talks to this port and nothing
+# else; /stack/* is proxied from here (ADR-07).
+EXPOSE 8470
+
+USER astroctl
+# No shell wrapper: PID 1 is the binary, so SIGTERM from `docker stop` reaches the graceful
+# shutdown path of SDD §7 instead of being absorbed by a shell that ignores it.
+ENTRYPOINT ["/usr/local/bin/astroctl-field"]
