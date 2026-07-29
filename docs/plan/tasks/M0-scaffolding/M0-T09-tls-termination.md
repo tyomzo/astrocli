@@ -85,13 +85,23 @@ validate anything**, which is a first-attempt failure worth expecting rather tha
   `HOSTINGER_COM_Username`/`HOSTINGER_COM_Password` pair; the plugin on master uses the API token.)
   The token is a secret and belongs in the environment, never in a config file — SEC-04.
 
+  **acme.sh defaults to ZeroSSL, not Let's Encrypt.** A bare `--issue` picks
+  `https://acme.zerossl.com/v2/DV90`, which sets `externalAccountRequired`, so it stops at "Please
+  update your account with an email address first" before it ever looks at DNS — an error that says
+  nothing about the CA being the surprise. Set the CA explicitly once:
+  `acme.sh --set-default-ca --server letsencrypt`. Let's Encrypt is what this task specifies, needs
+  no EAB, and is what the operator's other certificates already use.
+
   **The distribution package is too old.** The `acme.sh` in Debian/Ubuntu at the time of writing is
   **v3.1.1**, which ships 157 DNS plugins and `dns_hostinger` is not one of them — it was added
   upstream later. `--issue --dns dns_hostinger` against the packaged version fails with an unknown
   DNS API rather than anything that points at the cause. Install upstream into `~/.acme.sh`
   (which also installs the renewal cron) rather than dropping the single plugin file into
   `/usr/share/acme.sh/dnsapi/`, where a package upgrade would silently remove it and where the
-  plugin's expectations may not match a v3.1.1 core.
+  plugin's expectations may not match a v3.1.1 core. The packaged build is also broken in its own
+  right — `--log` dies with `shift: can't shift that many` under dash. After installing upstream,
+  invoke `~/.acme.sh/acme.sh` by path: `/usr/bin/acme.sh` stays on `PATH` and shadows it in any
+  non-interactive shell, which is precisely where a renewal cron runs.
 
   **Choosing a different CA buys nothing.** Every publicly trusted CA is bound by CA/Browser Forum
   ballot SC-081v3: maximum validity fell to **200 days on 15 March 2026**, drops to **100 days in
