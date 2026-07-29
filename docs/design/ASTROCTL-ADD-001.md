@@ -1,16 +1,18 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.2.2
+**Version:** 1.2.3
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.8.0
+**Governing requirements:** ASTROCTL-PRD-001 v1.9.0
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
 **Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
 **Change note (1.2.1):** Governing-requirements pin advanced (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
 **Change note (1.2.2):** Pin advanced to PRD v1.8.0. The erfa risk is now largely retired by build evidence — `erfars` vendors the ERFA C source, so the parity suite tests our usage of the same library astropy wraps, and no system liberfa is involved.
+
+**Change note (1.2.3):** §10's top risk — gphoto2 coverage for the R10 — retired on hardware evidence.
 
 ---
 
@@ -30,7 +32,7 @@ The architecture covers the complete AstroCtl system as specified in the PRD: fi
 
 | Reference | Title |
 |-----------|-------|
-| ASTROCTL-PRD-001 v1.8.0 | AstroCtl Product Requirements Document (governing requirements; all `XXX-nn` IDs cited below refer to it) |
+| ASTROCTL-PRD-001 v1.9.0 | AstroCtl Product Requirements Document (governing requirements; all `XXX-nn` IDs cited below refer to it) |
 | ISO/IEC/IEEE 12207:2017 | Systems and software engineering — Software life cycle processes |
 | ISO/IEC/IEEE 42010:2022 | Software, systems and enterprise — Architecture description |
 
@@ -458,7 +460,7 @@ Residual architectural risks to be verified during Design Definition / early imp
 
 | Risk | Verification plan |
 |------|-------------------|
-| gphoto2 crate coverage gaps for the R10 (CR3 download, bulb, live-view stream) | Prototype the camera driver first thing in Phase 1; per-operation fallback to `gphoto2` CLI subprocess; worst case, a thin custom FFI layer over libgphoto2 |
+| ~~gphoto2 crate coverage gaps for the R10 (CR3 download, bulb, live-view stream)~~ — **RETIRED 2026-07-29** | Verification plan executed ahead of schedule, on the real body: bulb, CR3 download, settings, and a 58.5 fps live-view stream all covered by the bindings. No CLI fallback and no custom FFI needed. Evidence: `spikes/gphoto2-r10/FINDINGS.md` |
 | erfa-based coordinate code diverges from astropy reference behavior | CI parity suite: fixed set of (time, site, target) cases computed by astropy, asserted against `astroctl-planning` to sub-arcsecond agreement. **The suite's value depends on binding liberfa itself** (`erfars`/`erfa-sys`) — astropy wraps that same C library, so parity then tests *our usage*. Against a pure-Rust reimplementation (the crate confusingly named `erfa`) the same suite would instead be testing a third party's port, which is a different and weaker guarantee. See PRD §7 |
 | Worker IPC protocol drift or worker crash loops on the stack | Protocol version handshake at worker start; supervised restart with backoff; accumulator state persisted so a restart replays, not restarts, the stack |
 | Serial two-lane queue starvation under heavy polling | Bench with simulator; e-stop injection test asserting budget (a) of §9.1 — ≤ 20 ms handler-to-wire under 50 cmd/s normal load (SDD T-SER-3) |

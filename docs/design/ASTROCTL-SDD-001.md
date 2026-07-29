@@ -1,17 +1,19 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.1.2
+**Version:** 1.1.3
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.8.0 (requirements), ASTROCTL-ADD-001 v1.2.2 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.9.0 (requirements), ASTROCTL-ADD-001 v1.2.3 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
 **Change note (1.0.2):** Remote-link latency mitigations consolidated (§8.3): command staleness rejection, control/bulk connection separation (dedicated live-view socket), transfer pacing rule for Phase 2b, predictive position display and link-health surfacing in the PWA.
 **Change note (1.1.0):** Design added for the two-node walking skeleton that ASTROCTL-IMP-001 delivers in M1, which v1.0.x deferred to the Phase 2b increment and therefore left unspecified: transfer agent (§5.10), stack ingest and session mirror (§5.11), worker IPC and supervision (§5.12). Increment table re-scoped accordingly (§1.2). `transfer.acked` and `stack.status` added to the closed topic enum (§4.3); the field node now carries one SQLite database from M1 (§6). `guide_pulse` regains the `rate` parameter PRD §4.1 specifies (§5.1). New verification entries T-XFER-1, T-ING-1, T-IPC-1 (§9).
+
+**Change note (1.1.3):** §5.3.2/§5.3.3 corrected from the R10 spike: unlink stale tmp files before download (libgphoto2 will not overwrite), the USB transfer happens inside the capture call rather than the download, frames measure 32 MB, and the CLI-fallback table is empty for the reference camera.
 
 ---
 
@@ -347,17 +349,26 @@ Every command has an operation-class timeout (config get/set 5 s; capture = expo
 ```
 capture request → set format/ISO/shutter if changed → trigger
   → wait event CAPTURE_DONE (or bulb timer expiry → release)
-  → download to <session>/frames/.tmp_<id>.cr3   (streamed)
+  → unlink any stale .tmp_<id>.cr3   ← libgphoto2 refuses to overwrite (spike finding 1)
+  → download to <session>/frames/.tmp_<id>.cr3
   → fsync file → rename to light_<id>.cr3 → fsync dir      ← frame is now durable
   → compute sha256 (blocking pool) → write frame meta JSON → emit frame.saved
   → hand path to live view pipeline (§5.7) and enqueue in the transfer agent (§5.10)
 ```
 
-The rename-after-fsync makes a torn download invisible to every consumer (they only ever see completed frames). Bulb: R10 bulb is driven via PTP remote release config; if the binding lacks it, the fallback adapter (§5.3.3) handles bulb first — this is the highest-risk item in Phase 1 (ADD §10) and gets prototyped first.
+The rename-after-fsync makes a torn download invisible to every consumer (they only ever see completed frames).
+
+**Two realities measured on the R10** (`spikes/gphoto2-r10/FINDINGS.md`) that the flow above must respect:
+`download_to` returns `File exists` rather than truncating, so a crash leaving a stale `.tmp_` file
+would make every retry fail — unlink first, unconditionally. And with `capturetarget=Internal RAM`
+the USB transfer happens inside the capture call, not the download call: a full frame (**32 MB**
+measured, not the ~25 MB the PRD once assumed) is resident inside libgphoto2 before the download
+step begins. That is affordable against PRF-05's 512 MB but must be counted, and it means the
+"streamed to disk" wording describes the disk write, not the wire transfer. Bulb: driven via the `eosremoterelease` PTP config — `Press Full`, hold, `Release Full`. **Verified on the R10**: a 10 s hold produced a camera-reported `BulbExposureTime 9` and a CR3 via the `NewFile` event. This was the highest-risk item in the plan (ADD §10) and is now closed.
 
 #### 5.3.3 CLI fallback
 
-`GPhoto2Cli` implements the same internal `CamOps` trait by shelling out to the `gphoto2` binary per operation (`--capture-image-and-download`, `--set-config`, `--wait-event`). The concrete driver is composed per-operation from a coverage table in config (`camera.ops_via_cli: ["bulb"]`), so a binding gap on one operation doesn't force the whole driver onto the CLI.
+`GPhoto2Cli` implements the same internal `CamOps` trait by shelling out to the `gphoto2` binary per operation (`--capture-image-and-download`, `--set-config`, `--wait-event`). The concrete driver is composed per-operation from a coverage table in config, so a binding gap on one operation doesn't force the whole driver onto the CLI. **For the R10 the table is empty** — the spike found every operation covered by the bindings, bulb included, so `camera.ops_via_cli: []`. This path exists for future bodies, not for the reference camera.
 
 ### 5.4 Safety monitor (`astroctl-safety`)
 

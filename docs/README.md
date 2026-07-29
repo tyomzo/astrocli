@@ -17,10 +17,10 @@ are expected to be exact.
 
 | Document | ID | Version | Path | Answers |
 |----------|-----|---------|------|---------|
-| Product Requirements | ASTROCTL-PRD-001 | 1.8.0 | [`intent/`](intent/ASTROCTL-PRD-001.md) | *What must be true?* 288 numbered requirements (`HAL-01`, `PRF-12`, …), hardware scope, configuration schema, phase plan, risk register |
-| Architecture Design | ASTROCTL-ADD-001 | 1.2.2 | [`design/`](design/ASTROCTL-ADD-001.md) | *What are the parts and why these parts?* Views, component responsibilities, 13 ADRs with rejected alternatives, crate layout and dependency rules |
-| Software Design | ASTROCTL-SDD-001 | 1.1.2 | [`design/`](design/ASTROCTL-SDD-001.md) | *How is each part built?* Rust types, trait signatures, wire protocols, task topology, route tables, storage formats, verification design |
-| Implementation Plan | ASTROCTL-IMP-001 | 1.1.2 | [`plan/`](plan/ASTROCTL-IMP-001.md) | *In what order, and how do we know it works?* Milestones M0–M3, workstreams, sizing, definition of done |
+| Product Requirements | ASTROCTL-PRD-001 | 1.9.0 | [`intent/`](intent/ASTROCTL-PRD-001.md) | *What must be true?* 288 numbered requirements (`HAL-01`, `PRF-12`, …), hardware scope, configuration schema, phase plan, risk register |
+| Architecture Design | ASTROCTL-ADD-001 | 1.2.3 | [`design/`](design/ASTROCTL-ADD-001.md) | *What are the parts and why these parts?* Views, component responsibilities, 13 ADRs with rejected alternatives, crate layout and dependency rules |
+| Software Design | ASTROCTL-SDD-001 | 1.1.3 | [`design/`](design/ASTROCTL-SDD-001.md) | *How is each part built?* Rust types, trait signatures, wire protocols, task topology, route tables, storage formats, verification design |
+| Implementation Plan | ASTROCTL-IMP-001 | 1.1.3 | [`plan/`](plan/ASTROCTL-IMP-001.md) | *In what order, and how do we know it works?* Milestones M0–M3, workstreams, sizing, definition of done |
 | Task breakdown | — | — | [`plan/tasks/`](plan/tasks/README.md) | *What do I do next?* 33 task files, one per reviewable change set |
 
 All four are **Draft** status.
