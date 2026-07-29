@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.6.1
+**Version:** 1.6.2
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.12.2 (requirements), ASTROCTL-ADD-001 v1.3.1 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.13.0 (requirements), ASTROCTL-ADD-001 v1.3.1 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -30,6 +30,8 @@
 **Change note (1.6.0):** §5.2.2 gains **mandatory pre-motion readback verification** — hardware testing showed `:h`, `:m` and `:i` return the absolute goto target, absolute break point and step period exactly, so the driver can verify a goto is correctly programmed before sending `J`. Given the mount does not validate the axis digit, this is the only check that catches an encoding fault before the motors move. §5.2.3 goto tolerance confirmed ample against a measured error of 0 counts across six gotos.
 
 **Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
+
+**Change note (1.6.2):** §5.10.4 claimed the `/api/transfer/status` route and the `transfer.status` event carried "the same data", but listed a fifth field (`attempts_current`) the §4.3 topic does not have. Resolved in favour of §4.3 — the retry counter is REST-only diagnostic detail, not push-worthy telemetry. Surfaced by M0-T03 during implementation.
 
 ---
 
@@ -655,8 +657,11 @@ that the archive of record has the frame.
 
 #### 5.10.4 Interface
 
-`GET /api/transfer/status` → `{state, queue_depth, oldest_queued_age_s, last_ack_ts, attempts_current}`;
-the same data is pushed as `transfer.status` events so the PWA never polls. Pacing (§8.3.7) is a
+`GET /api/transfer/status` → `{state, queue_depth, oldest_queued_age_s, last_ack_ts, attempts_current}`.
+The `transfer.status` **event** (§4.3) carries the first four of those; `attempts_current` is
+REST-only, because a retry counter ticking behind a temporarily unreachable stack node is
+diagnostic detail the operator can pull when they care, not something worth pushing to every
+connected client. Earlier wording claimed the two were "the same data", which they are not. Pacing (§8.3.7) is a
 binding rule on this element but its implementation lands with Phase 2b; the config keys exist
 from M1 (PRD §8.1 `stacking_server.pacing`) and are parsed and validated but not yet enforced —
 a deviation that must be removed, not forgotten, when 2b lands.

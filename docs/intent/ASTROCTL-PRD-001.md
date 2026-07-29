@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.12.2  
+**Version:** 1.13.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -25,6 +25,8 @@
 **Change note (1.12.1):** §4.2 motion behaviour corrected after optical confirmation — goto ramps trapezoidally to ~835× sidereal rather than running at one of two fixed speeds; short moves are ramp-limited. Physical rotation confirmed by camera observation at 7.1× the noise floor.
 
 **Change note (1.12.2):** REL-03 annotated with hardware-verified camera recovery behaviour and the gvfs precondition; §4.2 goto accuracy measured at 0 counts error from 0.04° to 4°.
+
+**Change note (1.13.0):** §7 gains `chrono`, which was missing entirely despite SDD §4.3 specifying `DateTime<Utc>` — the dependency table listed no time crate at all. Feature selection is deliberate: no `clock`, so the backbone cannot reach for local time that SDD §2 confines to UI rendering. Surfaced by M0-T03.
 
 ---
 
