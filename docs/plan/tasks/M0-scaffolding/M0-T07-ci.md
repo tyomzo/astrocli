@@ -8,11 +8,11 @@
 
 Every push runs the full quality gate; the tree's health signal is one green check.
 
-> **No git remote is configured yet, and that decision is deliberately deferred.** Until one
-> exists the hosted workflow cannot run, so this task delivers the gates as a *local* script
-> first and the workflow file second. The script is the real deliverable — the workflow should
-> be a thin wrapper that calls it, so the two can never drift and so switching forge later is a
-> one-file change. Do not block M0 on picking a forge.
+> **The remote now exists** — `git@github.com:tyomzo/astrocli.git`, default branch `main`, pushed
+> 2026-07-29 — so GitHub Actions can genuinely run and this task is no longer working around a
+> missing forge. The script-first structure still stands on its own merits: `scripts/check.sh` is
+> the real deliverable and the workflow is a thin wrapper that invokes it, so the two cannot drift
+> and the gate is runnable offline on any dev machine exactly as CI runs it.
 
 ## Scope
 
