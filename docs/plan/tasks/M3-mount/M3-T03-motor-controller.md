@@ -22,5 +22,5 @@ logic over the codec, testable without hardware.
 ## Acceptance criteria
 
 - [ ] T-POS-1: property round-trips within 1 count; table-driven hemisphere/pier cases (N/S latitude × E/W pier × DEC signs); golden goto-target cases hand-computed
-- [ ] Speed math: step periods for all rates match hand-computed values for fixture CPR/timer-freq
+- [ ] Speed math: step periods for all rates match hand-computed values for the **verified** fixture constants — CPR 9,024,000 and timer frequency **64,935 Hz** (PRD §4.2). Do not hand-compute against the old 460,800 figure; it was wrong by 7.1× and any expected value derived from it is invalid
 - [ ] No `f64` position leaves the module without going through the typed newtypes

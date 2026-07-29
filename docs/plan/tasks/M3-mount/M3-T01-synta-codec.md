@@ -15,7 +15,8 @@ ever see or send is producible and parseable here first.
 - Frame encode: `:` + cmd + axis + payload + `\r`; decode: `=data\r` / `!err\r` with error-code enum
 - `encode_u24`/`decode_u24` with the byte-swap quirk (0x123456 ↔ "563412"); also u16/u8 variants used by some commands
 - Typed command layer: one type per SDD §5.2.2 table row (`GetPosition(Axis)`, `SetGotoTarget(Axis, Counts)`, …) with encode + typed response parse; motion-mode byte semantics (direction/speed-class bits) as documented enums
-- **Golden vectors**: capture or transcribe EQMOD/indi-eqmod traces into `testdata/synta_vectors.txt` (raw request/response byte pairs with meaning); table-driven test over all vectors. Where a trace is unavailable, mark the vector `derived` — T05 step 2 upgrades these to `verified`
+- **Golden vectors**: `spikes/skywatcher-heq5/FINDINGS.md` already contains **nine `verified` pairs read from the operator's own HEQ5** (handshake, CPR, timer freq, position, axis status, both axes) — seed `testdata/synta_vectors.txt` with those, then extend from EQMOD/indi-eqmod traces. Mark anything without a real trace `derived`; T05 step 2 upgrades the rest
+- The `!` error frame is **not** covered by the captured vectors (none was provoked) — construct those cases from the EQMOD reference and mark them `derived`
 - Fuzz: decoder must never panic on arbitrary bytes (cargo-fuzz target or proptest)
 
 ## Acceptance criteria
@@ -24,3 +25,4 @@ ever see or send is producible and parseable here first.
 - [ ] Every command the driver will use (SDD table) has a typed constructor + at least one vector
 - [ ] Fuzz run (≥ 1 M iterations locally, shorter in CI) with zero panics
 - [ ] `derived` vs `verified` vector counts reported in the task result (feeds T05)
+- [ ] Decoder reproduces the captured pairs exactly: `00B289` → 9,024,000 and `A7FD00` → 64,935 (the byte-swap rule is confirmed by the first, which makes the second trustworthy)

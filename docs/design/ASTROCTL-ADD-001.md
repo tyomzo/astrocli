@@ -1,12 +1,12 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.2.4
+**Version:** 1.2.5
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.10.0
+**Governing requirements:** ASTROCTL-PRD-001 v1.11.0
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
 **Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
 **Change note (1.2.1):** Governing-requirements pin advanced (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
@@ -15,6 +15,8 @@
 **Change note (1.2.3):** §10's top risk — gphoto2 coverage for the R10 — retired on hardware evidence.
 
 **Change note (1.2.4):** Pin advanced to PRD v1.10.0 (runtime sizing config).
+
+**Change note (1.2.5):** Pin advanced to PRD v1.11.0 (mount parameters verified on hardware).
 
 ---
 

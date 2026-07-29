@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.10.0  
+**Version:** 1.11.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -15,6 +15,8 @@
 **Change note (1.9.0):** M2-T01 executed against the real Canon R10 ahead of schedule (`spikes/gphoto2-r10/FINDINGS.md`). The gPhoto2 support risk is **retired**: bulb, capture, CR3 download, settings and a 58.5 fps live-view stream all work through the bindings, so `camera.ops_via_cli` ships empty. Measured full-RAW frame size corrected to 32 MB.
 
 **Change note (1.10.0):** `server.runtime_worker_threads` added to §8.1/§8.2. The tokio runtime is now sized deliberately per node rather than defaulting to one worker per core — on a 4-core field node that default competes with the camera OS thread and the decode pool for exactly the cores PRF-04 depends on (SDD §7).
+
+**Change note (1.11.0):** §4.2 mount parameters verified against the operator's own HEQ5 by read-only handshake (`spikes/skywatcher-heq5/FINDINGS.md`). **Timer interrupt frequency corrected from ~460,800 Hz to 64,935 Hz** — wrong by a factor of 7.1. CPR (9,024,000) and counter home (`0x800000`) confirmed exactly. The high-speed ratio remains unverified. The protocol-documentation risk in §10 is marked as having *occurred and been contained*.
 
 ---
 
@@ -204,10 +206,16 @@ Protocol characteristics:
 - Hex values transmitted as ASCII, little-endian byte order
 - Supports: position inquiry, goto (absolute/incremental), constant-speed tracking, guide pulses, variable-speed slewing, emergency stop
 
-Key parameters (typical HEQ5 Pro values — verify against the EQMOD source before implementation, per the protocol-documentation risk):
-- Counts per revolution: ~9,024,000
-- Timer frequency: ~460,800 Hz
-- High-speed ratio: ~16x
+Key parameters. **Read from the operator's own HEQ5 Pro on 2026-07-29** — see
+`spikes/skywatcher-heq5/FINDINGS.md`. The driver reads these at handshake and never hardcodes
+them (SDD §5.2.3); the values below are for test fixtures and hand-verification:
+- Counts per revolution: **9,024,000** — verified, both axes
+- Timer interrupt frequency: **64,935 Hz** — verified, both axes. *Previously documented here as
+  ~460,800 Hz, which was wrong by a factor of 7.1. Any fixture or hand-computed step period built
+  on the old figure is invalid.*
+- Counter home position: **`0x800000`** — verified, both axes read exactly home
+- High-speed ratio: ~16x — **still unverified**, and under suspicion given the timer-frequency
+  result; it needs a powered test (T-HIL-1 step 3)
 
 Capabilities reported: `has_pec=False, has_pulse_guide=True, has_tracking_rates=[sidereal, lunar, solar], max_slew_speed=800x_sidereal, position_resolution=24bit`
 
@@ -1456,7 +1464,7 @@ Exit criteria: can autoguide with sub-arcsecond RMS, automatically flip at the m
 
 | Risk | Impact | Likelihood | Mitigation |
 |------|--------|-----------|------------|
-| Skywatcher protocol documentation is incomplete/inaccurate | Mount misbehaves, gear damage possible | Medium | Cross-reference EQMOD source code, test incrementally, always verify positions before high-speed slews |
+| Skywatcher protocol documentation is incomplete/inaccurate — **this risk fired.** The timer frequency in §4.2 was wrong by 7.1× (2026-07-29 read-only handshake) | Mount misbehaves, gear damage possible | **Occurred, contained** | Caught before any motion by the read-only handshake, and its blast radius was already limited by the design decision to read CPR/timer-freq from the mount at handshake rather than hardcoding them (SDD §5.2.3). Remaining §4.2 values — notably the ~16× high-speed ratio — are still unverified and must not be trusted until T-HIL-1 step 3. Continue to cross-reference EQMOD source; verify positions before high-speed slews |
 | Open-loop steppers lose steps (wind gust, cable snag, imbalance) — the position counter silently diverges from true pointing (the HEQ5 Pro has no encoders) | Target drifts out of frame; goto accuracy degrades through the night | Medium | Continuous pointing verification via plate solving (PLS-05); sync after solve (MNT-10); solve-and-center before each sequence (PLS-03) |
 | ~~Canon R10 gPhoto2 support gaps (CR3 bulb quirks, live view latency)~~ — **RETIRED 2026-07-29** | — | — | Measured on the hardware: bulb via `eosremoterelease` works, CR3 downloads at 32 MB, live view runs at 58.5 fps against a 5 fps requirement. Evidence: `spikes/gphoto2-r10/FINDINGS.md` |
 | USB disconnect during long exposure | Lost frame, mount continues uncontrolled | Medium | Watchdog timer on serial heartbeat, auto-stop on camera disconnect, sequence state persistence |

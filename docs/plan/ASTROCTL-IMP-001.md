@@ -1,11 +1,11 @@
 # AstroCtl — Implementation Plan
 
 **Document ID:** ASTROCTL-IMP-001
-**Version:** 1.1.4
+**Version:** 1.1.5
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
-**Governing documents:** ASTROCTL-PRD-001 v1.10.0, ASTROCTL-ADD-001 v1.2.4, ASTROCTL-SDD-001 v1.2.0
+**Governing documents:** ASTROCTL-PRD-001 v1.11.0, ASTROCTL-ADD-001 v1.2.5, ASTROCTL-SDD-001 v1.2.1
 **Change note (1.1.1):** Governing pins advanced after the dependency survey (PRD v1.7.0). §6 gains the risk that Phase 2a's star detection has no existing Rust binding.
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 after the crates were actually built (`docs/evidence/dependency-survey-2026-07-29.md`). §6: the RAW-decoder risk is resolved to `rawler` with only speed/memory left to confirm, and a toolchain-drift risk is added — the 1.97.1 pin is a hard floor, not a preference.
 **Change note (1.1.0):** Governing-document pins updated — SDD v1.1.0 now designs the M1 stack-side elements this plan always required (transfer, ingest, worker IPC), so §1's contract table no longer points at deferred design. Auth added as the third declared phase deviation. M0 crate scaffolding now references ADD §5.6 (the complete 14-crate layout, which gained `astroctl-guiding` in ADD v1.2.0) rather than SDD §3 (a subset), and the M0 deliverable list names the stack proxy its exit criterion already assumed.
@@ -13,6 +13,8 @@
 **Change note (1.1.3):** M2-T01 run early because the camera became available; §6's bulb risk retired.
 
 **Change note (1.1.4):** Pins advanced; T-ISO-1 added to M1's gated tests.
+
+**Change note (1.1.5):** Pins advanced; T-HIL-1 step 2 executed early against the real mount.
 
 ---
 

@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.2.0
+**Version:** 1.2.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.10.0 (requirements), ASTROCTL-ADD-001 v1.2.4 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.11.0 (requirements), ASTROCTL-ADD-001 v1.2.5 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -16,6 +16,8 @@
 **Change note (1.1.3):** §5.3.2/§5.3.3 corrected from the R10 spike: unlink stale tmp files before download (libgphoto2 will not overwrite), the USB transfer happens inside the capture call rather than the download, frames measure 32 MB, and the CLI-fallback table is empty for the reference camera.
 
 **Change note (1.2.0):** Thread-isolation gaps closed. **T-ISO-1 added (§9)** — PRF-04 ("image download must not block mount tracking or UI responsiveness") was designed for but never verified, and now has a dedicated regression test rather than being inferred from the topology (§10). §5.3.1 documents the measured live-view/capture contention on the single gphoto2 context and how the UI must surface it; §5.7 and §5.9 follow through. §7 specifies explicit tokio runtime sizing per node. §2 makes "no blocking on the runtime" enforceable via clippy gates rather than convention alone.
+
+**Change note (1.2.1):** §5.2.4 serial timings replaced with measurements from a real HEQ5 — round trip 14.4–16.6 ms, so the in-flight-normal-request assumption behind the e-stop priority lane is a third of what was budgeted.
 
 ---
 
@@ -319,11 +321,11 @@ One tokio task owns the `serialport` handle exclusively.
 enum SerialRequest { Normal(Cmd, oneshot::Sender<Result<Resp>>),
                      Priority(Cmd, oneshot::Sender<Result<Resp>>) }
 // two mpsc channels; the task select!s with bias: priority drained first,
-// in-flight normal request completes (single request-response, ≤ ~50 ms) but
+// in-flight normal request completes (single request-response — **measured 14.4–16.6 ms** on a real HEQ5 over an EQDIR stick, against the ≤ ~50 ms this design assumed, so e-stop's worst-case wait behind a normal command is a third of budget) but
 // no new normal request starts while priority queue is non-empty.
 ```
 
-Per-request timeout 500 ms, one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`; measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
+Per-request timeout 500 ms (≈30× the measured 16.6 ms worst case — deliberately generous, not a guess), one retry on timeout/garbled response, then `DeviceError::Timeout` and a `mount.status` degradation event. Heartbeat: the 1 Hz position poll doubles as the heartbeat; 3 consecutive failures → watchdog fires (§5.4). Emergency stop = `Priority(L axis1)` + `Priority(L axis2)`; measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
 
 ### 5.3 Canon gPhoto2 camera driver (`astroctl-drivers::gphoto2`)
 
