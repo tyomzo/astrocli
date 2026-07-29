@@ -80,11 +80,18 @@ validate anything**, which is a first-attempt failure worth expecting rather tha
   `_acme-challenge` CNAME delegation, no `acme-dns` instance — all of which an earlier draft of this
   task proposed before the plugin was found.
 
-  Verify the credential variable against the installed version before scripting it: the project
-  wiki documents `HOSTINGER_COM_Username` / `HOSTINGER_COM_Password`, while more recent material
-  describes a `HOSTINGER_Token` against the official API at `developers.hostinger.com`. Both refer
-  to the same `dns_hostinger` plugin; the plugin appears to have moved from credentials to an API
-  token. Prefer the token if the installed version supports it.
+  The plugin reads one variable, **`HOSTINGER_Token`**, and calls
+  `https://developers.hostinger.com/api/dns/v1/zones`. (The project wiki also shows an older
+  `HOSTINGER_COM_Username`/`HOSTINGER_COM_Password` pair; the plugin on master uses the API token.)
+  The token is a secret and belongs in the environment, never in a config file — SEC-04.
+
+  **The distribution package is too old.** The `acme.sh` in Debian/Ubuntu at the time of writing is
+  **v3.1.1**, which ships 157 DNS plugins and `dns_hostinger` is not one of them — it was added
+  upstream later. `--issue --dns dns_hostinger` against the packaged version fails with an unknown
+  DNS API rather than anything that points at the cause. Install upstream into `~/.acme.sh`
+  (which also installs the renewal cron) rather than dropping the single plugin file into
+  `/usr/share/acme.sh/dnsapi/`, where a package upgrade would silently remove it and where the
+  plugin's expectations may not match a v3.1.1 core.
 
   **Choosing a different CA buys nothing.** Every publicly trusted CA is bound by CA/Browser Forum
   ballot SC-081v3: maximum validity fell to **200 days on 15 March 2026**, drops to **100 days in
