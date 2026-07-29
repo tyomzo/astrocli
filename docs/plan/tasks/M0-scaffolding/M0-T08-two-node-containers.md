@@ -19,7 +19,7 @@ have been a loopback compromise that proves nothing about the deployment.
 **Proves** — everything that is really about *two nodes talking*:
 - Real TCP across a network boundary, not `127.0.0.1`
 - The `/stack/*` reverse proxy working host-to-host, including WS upgrades (ADR-07)
-- Two independent config files and two independent auth tokens (SEC-02)
+- Two independent config files, sharing **one** token (SEC-02: both nodes name the same `auth_token_env`, and the field node presents it when proxying)
 - Hostname resolution rather than hardcoded loopback addresses
 - Node-down behaviour as a first-class test: stop a container and the field node must carry on
 - **Traffic shaping.** `tc` on the veth pair gives a genuinely constrained link, which is what
@@ -61,7 +61,7 @@ development harness, not a deployment artefact.
       `127.0.0.1` or `localhost` in any config finds nothing
 - [ ] `docker compose stop stack` → the field node stays up and reports the stack as
       disconnected; restarting it recovers with no field-node restart
-- [ ] Wrong or absent token on either service → 401, proving the two tokens are independent
+- [ ] Wrong or absent token on either service → 401. Note this is **one shared token**, not two: PRD §8.1/§8.2 both name `ASTROCTL_TOKEN`, and the field node must present it to the stack when proxying. An earlier draft of this task said "two independent tokens", which was wrong and would have left the proxy and the M1 transfer agent with no credential to present
 - [ ] `scripts/shape-link.sh 1mbit` measurably constrains throughput between the two containers
       (demonstrate with a timed transfer before and after)
 - [ ] The stack image contains `workers/`; the field image does not

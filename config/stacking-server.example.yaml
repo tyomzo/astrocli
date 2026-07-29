@@ -45,7 +45,7 @@ stacking:
 # Mirrored session archive — this is the authoritative copy (IPP-09, REL-13)
 storage:
   sessions_dir: /data/astro/sessions
-  disk_warn_free_gb: 100
+  disk_warn_free_gb: 100      # GiB = 2^30 bytes, as on the field node
   disk_critical_free_gb: 20   # ingest rejects new frames below this (REL-12)
 
 # Supervised Python compute/ML workers (ADR-13)

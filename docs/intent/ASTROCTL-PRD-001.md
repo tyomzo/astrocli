@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.15.0  
+**Version:** 1.15.1  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -31,6 +31,8 @@
 **Change note (1.14.0):** §7 gains `yaml_serde` (the config is YAML and no YAML crate was named). §8.1's `camera.driver` no longer offers `ascom_alpaca`: the value was selectable but had no address key to go with it, so under `deny_unknown_fields` an operator choosing it had nowhere to put the host. It returns with HAL-10. Both surfaced by M0-T04 during implementation.
 
 **Change note (1.15.0):** **Android is the supported and tested UI target**; iOS may work but is untested and gated by nothing. EXT-06 (Capacitor-readiness) becomes advisory rather than binding, since its stated motivation in §11 was iOS PWA limitations and there is no iOS device in the deployment. That permits Android capabilities the iOS-compatible subset would have forbidden — Screen Wake Lock so the display does not sleep mid-session, `beforeinstallprompt`, and reliance on service-worker cache persistence that iOS evicts after ~7 days. USB-09/ARC-14 narrowed accordingly.
+
+**Change note (1.15.1):** the `disk_*_free_gb` thresholds now state their unit — GiB, 2^30 bytes, matching `df -h`. The unit was never defined and 10^9 versus 2^30 differ by 7%, which is not acceptable ambiguity on a threshold that pauses capture. Surfaced by M0-T05.
 
 ---
 
@@ -1132,8 +1134,8 @@ camera:
 # Where sessions, frames and logs live on the field node (PRD §5.9 layout)
 storage:
   sessions_dir: /data/astro/sessions
-  disk_warn_free_gb: 20      # warning alert threshold (REL-12)
-  disk_critical_free_gb: 5   # capture pauses after the in-flight frame (REL-12)
+  disk_warn_free_gb: 20      # warning alert threshold (REL-12). GiB = 2^30 bytes, matching
+  disk_critical_free_gb: 5   #   `df -h`; capture pauses after the in-flight frame (REL-12)
 
 guide_camera:
   driver: null               # "asi", "qhy", "indi", "simulator", or null (disabled)
@@ -1256,7 +1258,7 @@ stacking:
 # Mirrored session archive — this is the authoritative copy (IPP-09, REL-13)
 storage:
   sessions_dir: /data/astro/sessions
-  disk_warn_free_gb: 100
+  disk_warn_free_gb: 100      # GiB = 2^30 bytes, as on the field node
   disk_critical_free_gb: 20   # ingest rejects new frames below this (REL-12)
 
 # Supervised Python compute/ML workers (ADR-13)
