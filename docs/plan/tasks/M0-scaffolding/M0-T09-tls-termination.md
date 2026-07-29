@@ -53,19 +53,47 @@ That is what makes it worth a task rather than a footnote.
 
 ## The concrete deployment
 
-Domain `diirc.lt`; the VPN is reachable as `through.diirc.lt`.
+Domain `diirc.lt`; the VPN is reachable as `through.diirc.lt`. What is actually deployed today,
+checked rather than assumed (2026-07-29):
 
-- **Name.** `field.diirc.lt`, resolving to the field node's VPN address.
-- **Issuance.** DNS-01 against `diirc.lt` (SEC-06) — it proves control with a TXT record and needs
-  no inbound path to the Pi, so SEC-01's "no public exposure or port forwarding" holds. HTTP-01 is
-  ruled out for exactly that reason. An existing wildcard for `*.diirc.lt` copied to the node is
-  equally valid and renews annually rather than every 90 days.
+| Name | Cert | Issuer | Where it lives |
+|------|------|--------|----------------|
+| `diirc.lt` | SAN `diirc.lt`, `www.diirc.lt` | Let's Encrypt | Hostinger shared hosting (`2.57.91.91`, `server: hcdn`), auto-provisioned and auto-renewed |
+| `through.diirc.lt` | SAN `through.diirc.lt` only | Let's Encrypt | Azure host (`4.223.171.38`), own ACME client |
+
+**Neither certificate is reusable and there is no wildcard.** Both are single-name Let's Encrypt
+certificates covering the names they serve; neither covers `field.diirc.lt`. The Hostinger one is
+additionally out of reach — on shared hosting the private key is not normally exportable. So
+`field.diirc.lt` needs its own certificate; the "copy an existing wildcard" shortcut does not exist
+here. (An earlier draft of this task offered it, before the certificates were checked.)
+
+- **Name.** `field.diirc.lt`, resolving to the field node's VPN address. Does not resolve today.
+- **Issuance — the part that needs a decision.** DNS for `diirc.lt` is at Hostinger
+  (`ns1/ns2.dns-parking.com`). DNS-01 (SEC-06) needs an ACME client that can write a TXT record
+  there, and Hostinger's DNS API support in the common clients is the thing to verify **before**
+  committing to this route. There is no `_acme-challenge` delegation in the zone today.
+
+  Three ways through, in the order worth trying:
+
+  1. **Delegate only the challenge.** `CNAME _acme-challenge.field.diirc.lt` to a zone with a real
+     API (Cloudflare is free and universally supported) or to an `acme-dns` instance. One static
+     record at Hostinger, set once; renewals then never touch Hostinger again. This is the standard
+     answer to exactly this situation and it keeps the zone where it is.
+  2. **Issue on the Azure host and ship the certificate.** `through.diirc.lt` already runs a working
+     ACME client, so the machinery exists. Costs a copy step every 90 days unless automated, which
+     is real toil — see SEC-07, whose whole point is that a lapse is silent until the operator is
+     in a field.
+  3. **Move the zone** to a provider with an API. Cleanest long-term, largest blast radius, and it
+     touches the live website — not worth it just for this.
+
 - **Resolution (SEC-08).** The name must resolve **through the VPN's DNS, not only the public
   zone**. If resolution depends on reaching public DNS, the UI becomes unreachable precisely when
   the field node is operating standalone with no internet — which is ARC-06's whole premise. Verify
-  this deliberately: with the uplink down, the phone must still resolve `field.diirc.lt`.
-- A private address in a public A record is acceptable and does not constitute exposure. Note it in
-  the setup document so it does not later read as a leak.
+  deliberately: with the uplink down, the phone must still resolve `field.diirc.lt`.
+- A private address in a public A record is acceptable and is not exposure. Note it in the setup
+  document so it does not later read as a leak.
+- **Renewal is every 90 days**, not annually — Let's Encrypt throughout. SEC-07's expiry reporting
+  is doing real work here rather than guarding a hypothetical.
 
 ## Acceptance criteria
 
