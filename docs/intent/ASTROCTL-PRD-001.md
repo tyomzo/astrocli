@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.9.0  
+**Version:** 1.10.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -13,6 +13,8 @@
 **Change note (1.6.0):** Configuration schema completed — §8.1/§8.2 are normative for configuration and now carry every key the design documents reference (slew TTL, command staleness, per-operation CLI fallback, storage/session paths and disk thresholds, transfer pacing, device timeouts, worker interpreter). Processed-pipeline latency budgets disambiguated (IPP-06 vs PRF-08 vs §12). CAM-05/CAM-06 assigned to a single phase. Language-neutral GuideCamera frame type (residue of the pre-ADR-03 all-Python design). PRF-05 reconciled with the LLM-13 local STT fallback.
 
 **Change note (1.9.0):** M2-T01 executed against the real Canon R10 ahead of schedule (`spikes/gphoto2-r10/FINDINGS.md`). The gPhoto2 support risk is **retired**: bulb, capture, CR3 download, settings and a 58.5 fps live-view stream all work through the bindings, so `camera.ops_via_cli` ships empty. Measured full-RAW frame size corrected to 32 MB.
+
+**Change note (1.10.0):** `server.runtime_worker_threads` added to §8.1/§8.2. The tokio runtime is now sized deliberately per node rather than defaulting to one worker per core — on a 4-core field node that default competes with the camera OS thread and the decode pool for exactly the cores PRF-04 depends on (SDD §7).
 
 ---
 
@@ -1161,6 +1163,9 @@ server:
   auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
   max_command_age_ms: 2000  # motion-initiating commands older than this are rejected
                             #   COMMAND_STALE; stopping commands are never age-rejected
+  runtime_worker_threads: null  # tokio async workers; null = min(2, cores-2), floor 1.
+                            #   Deliberately NOT one-per-core: the camera OS thread and the
+                            #   decode pool need cores reserved on a 4-core Pi (SDD §7)
   log_level: INFO
   log_dir: /data/astro/logs
 ```
@@ -1264,6 +1269,8 @@ server:
   host: 0.0.0.0             # bind to the VPN interface IP in production (SEC-01)
   port: 8471
   auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
+  runtime_worker_threads: null  # null = one per core; heavy compute is in child processes,
+                            #   so there is nothing to reserve against here (SDD §7)
   log_level: INFO
   log_dir: /data/astro/logs
 ```

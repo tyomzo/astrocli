@@ -12,7 +12,8 @@ monitoring, and the full wedge-recovery protocol (the REL-03 path).
 
 ## Scope
 
-- Live view: `LiveViewStart/Stop` on the camera thread; preview frames → watch channel → existing `/ws/liveview` plumbing (M1-T09 consumes unchanged); target ≥ 5 fps on LAN per T01 measured capability (PRF-02)
+- Live view: `LiveViewStart/Stop` on the camera thread; preview frames → watch channel → existing `/ws/liveview` plumbing (M1-T09 consumes unchanged). **Measured on the R10: 58.5 fps**, comfortably past PRF-02's 5 fps — rate-limit *down* for the link's sake (USB-11), do not chase throughput
+- Confirm the M1-T09 capture-pause handling holds against the real 2.08 s stall (spike-measured): live view resumes without a reconnect, no spurious wedge alert, and the wedge detector still fires for a genuine stall
 - Battery/storage polling (60 s + on-demand) → `camera.status` events
 - Wedge recovery per SDD §5.3.1: operation-class timeout → thread declared wedged → abandon thread, spawn fresh thread + context, attempt USB reset (usbreset ioctl or unbind/rebind, document chosen mechanism), surface `camera.status: reconnecting` → `connected`; bounded retries then Faulted
 - Cable-pull handling informed by T01 findings; disconnect detection → same recovery path

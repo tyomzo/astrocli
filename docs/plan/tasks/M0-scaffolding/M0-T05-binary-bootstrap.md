@@ -16,6 +16,7 @@ field node proxies the stack — the deployment shape is real from M0.
 - `RouteMeta { tier, audit }` typed layer (SDD §8.2) — wired, audit-logs only for now
 - `/api/system/health` on both (status, disk_free_gb, clock_synced stub, versions) and `/api/system/info` skeleton
 - Field node: reverse proxy `/stack/*` → stack base URL from config, forwarding auth
+- **Explicitly sized tokio runtime** per SDD §7: build with `Builder::new_multi_thread().worker_threads(n)` from `server.runtime_worker_threads`, defaulting to `min(2, cores-2)` floor 1 on the field node and one-per-core on the stack. Never take tokio's default on the field node — reserving cores for the camera thread and decode pool is the whole point. Report the resolved value in `/api/system/info`
 - Structured `tracing` setup: console + file per config `log_dir`
 
 Out of scope: WS hub (M1), confirmation tiers enforcement (Phase 2c).
@@ -26,3 +27,4 @@ Out of scope: WS hub (M1), confirmation tiers enforcement (Phase 2c).
 - [ ] Wrong/absent bearer → 401 envelope with `code: "AUTH"` on every route incl. proxy
 - [ ] `curl` health on field, on stack directly, and on field's `/stack/api/system/health` proxy all succeed with token
 - [ ] SIGTERM exits cleanly within 2 s at idle
+- [ ] `/api/system/info` reports the resolved worker-thread count, and setting `runtime_worker_threads: 1` demonstrably changes it

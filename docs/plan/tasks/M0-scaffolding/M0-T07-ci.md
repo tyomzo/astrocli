@@ -18,6 +18,7 @@ Every push runs the full quality gate; the tree's health signal is one green che
 
 - `scripts/check.sh` — the quality gate, runnable offline on any dev machine: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`, frontend `npm ci && npm run build && tsc --noEmit`, dep-lint script from M0-T01. Non-zero exit on any failure; runnable as a pre-push hook
 - Workflow file (GitHub Actions unless another forge is chosen) that installs the toolchain, restores caches, and invokes `scripts/check.sh` — committed now, exercised whenever a remote appears
+- **Async-safety lints** (SDD §2): deny `clippy::await_holding_lock` and `clippy::await_holding_refcell_ref` workspace-wide, plus a grep gate rejecting `std::thread::sleep`, `std::fs::` and `.blocking_` inside `astroctl-field`/`astroctl-stack` async paths. These catch the common ways a blocking call reaches the runtime; they do not catch all of them, which is why T-ISO-1 exists as the behavioural backstop
 - Python workers: `ruff` + syntax check job (activates when `workers/` gains code)
 - Cache: cargo + npm caches for reasonable CI times
 - Branch discipline note in workflow README: CI must be green before merge; T-E2E-1 job placeholder (activated in M1-T16) marked `continue-on-error: false` from the moment it exists
@@ -27,3 +28,4 @@ Every push runs the full quality gate; the tree's health signal is one green che
 - [ ] `scripts/check.sh` passes on the current tree, and each gate demonstrably fails on a seeded violation (fmt, clippy, test, dep-lint — verify once each, then revert)
 - [ ] Script runs offline with warm caches in < 5 min; hosted CI < 10 min once a remote exists
 - [ ] Workflow file is a wrapper around the script, not a second copy of the gate list
+- [ ] Async-safety lints fire on a seeded violation (add a `std::thread::sleep` in an async fn, confirm the gate rejects it, revert)

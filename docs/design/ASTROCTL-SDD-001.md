@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.1.3
+**Version:** 1.2.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.9.0 (requirements), ASTROCTL-ADD-001 v1.2.3 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.10.0 (requirements), ASTROCTL-ADD-001 v1.2.4 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -14,6 +14,8 @@
 **Change note (1.1.0):** Design added for the two-node walking skeleton that ASTROCTL-IMP-001 delivers in M1, which v1.0.x deferred to the Phase 2b increment and therefore left unspecified: transfer agent (§5.10), stack ingest and session mirror (§5.11), worker IPC and supervision (§5.12). Increment table re-scoped accordingly (§1.2). `transfer.acked` and `stack.status` added to the closed topic enum (§4.3); the field node now carries one SQLite database from M1 (§6). `guide_pulse` regains the `rate` parameter PRD §4.1 specifies (§5.1). New verification entries T-XFER-1, T-ING-1, T-IPC-1 (§9).
 
 **Change note (1.1.3):** §5.3.2/§5.3.3 corrected from the R10 spike: unlink stale tmp files before download (libgphoto2 will not overwrite), the USB transfer happens inside the capture call rather than the download, frames measure 32 MB, and the CLI-fallback table is empty for the reference camera.
+
+**Change note (1.2.0):** Thread-isolation gaps closed. **T-ISO-1 added (§9)** — PRF-04 ("image download must not block mount tracking or UI responsiveness") was designed for but never verified, and now has a dedicated regression test rather than being inferred from the topology (§10). §5.3.1 documents the measured live-view/capture contention on the single gphoto2 context and how the UI must surface it; §5.7 and §5.9 follow through. §7 specifies explicit tokio runtime sizing per node. §2 makes "no blocking on the runtime" enforceable via clippy gates rather than convention alone.
 
 ---
 
@@ -25,16 +27,16 @@ This document is the output of the Design Definition process for AstroCtl. It re
 
 ### 1.2 Scope and increment plan
 
-Per 12207's iterative application, this SDD is delivered in increments. **Version 1.1.0 provides full design for everything the implementation plan delivers in M0–M3** (ASTROCTL-IMP-001 §2) plus the cross-phase foundations that must be stable from the first commit (type system, error model, event schema, concurrency topology, config).
+Per 12207's iterative application, this SDD is delivered in increments. **The current increment provides full design for everything the implementation plan delivers in M0–M3** (ASTROCTL-IMP-001 §2) plus the cross-phase foundations that must be stable from the first commit (type system, error model, event schema, concurrency topology, config).
 
 The increment boundary follows the *implementation plan*, not the PRD phase list. IMP §1 deliberately pulls a skeleton of the two-node orchestration — transfer, ingest, worker IPC — into M1 to de-risk it early, so that skeleton is designed here (§5.10–5.12) rather than deferred. What remains deferred is the compute those elements will eventually carry, not the elements themselves.
 
 | SDD increment | Scope | Sections |
 |---------------|-------|----------|
-| **v1.1.0 (this)** | Foundations + everything in IMP M0–M3: core types, HAL, Skywatcher driver, gPhoto2 driver, simulators, safety monitor, frame store, live view pipeline, field API gateway, **transfer agent, stack ingest + session mirror, worker IPC and supervision**, config, testing | all |
-| v1.2.x (Phase 2a) | Session FSM detail, control pipeline, solver adapters, planning (erfa), slew limits detail | §5.6 expand, new sections |
-| v1.3.x (Phase 2b) | Real stacking compute inside the worker, calibration library, accumulator design, transfer hardening (pacing §8.3.7, reclaim policy) | expand §5.10–5.12, new sections |
-| v1.4.x (Phase 2c) | Post-chain executor, rebuild manager, LLM agent, confirmation service | new sections |
+| **v1.2.0 (this increment)** | Foundations + everything in IMP M0–M3: core types, HAL, Skywatcher driver, gPhoto2 driver, simulators, safety monitor, frame store, live view pipeline, field API gateway, **transfer agent, stack ingest + session mirror, worker IPC and supervision**, config, testing | all |
+| v1.3.x (Phase 2a) | Session FSM detail, control pipeline, solver adapters, planning (erfa), slew limits detail | §5.6 expand, new sections |
+| v1.4.x (Phase 2b) | Real stacking compute inside the worker, calibration library, accumulator design, transfer hardening (pacing §8.3.7, reclaim policy) | expand §5.10–5.12, new sections |
+| v1.5.x (Phase 2c) | Post-chain executor, rebuild manager, LLM agent, confirmation service | new sections |
 | v2.x (Phases 3–4) | Guiding, polar alignment, ML workers, adapters (INDI/Alpaca) | new sections |
 
 ### 1.3 Design constraints inherited from the ADD
@@ -50,7 +52,7 @@ The increment boundary follows the *implementation plan*, not the PRD phase list
 ## 2. Design Conventions
 
 - **Language level:** Rust 2021 edition, stable toolchain, MSRV pinned in workspace.
-- **Async:** tokio multi-threaded runtime. No blocking calls on runtime threads; blocking C-library work goes to dedicated OS threads (camera) or `spawn_blocking`/rayon (decode, detection). Trait methods are async via `async_trait` until native async-in-traits covers dyn dispatch needs.
+- **Async:** tokio multi-threaded runtime, **explicitly sized** (§7) rather than left at the default of one worker per core. No blocking calls on runtime threads; blocking C-library work goes to dedicated OS threads (camera) or `spawn_blocking`/rayon (decode, detection). Trait methods are async via `async_trait` until native async-in-traits covers dyn dispatch needs. "No blocking on the runtime" is a convention, and conventions decay — CI denies `clippy::await_holding_lock` and `clippy::await_holding_refcell_ref`, and T-ISO-1 (§9) is the behavioural backstop for everything a lint cannot see.
 - **Errors:** `thiserror` enums per crate; no `anyhow` in library crates (binaries may use it at the top level). Every error carries enough context to render an operator-facing message (PRD §2 "transparency" principle).
 - **Serialization:** `serde` throughout; all externally visible JSON schemas (API, events, IPC, metadata files) carry a `v` version field.
 - **IDs:** session IDs `YYYY-MM-DD_<target-slug>`; frame IDs zero-padded sequence numbers per session (`light_00042`); job IDs monotonically increasing u64 per process run.
@@ -342,6 +344,26 @@ enum CamCmd {
 }
 ```
 
+**One context means one queue: live view and capture contend, and cannot be made not to.** Every
+`CamCmd` is serviced by the single thread in order, because there is exactly one `gphoto2::Context`
+and libgphoto2 forbids sharing it. A second context is not an option. Measured on the R10
+(`spikes/gphoto2-r10/FINDINGS.md`): live view sustains 58.5 fps, and `capture_image()` blocks the
+thread for **2.08 s**. So every frame you take stalls the live-view stream for roughly two seconds.
+
+This is a property of the hardware interface, not a defect, and the design does not try to hide
+it — it surfaces it:
+
+- The facade emits `capture.progress` transitions (`exposing` → `downloading` → `saved`) around
+  the blocking region, so the UI always knows *why* the stream stopped.
+- The live view pipeline (§5.7) treats a gap as expected during capture rather than as a stream
+  fault, and does not attempt reconnection.
+- The PWA (§5.9) renders the preview panel in a "capturing" state for the duration. An unexplained
+  two-second freeze reads as a crash; a labelled one reads as the camera working.
+
+What must *not* happen is this stall propagating anywhere else — mount polling, the event bus, the
+API, and the WS hub are all off this thread by construction, and **T-ISO-1 (§9) exists to prove it
+stays that way.**
+
 Every command has an operation-class timeout (config get/set 5 s; capture = exposure + 30 s; download 120 s). A timed-out thread is considered wedged: the facade drops the channel, the thread is abandoned (it cannot be safely killed mid-libgphoto2-call), a fresh thread + context is spawned, and a USB reset is attempted — this is the REL-03 recovery path, surfaced as a `camera.status` reconnecting event.
 
 #### 5.3.2 Capture flow (CAM-03/04, REL-05)
@@ -409,7 +431,7 @@ Idle ──start_capture──► Capturing ──saved──► Idle
    └──connect/disconnect device management──┘        Faulted (from any state; operator ack → Idle)
 ```
 
-The full sequence FSM (targets, dithering, solve-and-center, pause/resume — SES-01..06) is specified in SDD v1.1.x; its states will be a superset and the persistence format (`session.json: sequence_state`) is already reserved.
+The full sequence FSM (targets, dithering, solve-and-center, pause/resume — SES-01..06) is specified in the Phase 2a increment; its states will be a superset and the persistence format (`session.json: sequence_state`) is already reserved.
 
 ### 5.7 Live view pipeline (`astroctl-pipeline::liveview`)
 
@@ -419,6 +441,13 @@ Two sources, one output path (WS binary frames on `liveview.frame`):
 2. **Last-captured preview** (CAM-06, IPP-04): on `frame.saved`, a decode job goes to the blocking pool — half-size RAW decode (`rawler`, per PRD §7; M1 handles only the simulator's FITS, the CR3 variant arrives with M2) → quarter-res RGB → asinh auto-stretch (fixed algorithm in Phase 1; the STF options come with the post-chain) → JPEG (quality 85) → cached as `<session>/preview/light_<id>.jpg` and pushed once on the bus.
 
 Decode jobs are a queue of depth 1 with replace semantics: if frames arrive faster than decode, only the newest is previewed (previews are ephemeral; raw frames are what matters).
+
+**Expected gaps.** Source 1 pauses whenever the camera thread is busy capturing (§5.3.1) — about
+2 s per frame on the R10. The pipeline must treat this as normal: no reconnect attempt, no stream
+-fault alert, no client teardown. The distinction the code needs is *stream idle because the camera
+is busy* (fine, driven by `capture.progress`) versus *stream idle because the camera stopped
+responding* (a wedge, §5.3.1). Conflating them produces either spurious alerts during every capture
+or a missed wedge — both worse than the pause itself.
 
 ### 5.8 API gateway (field binary)
 
@@ -469,6 +498,14 @@ One task serving two endpoints per client (§8.3 separation): `/ws` for JSON con
 ### 5.9 PWA (M1 scope)
 
 React + TypeScript, Vite build, output embedded in the binary via `include_dir!`. State: a thin store fed exclusively by WS events + snapshot (no REST polling); commands are REST calls that optimistically do nothing — UI state changes only when the corresponding event arrives (single source of truth). Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state (a tracking mount's motion is exactly predictable), rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
+
+**The live-view panel must explain its own pauses.** During a capture the stream stops for about
+two seconds (§5.3.1 — one gphoto2 context, unavoidable). Driven by `capture.progress`, the panel
+shows a "capturing" state with the exposure countdown over the last frame, and resumes on
+`preview_ready`. This is not decoration: an unexplained freeze in the one widget that shows live
+motion is indistinguishable from a crashed app, and the operator's next move is to reload — in the
+dark, mid-session, on a phone. Every state the backend can be in that stops pixels arriving needs a
+distinct visual, including the wedge-recovery path (`camera.status: reconnecting`).
 
 ### 5.10 Transfer agent (`astroctl-transfer`)
 
@@ -527,7 +564,7 @@ always safe because ingest deduplicates by `(frame_id, sha256)` (§5.11.2). A cr
 therefore costs one retransmission, never a lost or duplicated frame.
 
 `reclaimable=1` is *marking only*. No deletion path exists in this increment — REL-13's retention
-policy (operator-configured, opt-in) is designed in SDD v1.3.x. The flag is the durable record
+policy (operator-configured, opt-in) is designed in the Phase 2b increment. The flag is the durable record
 that the archive of record has the frame.
 
 #### 5.10.4 Interface
@@ -706,6 +743,21 @@ ADD §10. Everything else on either node stays human-readable and travels with t
 | worker supervisor | tokio task (stack) | child process handles | stdio pipes, job queue in, bus out |
 | compute worker | OS process (Python, stack) | its own memory/GPU context | stdio IPC only (§5.12); crash isolated from the backbone |
 
+**Runtime sizing.** The threads above are not free, and the field node may be a 4-core Pi. Left at
+its default the tokio runtime takes one worker per core, and then the camera OS thread, the decode
+pool (2–3), and the solver subprocess all compete for the same cores — producing exactly the
+latency jitter this topology exists to prevent. Both binaries therefore size the runtime
+explicitly from config (`server.runtime_worker_threads`, PRD §8.1/§8.2):
+
+| Node | Default | Reasoning |
+|------|---------|-----------|
+| Field | `min(2, cores - 2)`, floor 1, when unset | The async work is I/O-bound and light — a serial poll, WS fan-out, HTTP handlers. Reserve cores for the camera thread and the decode pool, which are the ones that actually saturate a CPU |
+| Stack | one per core when unset | The backbone is I/O-bound too, but the heavy compute lives in child processes with their own scheduling; there is nothing to reserve against |
+
+An operator on larger field hardware raises it; the point is that the number is a decision with a
+reason, not an accident of `num_cpus`. The chosen value is reported in `/api/system/info` so a
+support question about sluggishness can be answered from the API rather than by guesswork.
+
 Shutdown order (SIGTERM): stop accepting API → abort live view → if capturing, finish download (bounded 120 s) → stop tracking? **No** — tracking state is left as-is (an operator restart of the service mid-session must not stop the mount) → flush session log → exit. This asymmetry (finish camera, don't touch mount) is deliberate: the mount is safe while tracking; a half-downloaded frame is a lost frame.
 
 ---
@@ -746,6 +798,7 @@ Consolidated design position on operating over a slow/lossy VPN. The first two a
 | T-SLW-1 | Slew TTL: start manual slew, silently drop renewals (simulated link loss); assert axis stop within ttl_ms + 100 ms and `SLEW_TTL_EXPIRED` alert emitted | §5.8.1 dead-man's switch |
 | T-STALE-1 | Command staleness: goto with `issued_at` 5 s old → `COMMAND_STALE`, no motion; slew/stop with same age → executed; duplicate `command_id` → original outcome returned, no re-execution | §5.8.1 staleness/idempotency |
 | T-HOL-1 | Connection separation: saturate `/ws/liveview` with frames over a shaped 1 Mbit link; assert `/ws` position events and e-stop POST latency unaffected (≤ 2× baseline) | §8.3(5) |
+| T-ISO-1 | **Thread isolation — the PRF-04 test.** While a capture + 32 MB download runs (simulator configured with a realistic ~2 s blocking capture and a slow download), assert concurrently: `mount.position` events keep 1 Hz cadence with no gap > 1.5 s; `/api/mount/position` and `/api/system/health` p99 latency stays ≤ 2× the idle baseline; an e-stop issued mid-download still meets its ≤ 20 ms handler-to-wire budget; the event bus never lags a subscriber. Repeat with a decode job saturating the blocking pool. **Fails if any single-threaded assumption creeps back in** — this is the regression guard, not a one-off measurement | PRF-04, PRF-01, §5.3.1, §7 |
 | T-CAM-1 | Camera thread against gphoto2 vusb/simulator: capture, settings, timeout-wedge recovery respawn | §5.3.1, REL-03 |
 | T-E2E-1 | Full API-level two-node session against simulator drivers: connect → goto → capture → frame durable → transferred → acked → stub-worker preview returns through the proxy; assert event stream shape | IMP M1 exit criteria |
 | T-DUR-1 | Kill -9 during download / during meta write; on restart assert no partial frame visible, no ID reuse | §5.3.2, §5.5, REL-04/05 |
@@ -772,7 +825,8 @@ Simulators (HAL-11) are first-class: `SimulatorMount` implements realistic slew 
 | SES-07 (basic) | §4.3 bus → session log sink |
 | ARC-01..05, ARC-07 | §2, §3, §4.4, §5.8.3 |
 | REL-01..05, REL-11, REL-12, REL-14 | §5.2.4, §5.3.2, §5.4, §5.5 |
-| PRF-01, PRF-04, PRF-05, PRF-12 | §5.2.4, §5.3.1, §7, §5.8.2, T-SOAK-1/T-SER-3 |
+| PRF-01, PRF-05, PRF-12 | §5.2.4, §5.3.1, §7, §5.8.2, T-SOAK-1/T-SER-3 |
+| **PRF-04** | §5.3.1 (camera on its own OS thread), §5.4 (bounded blocking pool), §7 (runtime sizing) — **verified by T-ISO-1**, not inferred from the topology |
 | SEC-01/02 (subset) | §4.5 |
 | USB-03/04/09/10/12 | §5.9 |
 | STK-16, STK-17, ARC-11, REL-06, REL-13 (marking) | §5.10 transfer agent |
@@ -781,7 +835,7 @@ Simulators (HAL-11) are first-class: `SimulatorMount` implements realistic slew 
 | ARC-22, CMP-06 (worker-side fallback path), ADR-13 | §5.12 IPC + supervision |
 | USB-06 | `stack.status` / `transfer.status` topics (§4.3), stack panel (§5.9) |
 
-Requirements of later phases trace at architecture level via ADD §11 and will be detailed in the SDD increments of §1.2. Note that §5.10–5.12 design the *skeleton* these requirements need in M1; the stacking mathematics behind STK-01..15 and the reclaim mechanics of REL-13 arrive with the v1.3.x increment.
+Requirements of later phases trace at architecture level via ADD §11 and will be detailed in the SDD increments of §1.2. Note that §5.10–5.12 design the *skeleton* these requirements need in M1; the stacking mathematics behind STK-01..15 and the reclaim mechanics of REL-13 arrive with the Phase 2b increment.
 
 ---
 

@@ -9,7 +9,7 @@ devices simulated, safety mechanisms real. No real hardware, no stacking math.
 - Capture a synthetic frame; watch save → transfer → stack ack → preview return into the UI
 - Kill the stack node mid-session: capture continues, queue grows, reconnect drains it
 - E-stop halts a simulated slew instantly; slew TTL stops motion when renewals stop
-- Gated tests green: T-E2E-1, T-SLW-1, T-STALE-1, T-HOL-1, T-DUR-1, T-XFER-1, T-ING-1, T-IPC-1
+- Gated tests green: T-E2E-1, T-SLW-1, T-STALE-1, T-HOL-1, T-DUR-1, T-XFER-1, T-ING-1, T-IPC-1, T-ISO-1
 
 ## Tasks and order
 
