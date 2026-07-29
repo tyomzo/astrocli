@@ -8,9 +8,9 @@ milestone goal, exit criteria, and dependency order.
 
 | Doc | Path | Role |
 |-----|------|------|
-| PRD v1.12.1 | `docs/intent/ASTROCTL-PRD-001.md` | requirements (`XXX-nn` IDs), config schema (§8.1/§8.2 are normative) |
+| PRD v1.12.2 | `docs/intent/ASTROCTL-PRD-001.md` | requirements (`XXX-nn` IDs), config schema (§8.1/§8.2 are normative) |
 | ADD v1.2.6 | `docs/design/ASTROCTL-ADD-001.md` | architecture, ADRs, crate boundaries |
-| SDD v1.5.1 | `docs/design/ASTROCTL-SDD-001.md` | detailed design — **the spec for these tasks** |
+| SDD v1.6.0 | `docs/design/ASTROCTL-SDD-001.md` | detailed design — **the spec for these tasks** |
 | IMP v1.1.8 | `docs/plan/ASTROCTL-IMP-001.md` | milestone strategy, definition of done |
 
 Every task's **Spec** line names the sections that govern it. If a task cites a section that

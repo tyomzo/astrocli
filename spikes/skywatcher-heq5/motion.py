@@ -328,7 +328,82 @@ def E10(period=620, axis="1", duration=30.0, fence=20000):
         except Exception: pass
         link.close()
 
-EXPERIMENTS = {"E1": E1, "E3": E3, "E7": E7, "E8": E8, "E10": E10}
+
+def _goto(link, axis, inc, fence=400000, deadline=60):
+    """One bounded goto; returns (start, end, seconds)."""
+    start = pos(link, axis)
+    d = "0" if inc >= 0 else "1"
+    for o, pl in [("G","2"+d), ("I",enc_u24(620)), ("H",enc_u24(abs(inc))), ("M",enc_u24(max(abs(inc)//2,1)))]:
+        r = link.cmd(o, axis, pl)
+        if r is None or r.startswith("!"): raise SystemExit(f":{o} rejected -> {r!r}")
+    t0=time.monotonic(); link.cmd("J", axis)
+    samples, verdict = watch(link, axis, start, deadline_s=deadline, fence=fence)
+    return start, pos(link, axis), time.monotonic()-t0, verdict
+
+def E12(axis="1"):
+    """Backlash: the counter is open-loop, so a direction reversal shows mechanical lost motion
+    only if something downstream is observed. What we CAN measure here is counter fidelity on
+    reversal — whether commanded and counted steps agree in both directions."""
+    log("=== E12 · direction reversal / counter fidelity ===")
+    link = Link(allowed={"j","f","G","I","H","M","J","K","L"})
+    try:
+        for i,inc in enumerate([+5000, -5000, +5000, -5000]):
+            s0,s1,dt,v = _goto(link, axis, inc)
+            err = (s1-s0) - inc
+            log(f"  move {i+1}: commanded {inc:+6}  actual {s1-s0:+6}  error {err:+3}  {dt:.2f}s  [{v}]")
+        log("  NOTE: zero error here means the CONTROLLER is faithful. Mechanical backlash is")
+        log("        invisible to an open-loop counter and needs the camera or an encoder.")
+        return True
+    finally: save("E12"); link.close()
+
+def E13(axis="1"):
+    """Goto accuracy across distances — feeds SDD §5.2.3's tolerance, currently guessed at 10."""
+    log("=== E13 · goto accuracy vs distance ===")
+    link = Link(allowed={"j","f","G","I","H","M","J","K","L"})
+    errs=[]
+    try:
+        for inc in [1000, -1000, 10000, -10000, 100000, -100000]:
+            s0,s1,dt,v = _goto(link, axis, inc)
+            e=(s1-s0)-inc; errs.append(e)
+            log(f"  {inc:+8} counts ({abs(inc)/25066.67:6.3f} deg): error {e:+3} counts, {dt:5.2f}s  [{v}]")
+        log(f"\n  max |error| = {max(abs(e) for e in errs)} counts over {len(errs)} gotos")
+        log(f"  SDD §5.2.3 tolerance is 10 counts -> {'ample' if max(abs(e) for e in errs)<10 else 'REVISIT'}")
+        return True
+    finally: save("E13", {"errors":errs}); link.close()
+
+def E14(axis="1"):
+    """Do d/h/r/m mirror the goto target? If so the driver gains a pre-motion readback check."""
+    log("=== E14 · are d/h/r/m goto-target readback registers? ===")
+    link = Link(allowed={"j","f","c","d","h","i","m","r","s","G","I","H","M"})
+    try:
+        def snap():
+            return {k: link.cmd(k, axis) for k in ("c","d","h","i","m","r","s")}
+        before = snap(); p = pos(link, axis)
+        log(f"  position {p}")
+        log(f"  before: {before}")
+        target = 12345
+        link.cmd("G", axis, "20"); link.cmd("I", axis, enc_u24(620))
+        link.cmd("H", axis, enc_u24(target)); link.cmd("M", axis, enc_u24(target//2))
+        after = snap()
+        log(f"  after :H={target} (0x{target:06X}) and :M={target//2}:")
+        log(f"  after : {after}")
+        log("\n  changed registers:")
+        hits=0
+        for k in before:
+            if before[k]!=after[k]:
+                v = dec_u24(after[k][1:]) if after[k] and len(after[k])>6 else None
+                tag = ""
+                if v == target: tag = "  <-- EQUALS the :H goto increment"
+                elif v == target//2: tag = "  <-- EQUALS the :M break point"
+                log(f"    :{k}  {before[k]!r} -> {after[k]!r}   decoded {v}{tag}")
+                hits+=1
+        if not hits: log("    none — these are not target readback registers")
+        log("\n  NOTE: :J was never sent; nothing moved.")
+        return True
+    finally: save("E14"); link.close()
+
+EXPERIMENTS = {"E1": E1, "E3": E3, "E7": E7, "E8": E8, "E10": E10,
+               "E12": E12, "E13": E13, "E14": E14}
 
 if __name__ == "__main__":
     names = sys.argv[1:]

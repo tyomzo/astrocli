@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.12.1  
+**Version:** 1.12.2  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -23,6 +23,8 @@
 **Change note (1.12.0):** §4.2 timer frequency **confirmed under motion** — slewing at step period 620 measured 104.617 counts/s (0.999× sidereal), implying 64,862 against the corrected 64,935. The 460,800 figure would have predicted 743 c/s. Sidereal step period (620) and measured goto speeds recorded; goto speed is fixed per mode digit and not settable via the step period.
 
 **Change note (1.12.1):** §4.2 motion behaviour corrected after optical confirmation — goto ramps trapezoidally to ~835× sidereal rather than running at one of two fixed speeds; short moves are ramp-limited. Physical rotation confirmed by camera observation at 7.1× the noise floor.
+
+**Change note (1.12.2):** REL-03 annotated with hardware-verified camera recovery behaviour and the gvfs precondition; §4.2 goto accuracy measured at 0 counts error from 0.04° to 4°.
 
 ---
 
@@ -964,7 +966,7 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 |----|------------|
 | REL-01 | Emergency stop must work regardless of application state (dedicated endpoint, no queuing) |
 | REL-02 | Serial communication timeout and retry with error reporting (no silent hangs) |
-| REL-03 | USB disconnect detection and graceful recovery for both mount and camera |
+| REL-03 | USB disconnect detection and graceful recovery for both mount and camera. Verified on hardware for the camera (`spikes/gphoto2-r10/FINDINGS.md`): disconnect and claim-conflict are distinguishable errors, the stale handle never recovers so a fresh context is mandatory, and reconnection takes ~108 ms once the device is free. **On a field node running a desktop session this requirement fails unless gvfs camera auto-mounting is disabled** — gvfs grabs the device on hotplug and blocked recovery for 80 s in testing |
 | REL-04 | Sequence state persisted so a crash during capture doesn't lose progress metadata |
 | REL-05 | All captured images saved to disk on the field node before any transfer or processing — never lose a frame |
 | REL-06 | Frame transfer queue persists across field node restarts — unsent frames are retransmitted on reconnection |

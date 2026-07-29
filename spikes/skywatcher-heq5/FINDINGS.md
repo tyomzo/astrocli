@@ -408,3 +408,67 @@ override). A headless field node has no gvfs at all and needs neither.
 would only break the file manager. The full hotplug path could not be exercised without physically
 replugging, so the mechanism is verified (unit is `Type=dbus`, D-Bus file has a direct `Exec`,
 override directory is user-writable) while end-to-end hotplug suppression remains untested.
+
+---
+
+# PHASE 5 — characterisation (E12, E13, E14)
+
+## E14 · `h`, `i`, `m` are readback registers — a pre-motion check the design lacks
+
+Wrote `:H`=12,345 and `:M`=6,172 at position 8,654,669, **without sending `J`**, then re-read the
+undocumented inquiries:
+
+| Register | Before | After | Decoded | Meaning |
+|---|---|---|---|---|
+| `:h` | 8,654,669 | **8,667,014** | = position + `H` | **absolute goto target** |
+| `:i` | 12 | **620** | = the value written with `:I` | **step period** |
+| `:m` | 8,619,853 | **8,660,841** | = position + `M` | **absolute break point** |
+| `:r` | 8,619,950 | 8,660,910 | +6,241 from position, 69 past the break point | related to braking; unresolved |
+
+All three matches are exact. This confirms the hypothesis and hands the driver something it does
+not currently have:
+
+> **Verify the goto before committing to it.** After `G`/`I`/`H`/`M` and *before* `J`, read back
+> `:h`, `:m` and `:i` and assert they equal the intended absolute target, break point and step
+> period. Three round trips ≈ 48 ms at the measured 16 ms each. A corrupted frame, a byte-swap
+> error, a wrong axis digit — the mount does not validate that one — or a mis-encoded increment is
+> caught *before* anything moves, rather than being discovered by watching where the mount ends up.
+
+This is worth more than it sounds given the earlier finding that the mount does not validate the
+axis digit and answers `:j9` with plausible data. Cheap insurance on the one command sequence where
+being wrong is expensive.
+
+## E13 · goto accuracy: zero error at every distance
+
+| Commanded | Angle | Error | Duration |
+|---|---|---|---|
+| ±1,000 | 0.040° | **0** | 0.64 s |
+| ±10,000 | 0.399° | **0** | 2.33 s |
+| ±100,000 | 3.989° | **0** | 4.10 s |
+
+Six gotos, both directions, **maximum error 0 counts**. SDD §5.2.3's tolerance of 10 counts is
+ample — it could be tightened to 2–3, though there is no pressing reason to, and a tolerance that
+is loose in the safe direction costs nothing.
+
+Note the duration non-linearity again: 100× the distance takes only 6.4× the time, because short
+moves are ramp-limited. Reinforces that the orchestrator must not estimate slew time linearly.
+
+## E12 · direction reversal: the counter is faithful, backlash is invisible
+
+Four alternating ±5,000-count moves, **error 0 on every one**.
+
+**This does not measure backlash.** The counter is an open-loop step count, so it reports what the
+controller commanded regardless of what the gearbox did. Zero error here means the *controller* is
+faithful across direction changes — worth knowing, and not nothing — but mechanical lost motion on
+reversal is invisible to it by construction.
+
+Real backlash needs an external reference. The camera-on-a-table rig used for the optical
+confirmation could do it: command a reversal, measure the pixel displacement, and find the
+commanded counts that produce no image motion. That is a genuinely useful Phase 3 input (guiding
+cares about backlash) and remains **open**.
+
+## Status
+
+Phases 1–5 complete apart from per-class slew speeds (E11) and guide pulses (E15), plus the
+optical backlash measurement noted above. Phase 6 (e-stop wire latency, needs the sniffer) and
+Phase 7 (endurance) not started.

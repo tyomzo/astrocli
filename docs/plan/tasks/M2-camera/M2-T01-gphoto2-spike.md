@@ -1,13 +1,13 @@
 # M2-T01 — Spike: bulb + CR3 download via gphoto2 crate, and RAW decoder selection
 
 **Milestone:** M2 · **Depends on:** M1 · **Crates:** scratch (`spikes/gphoto2-r10/`, not in workspace)
-**Size:** M · **Status:** done except step 7 (2026-07-29) — findings in `spikes/gphoto2-r10/FINDINGS.md`
+**Size:** M · **Status:** **done** (2026-07-29, all 8 steps) — findings in `spikes/gphoto2-r10/FINDINGS.md`
 **Spec:** ADD §10 (top risk), SDD §5.3.3 (fallback table this spike populates), §5.7 (decoder seam); PRD §4.3, §7 (RAW-decoder candidates and their maturity)
 
-> **Run early.** The camera became available before M0 started, so this spike was executed out
-> of sequence — which is entirely the point of a go/no-go spike. Steps 1–6 and 8 are done and the
-> top risk is retired. **Step 7 (cable-pull recovery) is still outstanding** and remains the
-> prerequisite for M2-T04's wedge-recovery design.
+> **Run early and complete.** The camera became available before M0 started, so this spike was
+> executed out of sequence — which is entirely the point of a go/no-go spike. All eight steps are
+> done and the top risk is retired. Step 7 additionally uncovered that gvfs breaks REL-03 recovery
+> on hotplug, which is now a precondition recorded against M2-T02 and M2-T04.
 
 ## Objective
 

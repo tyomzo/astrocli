@@ -65,7 +65,7 @@ fn main() {
             4 => step4_bulb(&cam),
             5 => step5_liveview(&cam, &ctx),
             6 => step6_battery_storage(&cam),
-            7 => println!("[step 7] cable-pull test is manual — see FINDINGS.md"),
+            7 => step7_cable_pull(&cam, &ctx),
             8 => step8_rawler(),
             9 => step9_record(&cam, &ctx),
             n => println!("unknown step {n}"),
@@ -315,6 +315,75 @@ fn drain_events(cam: &Camera, budget: Duration) {
         }
     }
     println!("  no NewFile event within budget");
+}
+
+// ---------------------------------------------------------------- step 7
+
+/// REL-03: characterise USB disconnect during active transfer, and what recovery costs.
+/// Live view is the traffic generator — continuous USB activity gives a wide pull window.
+fn step7_cable_pull(cam: &Camera, ctx: &Context) {
+    println!("[step 7] CABLE-PULL / REL-03 recovery");
+    println!("  starting live view to generate continuous USB traffic.");
+    println!("  >>> PULL THE USB CABLE when you see frames counting up. <<<\n");
+    let t0 = Instant::now();
+    let mut n = 0u32;
+    let err = loop {
+        match cam.capture_preview().wait() {
+            Ok(f) => {
+                let _ = f.get_data(ctx).wait();
+                n += 1;
+                if n % 25 == 0 {
+                    println!("  ...{n} frames ({:.0}s) — pull whenever ready", t0.elapsed().as_secs_f64());
+                }
+                if t0.elapsed() > Duration::from_secs(120) {
+                    println!("  no disconnect within 120 s — giving up");
+                    return;
+                }
+            }
+            Err(e) => break e,
+        }
+    };
+    let t_fail = t0.elapsed();
+    println!("\n  *** TRANSFER FAILED after {n} frames, {:.1}s ***", t_fail.as_secs_f64());
+    println!("  error: {err}");
+    println!("  error kind: {err:?}");
+
+    println!("\n  >>> NOW PLUG THE CABLE BACK IN. <<<");
+    println!("  (probing recovery every 2 s for up to 90 s)\n");
+
+    // Ladder rung 1: same context, same Camera handle — does it ever come back?
+    for i in 1..=5 {
+        std::thread::sleep(Duration::from_secs(2));
+        match cam.capture_preview().wait() {
+            Ok(_) => { println!("  RECOVERY: same Camera handle worked again after {i} retries"); return; }
+            Err(e) => println!("  retry {i} on the OLD handle: still failing ({e})"),
+        }
+    }
+    println!("  -> the old handle does NOT recover. A fresh context is required.\n");
+
+    // Ladder rung 2: brand-new Context + autodetect.
+    let t1 = Instant::now();
+    for i in 1..=40 {
+        std::thread::sleep(Duration::from_secs(2));
+        match Context::new() {
+            Ok(c2) => match c2.autodetect_camera().wait() {
+                Ok(cam2) => {
+                    println!("  RECOVERY: fresh Context + autodetect succeeded on attempt {i} ({:.0}s after replug prompt)",
+                             t1.elapsed().as_secs_f64());
+                    match cam2.capture_preview().wait() {
+                        Ok(_) => println!("  and live view works again — full recovery, no power cycle needed"),
+                        Err(e) => println!("  reconnected but preview still fails: {e}"),
+                    }
+                    let a = cam2.abilities();
+                    println!("  model after recovery: {:?}", a.model());
+                    return;
+                }
+                Err(e) => if i % 5 == 0 { println!("  attempt {i}: autodetect still failing ({e})") },
+            },
+            Err(e) => println!("  attempt {i}: Context::new failed ({e})"),
+        }
+    }
+    println!("  *** no recovery within 80 s — power cycle or gvfs interference likely ***");
 }
 
 // ---------------------------------------------------------------- step 5

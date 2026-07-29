@@ -27,7 +27,7 @@ implementation risk in the project. All of it is covered by the bindings.
 | 4 | **Bulb** | **works** | `eosremoterelease` → `Press Full` / `Release Full`; camera reported `BulbExposureTime 9` for a 10 s hold; `NewFile` event delivered the CR3 |
 | 5 | Live view | works | **58.5 fps**, 133 KB/frame, worst frame 390 ms (first frame, LV startup) |
 | 6 | Battery / storage / lens | works | `batterylevel=100%`, storage + free space, lens name reported |
-| 7 | Cable-pull recovery | **NOT RUN** | needs a human at the cable — see below |
+| 7 | Cable-pull recovery | **works, with a caveat** | disconnect detected in-flight; stale handle unrecoverable; fresh context reconnects in 108 ms — *unless gvfs grabs the device on replug*, see below |
 | 8 | `rawler` CR3 decode | works | see below |
 
 ## rawler on a real R10 file
@@ -69,10 +69,6 @@ settable, and the UI should surface the camera's physical mode.
 
 ## Still open
 
-**Step 7, cable-pull recovery, was not run.** It needs someone to physically pull the USB cable
-mid-download, and it is the evidence M2-T04's wedge-recovery design depends on (REL-03). Until it
-runs, the recovery path is designed but unvalidated.
-
 Also untested, deliberately: `capturetarget=Memory card`, mirror-lockup equivalents, long-run
 thermal behaviour, and any of this on the actual field node (a Pi's USB stack is not this
 workstation's).
@@ -91,3 +87,43 @@ cargo +1.97.1 build --release
 ./target/release/gphoto2-r10-spike 5         # live view, 15 s
 ./target/release/gphoto2-r10-spike 8         # decode newest CR3 in out/
 ```
+
+---
+
+## Step 7 — cable pull / REL-03 recovery (executed 2026-07-29)
+
+Live view as the traffic generator; cable pulled after 927 frames / 31.3 s.
+
+**Disconnect is detected cleanly and — importantly — is a *distinguishable* error:**
+
+| Condition | libgphoto2 error |
+|---|---|
+| Cable physically removed | `Could not find the requested device on the USB port` |
+| Device present but claimed by something else | `Could not claim the USB device` |
+
+The driver can therefore tell "camera unplugged" from "something else has it" and say so, instead
+of surfacing one opaque message for both. M2-T04's recovery path should branch on this.
+
+**The old handle never recovers.** Five retries on the existing `Camera` after replug all failed
+with the same error. This confirms SDD §5.3.1's design: abandon the thread and context, spawn
+fresh. There is no cheaper path.
+
+### gvfs does not merely annoy — it breaks REL-03
+
+After replug, a fresh `Context` + autodetect failed for **80 seconds straight** with
+`Could not claim the USB device`. Cause: **gvfs auto-mounted the camera on hotplug**
+(`gphoto2:host=Canon_Inc._Canon_Digital_Camera_A0000...`). Releasing the mount produced immediate
+recovery — autodetect in **108 ms**.
+
+So the camera itself recovers perfectly. The entire 80-second failure was the desktop environment
+taking the device out from under the recovery path.
+
+This also **settles the hotplug question left open earlier**: gvfs was recorded as suppressible in
+principle but untested against a real replug. It has now been tested, negatively — gvfs *does*
+grab on hotplug, and it does so precisely when the recovery path needs the device.
+
+This escalates the finding. REL-03 ("USB disconnect detection and graceful recovery") is a **Must**
+requirement, and on any field node running a desktop session it would fail — not at startup, where
+it is merely confusing, but in the middle of a night, after a cable knock, exactly when recovery
+matters. The prevention steps recorded in `../skywatcher-heq5/FINDINGS.md` are therefore not
+optional hardening; they are a precondition for REL-03 on a non-headless field node.

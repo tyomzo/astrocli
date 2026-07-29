@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.5.1
+**Version:** 1.6.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.12.1 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.12.2 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -26,6 +26,8 @@
 **Change note (1.5.0):** §5.2.2/§5.2.3/§5.2.4 updated from executed motion experiments: goto ignores the step period (so no goto-speed calculation should be built around it), the goto tolerance is measurably generous, and `L` versus `K` is shown to be indistinguishable at low speed — stop overshoot is link latency scaling with rate, which is the real argument for the priority lane.
 
 **Change note (1.5.1):** §5.2.2 goto-speed note corrected: the profile is a trapezoidal ramp, so goto duration is not linear in distance and must not be estimated by dividing counts by a nominal rate. M2-T02 gains the gvfs USB-claim detection observed on real hardware.
+
+**Change note (1.6.0):** §5.2.2 gains **mandatory pre-motion readback verification** — hardware testing showed `:h`, `:m` and `:i` return the absolute goto target, absolute break point and step period exactly, so the driver can verify a goto is correctly programmed before sending `J`. Given the mount does not validate the axis digit, this is the only check that catches an encoding fault before the motors move. §5.2.3 goto tolerance confirmed ample against a measured error of 0 counts across six gotos.
 
 ---
 
@@ -320,7 +322,16 @@ counterintuitive — `0` is *high* speed and `1` is *low* — so a transposed di
 error rather than a direction error. Never construct this byte from an unvalidated integer.
 
 **Goto command sequence**: `G` (mode) → `I` (step period) → `H` (target increment) → `M`
-(break-point increment) → `J` (start). **`I` is sent for protocol completeness but does not
+(break-point increment) → **read back and verify** → `J` (start).
+
+**Pre-motion verification is mandatory.** Before `J`, re-read `:h`, `:m` and `:i` and assert they
+equal the intended absolute target, absolute break point and step period. Measured on hardware
+(`spikes/skywatcher-heq5/FINDINGS.md`): `:h` returns position + the `H` increment exactly, `:m`
+returns position + the `M` increment exactly, and `:i` returns the step period exactly. Three
+round trips ≈ 48 ms. This catches a corrupted frame, a byte-swap error, a mis-encoded increment,
+or a wrong axis digit — which matters because **the mount does not validate the axis digit itself**
+— *before* the motors are ever commanded. On mismatch, abort and surface a protocol error; do not
+send `J`. **`I` is sent for protocol completeness but does not
 control goto speed** — measured on hardware, a 10× step-period change left the velocity profile
 unchanged. Goto ramps trapezoidally toward a cruise of ~87,000 counts/s (835× sidereal); short
 moves are ramp-limited and never reach it, so **goto duration is not linear in distance** and the
@@ -370,7 +381,7 @@ dec_counts→deg:   dec_d = ((counts - counts_home) / CPR) * 360.0
 
 RA axis position is mechanical hour angle; conversion to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
 
-Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts — measured goto error at low speed is 0 counts, so this is generous; tighten once E13 samples more distances), then restores tracking if it was active (SES-06).
+Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts; measured error is **0 counts across six gotos from 0.04° to 4°, both directions**, so the tolerance is ample and loose in the safe direction), then restores tracking if it was active (SES-06).
 
 #### 5.2.4 Serial task and lanes
 
