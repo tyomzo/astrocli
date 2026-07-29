@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 
+import { useDeploymentLabel } from '../lib/deployment';
 import { clockUtc } from '../lib/format';
 import type { NodeSlot } from '../store/nodes';
 import { selectNode, useNodesStore } from '../store/nodes';
@@ -22,11 +23,13 @@ import { EStopButton } from './EStopButton';
 export function HeaderBar(): ReactNode {
   const field = useNodesStore(selectNode('field'));
   const stack = useNodesStore(selectNode('stack'));
+  const deployment = useDeploymentLabel();
 
   return (
     <header className="sticky top-0 z-20 border-b border-edge bg-surface/95 backdrop-blur">
       <div className="mx-auto flex w-full max-w-5xl items-start justify-between gap-3 px-3 py-2">
         <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 pt-1">
+          {deployment !== null && <DeploymentMarker label={deployment} />}
           <StatusBadge label="field" status={badgeStatus(field)} />
           <StatusBadge label="stack" status={badgeStatus(stack)} />
           <Clock />
@@ -34,6 +37,22 @@ export function HeaderBar(): ReactNode {
         <EStopButton />
       </div>
     </header>
+  );
+}
+
+/**
+ * Says out loud that this is not the production node.
+ *
+ * First in the strip, not tucked at the end: the point is to be seen before anything is touched.
+ * It is deliberately the one element here that does not use the muted palette — a marker that
+ * blends in is a marker nobody reads, and the failure it guards against is an operator sending
+ * commands to the wrong rig because two home-screen icons looked alike.
+ */
+function DeploymentMarker({ label }: { label: string }): ReactNode {
+  return (
+    <span className="rounded-sm border border-accent px-1.5 py-0.5 font-mono text-xs font-semibold uppercase tracking-wide text-accent">
+      {label}
+    </span>
   );
 }
 

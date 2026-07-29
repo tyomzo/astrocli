@@ -37,6 +37,9 @@ use axum::http::{header, Method};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 
+use astroctl_core::config::DeploymentLabel;
+use serde_json::json;
+
 use crate::api::ApiFailure;
 use crate::auth::AuthPolicy;
 use crate::proxy;
@@ -59,15 +62,31 @@ const API_PREFIXES: &[&str] = &["/api", proxy::PREFIX, "/ws"];
 /// A fallback rather than a route per asset because the SPA needs one anyway — every client-side
 /// route (`/target`, `/frame`, `/stack` in M1) has to resolve to `index.html`, and there is no
 /// list of them a server could hold.
-pub fn router(auth: Arc<AuthPolicy>) -> Router {
-    Router::new().fallback(serve).with_state(auth)
+pub fn router(auth: Arc<AuthPolicy>, deployment: Option<DeploymentLabel>) -> Router {
+    Router::new()
+        .fallback(serve)
+        .with_state(PwaState { auth, deployment })
 }
 
-async fn serve(State(auth): State<Arc<AuthPolicy>>, request: Request) -> Response {
+/// What the static subtree needs: who may call the API, and which deployment this is.
+#[derive(Clone)]
+struct PwaState {
+    auth: Arc<AuthPolicy>,
+    /// `None` is production. See [`manifest`] for why this reaches the manifest at all.
+    deployment: Option<DeploymentLabel>,
+}
+
+async fn serve(State(state): State<PwaState>, request: Request) -> Response {
     let path = request.uri().path();
 
     if API_PREFIXES.iter().any(|prefix| under(path, prefix)) {
-        return api_miss(&auth, &request);
+        return api_miss(&state.auth, &request);
+    }
+
+    // Generated rather than served from the bundle, so one binary and one `dist/` can be a dev
+    // node or a production node according to config alone.
+    if path == "/manifest.webmanifest" && request.method() == Method::GET {
+        return manifest(state.deployment.as_ref());
     }
 
     // The shell is a document. A POST to `/anything` is not a mis-typed URL, it is a client
@@ -86,6 +105,63 @@ fn under(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// The PWA manifest, built from config rather than served from the bundle.
+///
+/// # Why this is generated
+///
+/// A PWA's install identity is keyed by **origin**, so a dev node on its own hostname already
+/// installs beside production with its own service worker, cache and `localStorage`. The origin
+/// does not make the two *distinguishable* once installed, though: without this, both appear as
+/// "AstroCtl" with the same icon, and one of them drives a real mount. Generating the manifest
+/// lets one binary and one `dist/` serve either deployment, chosen by `server.deployment_label`,
+/// instead of maintaining two builds that will drift.
+///
+/// `id` stays `/` in both. It is resolved against the origin, and the origins already differ —
+/// giving the dev node a different `id` would buy nothing and would silently orphan an installed
+/// app the first time someone changed the label.
+fn manifest(deployment: Option<&DeploymentLabel>) -> Response {
+    let (name, icon_prefix) = match deployment {
+        Some(label) => (format!("AstroCtl {}", label.as_str()), "icon-dev"),
+        None => ("AstroCtl".to_owned(), "icon"),
+    };
+    let icon = |size: u32, purpose: &str, suffix: &str| {
+        json!({
+            "src": format!("/icons/{icon_prefix}-{suffix}.png"),
+            "sizes": format!("{size}x{size}"),
+            "type": "image/png",
+            "purpose": purpose,
+        })
+    };
+    let body = json!({
+        "id": "/",
+        "name": name,
+        "short_name": name,
+        "description": "Field control for a remote astrophotography rig.",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "any",
+        "background_color": "#000000",
+        "theme_color": "#000000",
+        "categories": ["utilities", "productivity"],
+        "icons": [
+            icon(192, "any", "192"),
+            icon(512, "any", "512"),
+            icon(512, "maskable", "maskable-512"),
+        ],
+    });
+    (
+        [
+            (header::CONTENT_TYPE, "application/manifest+json"),
+            // Chrome re-reads the manifest to notice an identity change. A cached one would keep
+            // an installed app named after the deployment it used to be.
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body.to_string(),
+    )
+        .into_response()
 }
 
 /// An API-shaped path that matched no declared route. See the module docs.
@@ -337,6 +413,47 @@ mod tests {
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.json()["code"], "NOT_FOUND");
         assert_eq!(answer.json()["retryable"], false);
+    }
+
+    /// The manifest is public: the install machinery fetches it with no credentials, so a 401
+    /// here would mean the app could never be installed at all.
+    #[tokio::test]
+    async fn the_manifest_is_served_without_a_token() {
+        let node = TestNode::authenticated("s3cret");
+        let answer = get(&node, "/manifest.webmanifest", None).await;
+        assert_eq!(answer.status, StatusCode::OK);
+        assert_eq!(answer.content_type, "application/manifest+json");
+        assert_eq!(answer.json()["name"], "AstroCtl");
+        assert_eq!(answer.json()["icons"][0]["src"], "/icons/icon-192.png");
+    }
+
+    /// The point of generating it: one binary and one bundle, two installable identities.
+    #[tokio::test]
+    async fn a_labelled_deployment_gets_its_own_name_and_icons() {
+        let node = TestNode::authenticated("s3cret").with_deployment_label("Dev");
+        let answer = get(&node, "/manifest.webmanifest", None).await;
+
+        assert_eq!(answer.json()["name"], "AstroCtl Dev");
+        assert_eq!(answer.json()["icons"][0]["src"], "/icons/icon-dev-192.png");
+        assert_eq!(answer.json()["icons"][2]["purpose"], "maskable");
+
+        // `id` and `scope` must NOT vary: they are resolved against the origin, which already
+        // differs, and changing `id` orphans an app that is already on someone's home screen.
+        assert_eq!(answer.json()["id"], "/");
+        assert_eq!(answer.json()["scope"], "/");
+    }
+
+    /// Chrome re-reads the manifest to notice a rename. A cached one leaves an installed app
+    /// wearing the name of the deployment it used to be.
+    #[tokio::test]
+    async fn the_manifest_is_not_cached() {
+        let node = TestNode::authenticated("s3cret");
+        assert_eq!(
+            get(&node, "/manifest.webmanifest", None)
+                .await
+                .cache_control,
+            "no-cache"
+        );
     }
 
     /// The declared routes keep working through the merge — the layer is still on them.

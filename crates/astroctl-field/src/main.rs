@@ -303,7 +303,8 @@ async fn serve(
 /// passing after the real assembly changes.
 fn assemble(router: axum::Router<AppState>, state: AppState) -> axum::Router {
     let auth = Arc::clone(&state.auth);
-    api::with_auth(router.with_state(state), Arc::clone(&auth)).merge(pwa::router(auth))
+    let deployment = state.config.server.deployment_label.clone();
+    api::with_auth(router.with_state(state), Arc::clone(&auth)).merge(pwa::router(auth, deployment))
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

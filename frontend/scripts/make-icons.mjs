@@ -23,8 +23,23 @@ import { deflateSync } from 'node:zlib';
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'icons');
 
 const BACKGROUND = [0x00, 0x00, 0x00];
-const RETICLE = [0xff, 0x5a, 0x3c];
 const STAR = [0xff, 0xe8, 0xdc];
+
+/*
+ * One variant per deployment kind, distinguished by hue.
+ *
+ * This is a safety measure, not decoration. A dev node and a production node install as separate
+ * PWAs (separate origins), which means two icons sit side by side on one home screen — and one of
+ * them drives a real mount with a camera bolted to it. Telling them apart has to survive a glance
+ * in the dark, so the difference is hue at full strength rather than a badge or a shade.
+ *
+ * Deliberately not red-versus-green: that pair fails for roughly 8% of men and collapses under
+ * night mode. Warm amber against cold cyan survives both.
+ */
+const VARIANTS = [
+  { suffix: '', reticle: [0xff, 0x5a, 0x3c] },
+  { suffix: '-dev', reticle: [0x3c, 0xc8, 0xff] },
+];
 
 /** Supersampling factor. 4×4 subsamples per pixel is enough for a ring at 192 px. */
 const SS = 4;
@@ -36,7 +51,7 @@ const SS = 4;
  * icon must keep everything meaningful inside a circle of 80% diameter — the launcher may crop
  * to any shape inside that — so it gets 0.40 and the plain icon gets 0.47.
  */
-function render(size, reach) {
+function render(size, reach, RETICLE) {
   const pixels = Buffer.alloc(size * size * 4);
   const art = reach * size;
 
@@ -153,12 +168,14 @@ function png(size, pixels) {
 
 mkdirSync(OUT, { recursive: true });
 
-for (const [name, size, reach] of [
-  ['icon-192.png', 192, 0.47],
-  ['icon-512.png', 512, 0.47],
-  ['icon-maskable-512.png', 512, 0.4],
-]) {
-  const file = join(OUT, name);
-  writeFileSync(file, png(size, render(size, reach)));
-  console.log(`wrote ${file}`);
+for (const { suffix, reticle } of VARIANTS) {
+  for (const [name, size, reach] of [
+    [`icon${suffix}-192.png`, 192, 0.47],
+    [`icon${suffix}-512.png`, 512, 0.47],
+    [`icon${suffix}-maskable-512.png`, 512, 0.4],
+  ]) {
+    const file = join(OUT, name);
+    writeFileSync(file, png(size, render(size, reach, reticle)));
+    console.log(`wrote ${file}`);
+  }
 }

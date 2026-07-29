@@ -51,6 +51,15 @@ impl TestNode {
         self
     }
 
+    /// Mark this node as a non-production deployment.
+    pub fn with_deployment_label(mut self, label: &str) -> Self {
+        self.yaml = self.yaml.replace(
+            "deployment_label: null",
+            &format!("deployment_label: {label}"),
+        );
+        self
+    }
+
     /// Point `stacking_server` at a running test server.
     pub fn with_stack_upstream(mut self, host: &str, port: u16) -> Self {
         self.yaml = self

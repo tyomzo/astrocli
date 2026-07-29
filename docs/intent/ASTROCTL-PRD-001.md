@@ -1214,6 +1214,11 @@ server:
                             #   decode pool need cores reserved on a 4-core Pi (SDD §7)
   log_level: INFO
   log_dir: /data/astro/logs
+  deployment_label: null    # null = production. A short name ("Dev", "Bench") for a non-production
+                            #   node: the PWA installs as "AstroCtl Dev" with its own icon and
+                            #   carries a persistent marker. Origin already separates the installs;
+                            #   this is what makes them distinguishable once installed, so a dev
+                            #   app driving a real mount cannot be mistaken for the production one
 ```
 
 ### 8.2 Stacking Server Configuration

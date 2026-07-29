@@ -26,7 +26,7 @@
  * explain. Content still self-heals, because the shell is served stale-while-revalidate.
  */
 
-const CACHE = 'astroctl-shell-v1';
+const CACHE = 'astroctl-shell-v2';
 
 /**
  * The minimum that must be present for the app to render offline. Hashed assets are not listed —
@@ -36,11 +36,21 @@ const CACHE = 'astroctl-shell-v1';
 const SHELL = [
   '/',
   '/index.html',
+  // The manifest is precached deliberately, even though the server marks it `no-cache`. It is
+  // what tells the app which deployment it is (`lib/deployment.ts`), and a dev node that lost its
+  // marker the moment it went offline would be a dev node that looks like production exactly when
+  // nobody can check. A rename is picked up on the next worker version, which is soon enough for
+  // something that changes when a node is reconfigured.
   '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/icon-maskable-512.png',
 ];
+
+/*
+ * Icons are NOT listed. Their names vary by deployment — production draws `icon-*.png` and a
+ * labelled node `icon-dev-*.png` — so any hardcoded list here is wrong for one of them. They are
+ * cached on first use by the `/icons/` rule below, which is enough for the same reason the hashed
+ * assets are: the first visit is by definition online. The launcher icon is held by the OS from
+ * install time and never comes through this worker at all.
+ */
 
 /** Paths whose responses must never be cached, inspected or replayed. */
 function isLiveData(pathname) {

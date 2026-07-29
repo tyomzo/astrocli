@@ -1235,6 +1235,57 @@ impl LlmConfig {
     }
 }
 
+/// A short deployment name such as `Dev` or `Bench`, shown wherever the operator could otherwise
+/// mistake one node for another.
+///
+/// Newtyped rather than a bare `String` because it reaches two places where junk is expensive: the
+/// PWA manifest, which Chrome caches against the installed app, and the header, which has a fixed
+/// width. Validation is deliberately narrow — letters, digits, spaces and hyphens — since this
+/// string is interpolated into JSON served to a browser, and the set of characters that cannot
+/// break out is easier to reason about than the set that can.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(transparent)]
+pub struct DeploymentLabel(String);
+
+impl DeploymentLabel {
+    const MAX: usize = 16;
+
+    /// The label as written in the config.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn validate(&self, c: &mut Check, name: &str) {
+        c.non_empty(name, &self.0);
+        if self.0.chars().count() > Self::MAX {
+            c.fail(
+                name,
+                format!(
+                    "`{}` is {} characters; {} is the maximum — it is shown on a phone home \
+                     screen and in a fixed-width header",
+                    self.0,
+                    self.0.chars().count(),
+                    Self::MAX
+                ),
+            );
+        }
+        if let Some(bad) = self
+            .0
+            .chars()
+            .find(|ch| !(ch.is_ascii_alphanumeric() || *ch == ' ' || *ch == '-'))
+        {
+            c.fail(
+                name,
+                format!(
+                    "`{bad}` is not allowed; a deployment label may contain only ASCII letters, \
+                     digits, spaces and hyphens, because it is interpolated into the PWA manifest"
+                ),
+            );
+        }
+    }
+}
+
 /// Field-node HTTP server (PRD §8.1 `server`).
 ///
 /// Distinct from [`StackServerConfig`]: only the field node carries `max_command_age_ms`,
@@ -1259,6 +1310,15 @@ pub struct FieldServerConfig {
     pub log_level: LogLevel,
     /// Log directory.
     pub log_dir: PathBuf,
+    /// Distinguishes a non-production deployment in the PWA's identity and chrome. `null` is
+    /// production and adds nothing.
+    ///
+    /// A PWA's install identity is keyed by *origin*, so a dev node on its own hostname already
+    /// installs alongside production and keeps its own token, cache and service worker. What the
+    /// origin does not do is make the two distinguishable once installed — two identical icons on
+    /// one home screen, one of which drives a real mount. This label is what makes them tell
+    /// apart: the manifest name becomes `AstroCtl <label>` and the UI carries a persistent marker.
+    pub deployment_label: Option<DeploymentLabel>,
 }
 
 impl FieldServerConfig {
@@ -1275,6 +1335,9 @@ impl FieldServerConfig {
         c.range("max_command_age_ms", self.max_command_age_ms, 100, 60_000);
         check_worker_threads(c, self.runtime_worker_threads);
         c.absolute("log_dir", &self.log_dir);
+        if let Some(label) = &self.deployment_label {
+            label.validate(c, "deployment_label");
+        }
     }
 
     /// Worker threads to build the runtime with, resolving `null` to the field-node default
