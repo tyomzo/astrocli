@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.6.0
+**Version:** 1.6.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.12.2 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.12.2 (requirements), ASTROCTL-ADD-001 v1.3.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -28,6 +28,8 @@
 **Change note (1.5.1):** §5.2.2 goto-speed note corrected: the profile is a trapezoidal ramp, so goto duration is not linear in distance and must not be estimated by dividing counts by a nominal rate. M2-T02 gains the gvfs USB-claim detection observed on real hardware.
 
 **Change note (1.6.0):** §5.2.2 gains **mandatory pre-motion readback verification** — hardware testing showed `:h`, `:m` and `:i` return the absolute goto target, absolute break point and step period exactly, so the driver can verify a goto is correctly programmed before sending `J`. Given the mount does not validate the axis digit, this is the only check that catches an encoding fault before the motors move. §5.2.3 goto tolerance confirmed ample against a measured error of 0 counts across six gotos.
+
+**Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
 
 ---
 
@@ -79,19 +81,26 @@ The increment boundary follows the *implementation plan*, not the PRD phase list
 M0–M3 deliver **two** binaries. The crates below are the subset of ADD §5.6 that carries code in
 these milestones; the rest (`solver`, `planning`, `guiding`, `llm`) are scaffolded empty at M0 and
 filled in later phases. ADD §5.6 remains the authoritative full layout and dependency matrix.
-Arrows are compile-time dependencies; everything also depends on `astroctl-core`:
+Arrows are **compile-time** dependencies; everything also depends on `astroctl-core`:
 
 ```
-              astroctl-field (bin)                    astroctl-stack (bin)
-            /    |      |       |     \                  |          |
- astroctl-safety |  astroctl- astroctl- astroctl-     astroctl-  (spawns)
-       |         |   pipeline   hal      session         ipc         │
-       |    astroctl-transfer    |     ┌────┘              │         ▼
-       |                         |     │ (frame store)     │   workers/compute_worker.py
-       └──────────────────► astroctl-drivers              │        (Python child)
-                        (skywatcher, gphoto2, simulators)  │
-                                                 astroctl-core (shared by both binaries)
+        astroctl-field (bin)                       astroctl-stack (bin)
+       /   /      |      |    \                      |       |       \
+  safety pipeline session transfer  drivers*        ipc   (drivers*) (spawns)
+     |     |       |       |          |              |                  |
+     └─────┴───────┴───────┴──────────┤              |                  ▼
+                                      ▼              |    workers/compute_worker.py
+                              astroctl-hal           |         (Python child)
+                                      |              |
+                              astroctl-core ◄────────┘   (shared by both binaries)
 ```
+
+`*` **Only the two binaries may name concrete drivers.** `astroctl-safety` wraps
+`Arc<dyn MountDevice>` (§5.4) — a HAL trait object, never a concrete driver — and the same holds
+for every crate above the HAL. The `DriverRegistry` is itself a HAL type (§5.1), so
+`astroctl-hal` cannot depend on `astroctl-drivers` without a cycle; the deployable that assembles
+the system is what supplies the concrete driver set. This is ADD §5.6 rule 1, and
+`scripts/check-deps.sh` enforces it.
 
 `astroctl-field` and `astroctl-stack` never depend on each other (ADD §5.6 rule 5); they share
 `astroctl-core` for types and events, `astroctl-ipc` for the worker protocol definitions, and the

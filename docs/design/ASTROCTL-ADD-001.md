@@ -1,7 +1,7 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.2.6
+**Version:** 1.3.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -19,6 +19,8 @@
 **Change note (1.2.5):** Pin advanced to PRD v1.11.0 (mount parameters verified on hardware).
 
 **Change note (1.2.6):** Pin advanced to PRD v1.11.1.
+
+**Change note (1.3.0):** §5.6 dependency rules 1 and 6 disambiguated during M0-T01, when they turned out not to be mechanically enforceable as written. Rule 1's "except the registry" had no literal implementation — `DriverRegistry` is a HAL type, so `astroctl-hal` cannot depend on the drivers it registers without a cycle; the rule now states that only the two binaries may name concrete drivers. Rule 6 conflicted with rule 5 over `astroctl-ipc`, which is worker-*related* but is inert protocol definitions; rule 6 now excludes GPU/ML runtimes and worker process management specifically, not the protocol crate.
 
 ---
 
@@ -357,12 +359,12 @@ astrocli/                       # repo directory (see naming convention above)
 
 **Dependency rules** (enforced by workspace structure and CI):
 
-1. `astroctl-drivers` depends only on `astroctl-hal` + `astroctl-core`. Nothing above the HAL depends on a concrete driver except the registry (HAL-01, ARC-04).
+1. `astroctl-drivers` depends only on `astroctl-hal` + `astroctl-core`. Nothing above the HAL depends on a concrete driver: crates above it hold `Arc<dyn MountDevice>` and friends, never a driver type (HAL-01, ARC-04). **Only the two binaries may depend on `astroctl-drivers`** — the `DriverRegistry` is a HAL type (SDD §5.1), so `astroctl-hal` cannot itself depend on the drivers it registers without a dependency cycle, and the deployable that assembles the system is therefore what supplies the concrete driver set.
 2. API layers (in the two binaries) depend on domain crates; domain crates never depend on the binaries — they emit events instead.
 3. `astroctl-llm` reaches the system only through HTTP calls to the local API (ARC-20); it must not depend on `astroctl-session` or `astroctl-hal`.
 4. Python workers communicate exclusively via the `astroctl-ipc` protocol; they never import backbone state and hold no sockets other than the IPC channel. All CuPy/PyTorch usage lives in `workers/` (CMP-06 CPU fallback is the workers' numpy path).
 5. `astroctl-field` and `astroctl-stack` never depend on each other; they share only `astroctl-core`/`astroctl-ipc` and the HTTP contract.
-6. The field binary must build without any GPU or worker-related code paths — `workers/` is packaged with the stack service only.
+6. The field binary must build without any GPU or ML runtime, and without the compute workers — `workers/` is packaged with the stack service only. This does **not** exclude `astroctl-ipc`: that crate is protocol *definitions* (message types, framing), which are inert and cheap, and rule 5 explicitly permits both binaries to share it. What rule 6 forbids in the field binary is a dependency on a CUDA or ML runtime (`cudarc`, `cust`, `tch`, `ort`, and the like) or on worker process management.
 
 ---
 

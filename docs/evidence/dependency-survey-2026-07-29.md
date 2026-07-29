@@ -11,7 +11,7 @@ This closes the *non-hardware* half of the M2-T01 spike and the erfa question ou
 
 | Question | Verdict | Evidence |
 |----------|---------|----------|
-| Toolchain pin | **1.97.1**, not 1.94.0 | 1.94.0 (2026-03-02) is the installed default; current stable is 1.97.1 (2026-07-14). `rusqlite` 0.40.1 → `libsqlite3-sys` 0.38.1 **fails on 1.94.0** — its build script uses the unstable `cfg_select!` (E0658). Builds cleanly on 1.97.1 |
+| Toolchain pin | **1.97.1**, not 1.94.0 | 1.94.0 (2026-03-02) is the installed default; current stable is 1.97.1 (2026-07-14). `rusqlite` 0.40.1 → `libsqlite3-sys` 0.38.1 **fails on 1.94.0** — its build script uses the unstable `cfg_select!` (E0658). Builds cleanly on 1.97.1. *Note added after M0-T01: with `rust-version = "1.97"` declared in the workspace manifest, cargo refuses earlier and more clearly — `rustc 1.94.0 is not supported by the following package` — so nobody working in this repo will actually meet the E0658. The finding stands; it was measured in an isolated probe without a manifest MSRV.* |
 | ERFA binding | **`erfars` 0.2.0** | Vendors the real ERFA C source — 251 `.c` files under `external/`, compiled via `cc::Build`, ships `LICENSE-ERFA.txt`. Same library astropy wraps, **and no system dependency** |
 | The `erfa` crate | **rejected, as suspected** | 0 C files, 17 Rust files; `src/lib.rs` opens "A pure-Rust equivalent to the ERFA C library". A reimplementation, not a binding |
 | `erfa-sys` | not needed | Requires system liberfa; `erfars` supersedes it by vendoring |
