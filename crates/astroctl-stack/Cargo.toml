@@ -11,5 +11,30 @@ publish.workspace = true
 [dependencies]
 astroctl-core = { workspace = true }
 
+# M0-T05 (binary bootstrap). No `hyper-util`: only the field node proxies (ADR-07).
+axum = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+rustix = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true }
+
 [lints]
 workspace = true

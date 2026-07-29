@@ -63,5 +63,29 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 # error messages both carry over unchanged (SDD §4.4).
 yaml_serde = { version = "0.10.4" }
 
+# --- added by M0-T05 (binary bootstrap) ---
+# Structured logging to console + `server.log_dir` (SDD §2 "Logging", task M0-T05 scope).
+# `tracing-appender` is what makes the file half non-blocking: its writer hands lines to a
+# background thread, so an SD card stalling on the Pi cannot block a runtime worker mid-capture.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = { version = "0.2" }
+# The `/stack/*` reverse proxy (ADR-07). hyper-util's legacy client is the low-level HTTP client
+# that axum 0.8's own hyper 1.x stack already pulls in, so proxying costs no new transitive tree
+# and — unlike a high-level client — lets the request body stream straight through without ever
+# being buffered in RAM. No TLS: the two nodes talk over the VPN (PRD §7, ADD §5.5).
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+# Constant-time bearer-token comparison (SDD §4.5). The tokens are hashed first and the 32-byte
+# digests compared, so the comparison is constant-time in the *token length* too — `ct_eq` on the
+# raw strings returns early on a length mismatch and leaks it. `sha2` is also what M1's frame
+# checksums (SDD §5.10.1, §5.11.2) will use, so the version belongs here rather than in one crate.
+sha2 = { version = "0.10" }
+subtle = { version = "2" }
+# Free-space reporting for `/api/system/health` (REL-12 thresholds). A safe wrapper over
+# `statvfs`; the alternative is hand-written `unsafe` around `libc` in two binaries.
+rustix = { version = "1", features = ["fs"] }
+# Test-only: `ServiceExt::oneshot` drives a built `Router` without binding a port, which is how
+# the auth/route-metadata tests assert on real responses rather than on handler return values.
+tower = { version = "0.5", features = ["util"] }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

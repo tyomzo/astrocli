@@ -34,6 +34,7 @@
 
 **Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
 
+**Change note (1.7.1):** §5.11.1 gains the `/api/system/info` row it was missing — §7 already required the resolved worker-thread count to be reported on *both* binaries, so a reader following §5.11.1 alone would have built a stack node whose runtime sizing could not be inspected. Surfaced by M0-T05.
 **Change note (1.8.0):** §5.9 given a real frontend design ahead of M0-T06, since that task sets the pattern five M1 tasks inherit. Stack settled (Tailwind over semantic tokens, headless primitives only where accessibility needs them, Zustand). **Colour architecture decided at M0 although night mode is Phase 4** — tokens now, `data-mode` override, true black surfaces — because the mechanism is cheap to establish and expensive to retrofit. Night-mode image handling specified, which nothing previously covered: a stretched star field is greyscale-white and would destroy the dark adaptation the mode protects, so image surfaces get a red-channel filter with a per-panel true-colour toggle. Touch targets raised to 60–70 px for primary controls on the grounds that the operator may be gloved. Store discipline expanded: selector-based subscription, three-state telemetry, resnapshot on `Lagged`.
 
 ---
@@ -769,6 +770,7 @@ on the stack node's disk, fsynced, and their checksum matched.**
 | Route | Method | Body → Response |
 |-------|--------|-----------------|
 | `/api/system/health` | GET | → `{status, disk_free_gb, versions, worker: {state, restarts}}` |
+| `/api/system/info` | GET | → config summary, **resolved runtime worker threads (§7)**, route table. §7 requires this on *both* binaries; it was listed only for the field node |
 | `/api/ingest` | POST | multipart: `meta` (JSON: session_id, frame_id, sha256, size, capture params) + `frame` (binary) → `{sha256, stored: true, duplicate: bool}` |
 | `/api/stacking/stats` | GET | → `{session_id, frame_count, last_ingest_ts, last_preview_ts}` (real statistics arrive in 2b) |
 | `/ws` | GET | WS — JSON status events |
