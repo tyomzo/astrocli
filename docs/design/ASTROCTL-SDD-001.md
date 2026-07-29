@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.8.1
+**Version:** 1.9.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.15.1 (requirements), ASTROCTL-ADD-001 v1.4.0 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.15.1 (requirements), ASTROCTL-ADD-001 v1.4.1 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -38,6 +38,8 @@
 **Change note (1.8.0):** §5.9 given a real frontend design ahead of M0-T06, since that task sets the pattern five M1 tasks inherit. Stack settled (Tailwind over semantic tokens, headless primitives only where accessibility needs them, Zustand). **Colour architecture decided at M0 although night mode is Phase 4** — tokens now, `data-mode` override, true black surfaces — because the mechanism is cheap to establish and expensive to retrofit. Night-mode image handling specified, which nothing previously covered: a stretched star field is greyscale-white and would destroy the dark adaptation the mode protects, so image surfaces get a red-channel filter with a per-panel true-colour toggle. Touch targets raised to 60–70 px for primary controls on the grounds that the operator may be gloved. Store discipline expanded: selector-based subscription, three-state telemetry, resnapshot on `Lagged`.
 
 **Change note (1.8.1):** §4.5's startup refusal is narrowed from "not a loopback/VPN address" to loopback specifically. A VPN interface carries an ordinary private address and nothing distinguishes it from a LAN one, so the original wording was not implementable and invited a "10.0.0.0/8 is probably a tunnel" heuristic — guessing about precisely what SEC-01 exists to protect. Surfaced by M0-T05.
+
+**Change note (1.9.0):** **WebSocket authentication designed** — a browser cannot send an `Authorization` header on a WS upgrade, which §4.5 previously required and nothing had noticed. Resolved with a single-use 30 s ticket from `POST /api/auth/ws-ticket`, so the long-lived token never enters a URL and therefore never reaches the field node's own access log. Written into §4.5, the §5.8.1 route table, the §5.9 connect flow, and M1-T03/M1-T04. Also §4.2 gains `NODE_UNREACHABLE`, `DISK_LOW` and `NOT_IMPLEMENTED`: the closed enum had no way to say "the other node is not answering", and borrowing `DEVICE_TRANSPORT` tells the operator to check a cable when the problem is a tunnel. Surfaced by M0-T05.
 
 ---
 
@@ -242,6 +244,9 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | `AUTH` | 401 | no | bearer middleware (§4.5) |
 | `FRAME_ID_CONFLICT` | 409 | no | ingest (§5.11.2) |
 | `DISK_FULL` | 507 | no | ingest below `disk_critical_free_gb` (§5.11.2, REL-12) |
+| `DISK_LOW` | — | — | alert-only, no HTTP status: the warn threshold (REL-12). `alert.code` draws from this same enum |
+| `NODE_UNREACHABLE` | 502 | yes | the *other node* is not answering — the `/stack/*` proxy (ADR-07) and the transfer agent (§5.10). Distinct from `DEVICE_TRANSPORT`, which means serial or USB to a **device**; conflating them tells the operator to check a cable when the problem is a tunnel |
+| `NOT_IMPLEMENTED` | 501 | no | a route that exists in the design but not yet in this build — e.g. WS proxying before M1-T14. Better than borrowing `UNSUPPORTED`, which means the *device* cannot do it |
 | `NOT_FOUND` | 404 | no | unknown session/frame |
 | `INTERNAL` | 500 | no | anything unhandled |
 
@@ -293,6 +298,39 @@ error (SEC-01 enforcement at the earliest possible point). The test is *loopback
 from a LAN one, so any "10.0.0.0/8 is probably a tunnel" heuristic would be guessing about the
 exact thing SEC-01 exists to protect. Binding a non-loopback address without a token is refused
 regardless of which interface the operator believes it is. Confirmation-token machinery (SEC-03) is Phase 2c; the route metadata slot for tiers (§8.2) exists from Phase 1 so routes are annotated once.
+
+**WebSocket authentication uses a short-lived ticket, because a browser cannot send a header on
+the upgrade.** The `WebSocket` constructor accepts only a URL and a subprotocol list — there is no
+way to attach `Authorization`. The bearer token is therefore never used directly on `/ws` or
+`/ws/liveview`. Instead:
+
+```
+POST /api/auth/ws-ticket        Authorization: Bearer <token>
+  → 200 { "ticket": "<opaque>", "expires_in": 30 }
+
+GET  /ws?ticket=<opaque>        (upgrade; ticket validated and CONSUMED)
+```
+
+Rules that make this safe rather than a token-in-a-URL with extra steps:
+
+- **Single use.** The ticket is removed from the store when the upgrade consumes it. A replayed
+  ticket is rejected.
+- **Short TTL** — 30 s, enough for a slow tunnel and modest clock skew, far too short for a
+  logged value to be worth anything.
+- **Cryptographically random**, at least 128 bits, generated by the server. Never derived from
+  the bearer token.
+- **Bounded store.** Outstanding tickets live in a small map with a hard cap and aggressive
+  expiry, so a client that requests tickets and never connects cannot grow memory.
+- **A fresh ticket per connection.** This app reconnects often on a flaky tunnel (REL-10), so the
+  PWA fetches a ticket immediately before each `WebSocket` construction, including every retry.
+
+The point is that the *long-lived* token never enters a URL, and therefore never reaches the
+field node's own access log under `server.log_dir` — a file the operator may reasonably share
+when asking for help. A ticket in that log is expired and spent before anyone reads it.
+
+**This applies to browser clients only.** The field node connecting to the stack node's WebSocket
+(M1-T14's preview proxy) is not a browser and uses the ordinary `Authorization` header; it has no
+need of a ticket.
 
 ---
 
@@ -622,9 +660,10 @@ All routes under bearer auth (§4.5); tier annotations present from Phase 1 (enf
 | `/api/session/current` | GET | read | session.json view + frame list |
 | `/api/session/frames/{id}/preview.jpg` | GET | read | cached preview image |
 | `/api/transfer/status` | GET | read | → queue depth, oldest age, last ack, link state (§5.10.4) |
+| `/api/auth/ws-ticket` | POST | read | → `{ticket, expires_in}` — single-use, 30 s, consumed by the WS upgrade (§4.5). The only way a browser can authenticate `/ws` and `/ws/liveview` |
 | `/stack/*` | any | pass-through | reverse proxy to the stack node, auth forwarded (ADR-07); WS upgrades proxied too, so the operator keeps a single origin |
-| `/ws` | GET | read | WS upgrade — control/status events (JSON only); subscribe message selects topics |
-| `/ws/liveview` | GET | read | WS upgrade — binary JPEG frames only (live view + previews); separate socket so a large frame can never head-of-line-block control traffic (§8.3) |
+| `/ws` | GET | read | WS upgrade — control/status events (JSON only); subscribe message selects topics. Authenticated by `?ticket=` (§4.5), **not** by a bearer header |
+| `/ws/liveview` | GET | read | WS upgrade — binary JPEG frames only (live view + previews); separate socket so a large frame can never head-of-line-block control traffic (§8.3). Authenticated by `?ticket=` (§4.5) |
 
 `202 + WS progress` is the pattern for every long-running action; the response includes the event topic and correlation ID to watch.
 
@@ -677,6 +716,12 @@ need honest pixels, and a mode the operator has to fight is a mode they will swi
 that matter. The operator may be wearing gloves, which materially reduces pointing precision, so
 primary controls — D-pad, capture, e-stop — are **60–70 px**. The e-stop is larger still and holds
 a constant screen position across every view (USB-03) so it can be hit without looking at it.
+
+**Connect flow.** Before each `WebSocket` construction — the first and every reconnect — the PWA
+POSTs `/api/auth/ws-ticket` with its bearer token and opens the socket with the returned ticket
+(§4.5). A reconnect therefore costs one extra round trip, which is the right trade against putting
+a long-lived credential in a URL that gets logged. If the ticket request itself fails with 401 the
+token is bad and the UI must say so rather than retrying forever.
 
 **Store discipline.** A thin store fed exclusively by WS events plus the connect snapshot — no REST
 polling. Commands are REST calls that **optimistically do nothing**: UI state changes only when the

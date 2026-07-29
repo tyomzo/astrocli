@@ -1,7 +1,7 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.4.0
+**Version:** 1.4.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -25,6 +25,8 @@
 **Change note (1.3.1):** §5.5 gains the development/CI topology — two containers on separate network namespaces, which is how a single workstation exercises the two-node shape honestly and how the §9.1 latency and head-of-line-blocking requirements become automatically testable. Distinct from the STK-20 degenerate single-host case, which proves nothing about the deployment.
 
 **Change note (1.4.0):** ADR-12 extended — Android/Chrome is the supported PWA target and the iOS-compatible-subset discipline is recorded as rejected, with reasons. Paying its cost would have bought an option nobody holds while giving up Screen Wake Lock, which matters when the operator watches a live view for minutes at a time.
+
+**Change note (1.4.1):** §5.6 records a watch item — rules 5 and the core/axum boundary together leave the two binaries with no shared home for HTTP-layer code, so ~700 lines are duplicated. Fine at M0 size; if M1 grows it, an `astroctl-api` crate between core and the binaries closes the drift risk without violating any rule.
 
 ---
 
@@ -369,6 +371,15 @@ astrocli/                       # repo directory (see naming convention above)
 3. `astroctl-llm` reaches the system only through HTTP calls to the local API (ARC-20); it must not depend on `astroctl-session` or `astroctl-hal`.
 4. Python workers communicate exclusively via the `astroctl-ipc` protocol; they never import backbone state and hold no sockets other than the IPC channel. All CuPy/PyTorch usage lives in `workers/` (CMP-06 CPU fallback is the workers' numpy path).
 5. `astroctl-field` and `astroctl-stack` never depend on each other; they share only `astroctl-core`/`astroctl-ipc` and the HTTP contract.
+**Watch item (raised by M0-T05):** rule 5 forbids the two binaries depending on each other and
+SDD §4.2 keeps axum out of `astroctl-core`, so HTTP-layer concerns common to both nodes — auth
+middleware, route metadata, telemetry setup, vitals, watchdog scaffolding, CLI — currently exist
+as near-identical copies in each binary, on the order of 700 lines kept in step by review alone.
+That is acceptable at M0 size and genuinely cheaper than a premature abstraction. **If M1 grows
+it further, add an `astroctl-api` crate** that both binaries depend on: it sits above `core` and
+below the binaries, so it violates no rule and closes the drift risk. Revisit when M1-T03 lands
+the WS hub, which is the next substantial shared surface.
+
 6. The field binary must build without any GPU or ML runtime, and without the compute workers — `workers/` is packaged with the stack service only. This does **not** exclude `astroctl-ipc`: that crate is protocol *definitions* (message types, framing), which are inert and cheap, and rule 5 explicitly permits both binaries to share it. What rule 6 forbids in the field binary is a dependency on a CUDA or ML runtime (`cudarc`, `cust`, `tch`, `ort`, and the like) or on worker process management.
 
 ---

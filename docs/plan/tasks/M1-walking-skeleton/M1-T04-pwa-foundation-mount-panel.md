@@ -11,7 +11,7 @@ real screen: the mount panel.
 
 ## Scope
 
-- WS client: connect `/ws` with token, apply snapshot, reduce events into a typed store; auto-reconnect with backoff + resnapshot (REL-10); connection state exposed to UI
+- WS client: **fetch a fresh ws-ticket before every connection attempt** (SDD §4.5 — a browser cannot send a bearer header on the upgrade, and tickets are single-use so a reconnect needs a new one), apply snapshot, reduce events into a typed store; auto-reconnect with backoff + resnapshot (REL-10); connection state exposed to UI. A 401 from the ticket endpoint means the token is bad — surface that rather than retrying forever
 - Command layer: REST wrapper attaching auth; UI state changes **only** from events (no optimistic mutation) — enforce via store design
 - Header: connection badges for mount/camera/stack (USB-04), reserved e-stop button slot wired to `/api/mount/estop` (route exists after T05; button present now, disabled until then)
 - Mount panel: coordinates in astronomical notation (USB-05), tracking mode control, goto form with validation, D-pad with press-and-hold slew (TTL renewal comes alive in T05 — implement send-repeat loop now against the plain slew route), speed selector; 44 px targets, dark theme baseline
