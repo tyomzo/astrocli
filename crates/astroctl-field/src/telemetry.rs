@@ -103,15 +103,25 @@ pub fn init(level: LogLevel, log_dir: &Path, log_prefix: &str) -> Telemetry {
 
 type FileWriter = (tracing_appender::non_blocking::NonBlocking, WorkerGuard);
 
+/// Opens the rolling log file.
+///
+/// Synchronous `std::fs` throughout, and correct: `telemetry::init` is step 3 of the startup
+/// sequence (SDD §8.1) and the tokio runtime is not built until step 4, so there is no runtime to
+/// block here. Doing this after the runtime existed would be a different judgement.
+///
+/// check-async: allow — runs in `main` before the runtime is built (SDD §8.1 step 3 of 4)
 fn open_file_writer(log_dir: &Path, log_prefix: &str) -> Result<FileWriter, String> {
+    // check-async: allow — see above; pre-runtime startup
     std::fs::create_dir_all(log_dir)
         .map_err(|e| format!("cannot create log directory `{}`: {e}", log_dir.display()))?;
 
     // `rolling::daily` panics on a first write it cannot perform, which would be a panic on the
     // logging path rather than a startup error. Prove the directory is writable here instead.
     let probe = log_dir.join(format!(".{log_prefix}.write-test"));
+    // check-async: allow — pre-runtime startup
     std::fs::write(&probe, b"")
         .map_err(|e| format!("log directory `{}` is not writable: {e}", log_dir.display()))?;
+    // check-async: allow — pre-runtime startup
     let _ = std::fs::remove_file(&probe);
 
     let appender = tracing_appender::rolling::daily(log_dir, format!("{log_prefix}.log"));

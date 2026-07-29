@@ -1,0 +1,87 @@
+# The quality gate, in CI.
+#
+# This file installs a toolchain, restores caches and calls `scripts/check.sh`. It deliberately
+# does NOT list the gates: that list lives in the script, so "green locally" and "green in CI"
+# cannot come to mean different things. If you want to add a check, add it there — a step added
+# here would pass on every developer machine that never ran it.
+#
+# The toolchain is not named here either. `rust-toolchain.toml` pins 1.97.1 and the action honours
+# it, so the version exists in exactly one place (M0-T01).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first one's result irrelevant. Cancel it rather than
+# paying for an answer nobody will read — but never on main, where every commit's status is a
+# record someone may need later.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  gate:
+    name: quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Read from rust-toolchain.toml rather than restated; components come from it too.
+          toolchain: none
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinguishes this job's cache from any future one (e.g. a Pi cross-build) that would
+          # otherwise share and thrash it.
+          shared-key: gate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/package.json
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Run the gate
+        run: ./scripts/check.sh
+
+  # Activates when `workers/` gains Python (M1-T13). Present now so the job exists before the
+  # first file does — a linter added after the code is a linter with a backlog to clear.
+  python:
+    name: python workers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint the workers, if there are any
+        run: |
+          set -euo pipefail
+          if ! ls workers/*.py >/dev/null 2>&1; then
+            echo "no Python in workers/ yet — nothing to lint"
+            exit 0
+          fi
+          pipx install ruff
+          ruff check workers/
+          python3 -m compileall -q workers/
+
+  # T-E2E-1 lands in M1-T16 against the M0-T08 container harness. The placeholder is deliberate:
+  # the task requires it be `continue-on-error: false` from the moment it exists, so nobody can
+  # introduce it as advisory and leave it that way.
+  e2e:
+    name: end-to-end (M1-T16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Placeholder until M1-T16
+        run: echo "T-E2E-1 activates in M1-T16; deploy/compose.yaml is already the harness it will use."

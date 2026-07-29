@@ -1,14 +1,14 @@
 # M0-T07 — CI pipeline
 
 **Milestone:** M0 · **Depends on:** M0-T01 (extend as tasks land) · **Crates:** —
-**Size:** S · **Status:** not started
+**Size:** S · **Status:** done
 **Spec:** IMP §2/M0, §5 (definition of done); ADD §5.6 (rules the lint enforces)
 
 ## Objective
 
 Every push runs the full quality gate; the tree's health signal is one green check.
 
-> **The remote now exists** — `git@github.com:tyomzo/astrocli.git`, default branch `main`, pushed
+> **The remote now exists** — `github.com/tyomzo/astrocli`, default branch `main`, pushed
 > 2026-07-29 — so GitHub Actions can genuinely run and this task is no longer working around a
 > missing forge. The script-first structure still stands on its own merits: `scripts/check.sh` is
 > the real deliverable and the workflow is a thin wrapper that invokes it, so the two cannot drift
@@ -29,3 +29,28 @@ Every push runs the full quality gate; the tree's health signal is one green che
 - [ ] Script runs offline with warm caches in < 5 min; hosted CI < 10 min once a remote exists
 - [ ] Workflow file is a wrapper around the script, not a second copy of the gate list
 - [ ] Async-safety lints fire on a seeded violation (add a `std::thread::sleep` in an async fn, confirm the gate rejects it, revert)
+
+## Result
+
+`scripts/check.sh` is the gate; `.github/workflows/ci.yml` wraps it and lists no gates of its own.
+Six gates in ascending cost order — fmt, clippy, deps, async, test, frontend — **10 s** on a warm
+tree, against a 5-minute budget.
+
+Each gate was verified to *fail* on a seeded violation and then reverted: malformed source (fmt,
+and clippy caught it too), a forbidden `astroctl-hal → astroctl-drivers` edge (deps), a
+`std::thread::sleep` in `vitals.rs` (async), a broken assertion (test).
+
+**A limitation found by seeding, worth knowing.** `check-async.sh` treats everything after the
+first `#[cfg(test)]` as test code, so the first seeded `thread::sleep` — appended to the end of a
+file — was silently exempt. The script documents this trade, and it is the right one for a grep,
+but it means **production code placed below a test module is unscanned**. Rust convention puts
+`mod tests` last, so this is narrow; T-ISO-1 remains the behavioural backstop.
+
+The two async clippy lints are in `[workspace.lints.clippy]`, not CI flags, so they fire on a
+plain `cargo clippy`. `check-async.sh` supports a `check-async: allow <reason>` waiver — six are
+in use, all in `telemetry.rs`, where `std::fs` is correct because `telemetry::init` is step 3 of
+SDD §8.1's startup and the runtime is not built until step 4. Waivers are counted and printed so
+they cannot accumulate unnoticed.
+
+Not verified: the workflow has never executed on GitHub. It is committed but unrun until the next
+push.

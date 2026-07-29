@@ -120,3 +120,19 @@ x509-parser = { version = "0.18" }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+
+# Async-safety (SDD §2, M0-T07).
+#
+# These live here rather than as `-D` flags in CI on purpose: the gate then fires on a plain
+# `cargo clippy` on any developer's machine, and cannot be lost by a CI workflow forgetting to
+# pass a flag. A lint that only exists in one YAML file is a lint one edit away from silence.
+#
+# Both catch the same class of bug — a guard held across an `.await`, which parks the guard on a
+# runtime worker and can deadlock every other task that wants it. On the field node that worker
+# pool is `min(2, cores-2)` (SDD §7), so "every other task" is a very small number of tasks away
+# from being the whole node.
+#
+# They are not sufficient. `scripts/check.sh` adds a grep for the blocking calls these cannot
+# see, and T-ISO-1 is the behavioural backstop for everything neither catches.
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
