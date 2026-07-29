@@ -291,3 +291,77 @@ Until then, treat every figure above as characterising the *controller*, not the
 Physical-rotation confirmation (see the caveat above), Phase 5 characterisation (backlash, per-class slew speeds, goto accuracy across distances, the
 `d`/`h`/`r`/`m` readback hypothesis, guide pulses), Phase 6 e-stop latency on the wire with the
 sniffer, and Phase 7 endurance. High-speed classes remain unrun.
+
+---
+
+# OPTICAL CONFIRMATION — the axis physically rotates
+
+**Date:** 2026-07-29 · Camera on the table aimed at the mount, live view recorded at ~30 fps while
+a **10° goto (250,667 counts)** was commanded. This closes the open-loop caveat above.
+
+## Result: confirmed, 7.1× the noise floor
+
+Comparing two *static* frames — one 1 s before the move, one 4 s after it finished:
+
+| Comparison | Mean abs pixel difference |
+|---|---|
+| Static vs static, both before motion (8 s vs 10 s) | 0.712 |
+| Static vs static, both after motion (21 s vs 23 s) | 0.737 |
+| **Before vs after (11 s vs 22 s)** | **5.243 — 7.1× the noise floor** |
+
+The change is **spatially localised**, which is the convincing part. An 8×6 grid of the difference
+image shows one vertical band carrying nearly all of it (column 3: 14.4, 35.4, 25.9, 14.0, 15.3,
+9.5) while the background columns sit at 0.6–2.6, i.e. noise. Peak pixel change 204 of 255;
+4.46% of the frame changed by more than 20 levels. That is an object moving within a static scene,
+not a global exposure or noise shift.
+
+**A whole-frame average is the wrong statistic here** and nearly produced a false negative: during
+motion the mean inter-frame difference rose only from 0.426 to 0.453 (1.1×), because the mount
+occupies a small fraction of the frame. The timing was still visible — a smooth rise beginning at
+13.0 s and decaying by 16.5 s, matching the commanded window — but the magnitude looked like
+nothing. Spatially-resolved comparison was necessary.
+
+**Why nothing was heard or seen by eye:** the earlier experiments commanded a total of 0.574°, in
+bursts as short as 0.19 s, with the slowest segment running at 104 steps/s. Imperceptible on a bare
+head. This 10° move is the first one that was ever going to be obvious.
+
+## The goto speed model was wrong — it ramps, it is not fixed
+
+The 250,667-count goto produced a textbook trapezoid:
+
+```
+  t=0.02s     3,101 c/s
+  t=0.82s    29,887 c/s     ramp up
+  t=1.62s    84,116 c/s
+  t=2.81s    87,339 c/s     cruise (~1.6 s)
+  t=3.61s    47,789 c/s
+  t=4.41s     9,377 c/s     ramp down
+  t=5.61s         0 c/s
+```
+
+**Peak 87,486 counts/s = 835× sidereal**, against PRD §4.2's stated 800× maximum slew — good
+agreement, and the strongest confirmation yet of that figure.
+
+This corrects the earlier claim that goto has "two fixed speeds". The 1,000-count goto peaked at
+5,350 c/s not because that is a low-speed setting, but because the move was **ramp-limited** — with
+the break point at 500 counts it began decelerating before it ever reached cruise. Short gotos
+never see cruise speed.
+
+Note 87,486 ÷ 5,350 = 16.4, suspiciously close to the verified 16× high-speed ratio. That may be
+meaningful or may be coincidence; the acceleration profile is not yet characterised well enough to
+say, and it should not be assumed.
+
+**The step-period conclusion still stands**: identical profiles at step periods 620 and 6,200 mean
+`I` does not govern goto speed. Had it done so, the 10× slower period would have produced a
+proportionally slower ramp.
+
+## Deployment finding: gvfs steals the camera
+
+Mid-session the camera became unreachable with "Could not claim the USB device". Cause:
+`gvfsd-gphoto2` had auto-mounted it (`gphoto2:host=Canon_Inc._Canon_Digital_Camera_...`), holding
+the USB claim exclusively. Releasing the gvfs mount restored access immediately.
+
+**The field node must prevent this** — a desktop environment silently taking the camera is a
+guaranteed field failure, and the error message points nowhere useful. Either run the field node
+headless, mask the gvfs gphoto2 volume monitor, or add a udev rule. This belongs in M2-T02's
+connect path as a detected-and-explained condition rather than a bare "could not claim".

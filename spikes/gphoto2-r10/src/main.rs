@@ -63,6 +63,7 @@ fn main() {
             6 => step6_battery_storage(&cam),
             7 => println!("[step 7] cable-pull test is manual — see FINDINGS.md"),
             8 => step8_rawler(),
+            9 => step9_record(&cam, &ctx),
             n => println!("unknown step {n}"),
         }
     }
@@ -329,6 +330,34 @@ fn step6_battery_storage(cam: &Camera) {
         }
         Err(e) => println!("  storages() FAILED: {e}"),
     }
+}
+
+// ---------------------------------------------------------------- step 9
+
+/// Record live-view frames with millisecond timestamps, for optical motion detection.
+fn step9_record(cam: &Camera, ctx: &Context) {
+    let secs: u64 = std::env::var("REC_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(70);
+    let dir = PathBuf::from(OUT).join("lv");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).ok();
+    println!("[step 9] recording live view to {} for {secs}s", dir.display());
+    let t0 = Instant::now();
+    let mut n = 0u32;
+    while t0.elapsed() < Duration::from_secs(secs) {
+        match cam.capture_preview().wait() {
+            Ok(f) => match f.get_data(ctx).wait() {
+                Ok(d) => {
+                    let ms = t0.elapsed().as_millis();
+                    let p = dir.join(format!("{:07}_{:05}.jpg", ms, n));
+                    fs::write(&p, &d).ok();
+                    n += 1;
+                }
+                Err(e) => { println!("  get_data failed: {e}"); return; }
+            },
+            Err(e) => { println!("  capture_preview failed after {n}: {e}"); return; }
+        }
+    }
+    println!("  recorded {n} frames in {:?}", t0.elapsed());
 }
 
 // ---------------------------------------------------------------- step 8

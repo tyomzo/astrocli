@@ -184,7 +184,7 @@ def E1():
         save("E1"); link.close()
 
 
-def E3(increment=1000, period=620, axis="1"):
+def E3(increment=1000, period=620, axis="1", fence=FENCE, deadline=None):
     """Smallest self-terminating goto. K is NOT sent — the mount must stop itself."""
     log(f"=== E3 · bounded goto: axis {axis}, +{increment} counts, step period {period} ===")
     link = Link(allowed={"j", "f", "G", "I", "H", "M", "J"})
@@ -210,7 +210,7 @@ def E3(increment=1000, period=620, axis="1"):
         t_start = time.monotonic()
         r = link.cmd("J", axis)
         log(f"  :J{axis} -> {r!r}")
-        samples, verdict = watch(link, axis, start, deadline_s=max(predicted * 3, 30))
+        samples, verdict = watch(link, axis, start, deadline_s=(deadline or max(predicted*3,30)), fence=fence)
         elapsed = time.monotonic() - t_start
 
         end = pos(link, axis)

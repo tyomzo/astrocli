@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.5.0
+**Version:** 1.5.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.12.0 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.12.1 (requirements), ASTROCTL-ADD-001 v1.2.6 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -24,6 +24,8 @@
 **Change note (1.4.0):** §5.2.2 action-opcode encodings derived from vendor and reference-implementation sources (`spikes/skywatcher-heq5/ENCODINGS.md`) and two design errors corrected: the goto target is a **relative increment (`H`)**, not an absolute position (`S`, which the protocol does not have), and **`M` set-break-point-increment was missing entirely** from the command table despite being part of every goto. The `G` motion-mode bit layout and the `f` status decoding are now specified, the latter validated against our own hardware capture. §5.2.3's goto description updated for relative targeting.
 
 **Change note (1.5.0):** §5.2.2/§5.2.3/§5.2.4 updated from executed motion experiments: goto ignores the step period (so no goto-speed calculation should be built around it), the goto tolerance is measurably generous, and `L` versus `K` is shown to be indistinguishable at low speed — stop overshoot is link latency scaling with rate, which is the real argument for the priority lane.
+
+**Change note (1.5.1):** §5.2.2 goto-speed note corrected: the profile is a trapezoidal ramp, so goto duration is not linear in distance and must not be estimated by dividing counts by a nominal rate. M2-T02 gains the gvfs USB-claim detection observed on real hardware.
 
 ---
 
@@ -319,10 +321,11 @@ error rather than a direction error. Never construct this byte from an unvalidat
 
 **Goto command sequence**: `G` (mode) → `I` (step period) → `H` (target increment) → `M`
 (break-point increment) → `J` (start). **`I` is sent for protocol completeness but does not
-control goto speed** — measured on hardware, a 10× step-period change left the rate unchanged at
-5,350 counts/s. Goto speed comes solely from the `G` mode digit and offers exactly two values (low
-≈ 51× sidereal, high ≈ 817×). Do not build a goto-speed calculation around the step period; it
-governs SLEW and tracking only. The mount decelerates and stops itself at the target;
+control goto speed** — measured on hardware, a 10× step-period change left the velocity profile
+unchanged. Goto ramps trapezoidally toward a cruise of ~87,000 counts/s (835× sidereal); short
+moves are ramp-limited and never reach it, so **goto duration is not linear in distance** and the
+orchestrator must not estimate slew time by dividing counts by a nominal rate. Do not build a
+goto-speed calculation around the step period; it governs SLEW and tracking only. The mount decelerates and stops itself at the target;
 this self-terminating property is what makes a bounded goto the correct first motion during
 bring-up (see `spikes/skywatcher-heq5/MOTION-PLAN.md`).
 

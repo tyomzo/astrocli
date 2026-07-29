@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.12.0  
+**Version:** 1.12.1  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -21,6 +21,8 @@
 **Change note (1.11.1):** §4.2 high-speed ratio verified as 16× by read-only survey (`:g`, both axes) — the last unverified mount constant. All §4.2 parameters are now hardware-confirmed.
 
 **Change note (1.12.0):** §4.2 timer frequency **confirmed under motion** — slewing at step period 620 measured 104.617 counts/s (0.999× sidereal), implying 64,862 against the corrected 64,935. The 460,800 figure would have predicted 743 c/s. Sidereal step period (620) and measured goto speeds recorded; goto speed is fixed per mode digit and not settable via the step period.
+
+**Change note (1.12.1):** §4.2 motion behaviour corrected after optical confirmation — goto ramps trapezoidally to ~835× sidereal rather than running at one of two fixed speeds; short moves are ramp-limited. Physical rotation confirmed by camera observation at 7.1× the noise floor.
 
 ---
 
@@ -227,13 +229,14 @@ them (SDD §5.2.3); the values below are for test fixtures and hand-verification
 
 Capabilities reported: `has_pec=False, has_pulse_guide=True, has_tracking_rates=[sidereal, lunar, solar], max_slew_speed=800x_sidereal, position_resolution=24bit`
 
-**Measured motion behaviour** (`spikes/skywatcher-heq5/FINDINGS.md`). GOTO mode **ignores the step
-period** — a 10× change produced an identical 5,350 counts/s. Goto speed is selected solely by the
-mode digit of `G`, which offers two fixed speeds: low ≈ 5,350 counts/s (51× sidereal) and, applying
-the verified 16× ratio, high ≈ 85,600 counts/s (817× sidereal) — corroborating the 800× figure
-above. The step period governs SLEW and tracking only. Goto lands on target with 0 counts of error
-at low speed, and both `K` and `L` arrest motion with ~84 counts of overshoot, which at that rate
-is one serial round trip of command latency rather than deceleration.
+**Measured motion behaviour** (`spikes/skywatcher-heq5/FINDINGS.md`), confirmed optically with a
+camera observing the mount. GOTO **ramps** through a trapezoidal profile rather than running at a
+fixed speed: a 250,667-count (10°) move accelerated over ~1.6 s to a cruise of **87,486 counts/s =
+835× sidereal**, corroborating the 800× maximum above. Short gotos are ramp-limited and never reach
+cruise — a 1,000-count move peaked at only 5,350 counts/s. GOTO **ignores the step period** (a 10×
+change left the profile identical); `I` governs SLEW and tracking only. Goto lands on target with
+0 counts of error, and both `K` and `L` arrest motion with ~84 counts of overshoot, which at that
+rate is one serial round trip of command latency rather than deceleration.
 
 ### 4.3 Camera — Canon EOS R10 (reference implementation)
 
