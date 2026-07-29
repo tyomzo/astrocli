@@ -1,0 +1,13 @@
+# Python workers for the stacking server (ADD §5.6, ADR-13).
+#
+# Placeholder — M0-T01 creates the directory and this file; the actual pins land with the
+# workers themselves (compute_worker.py in M1-T13 and beyond, ml_worker.py in Phase 3).
+#
+# Constraints already fixed by the design, recorded here so they are not rediscovered:
+#   - CuPy (CUDA) with a numpy fallback path — CMP-06 requires the CPU path to work
+#     unaided, so numpy is never optional.
+#   - PyTorch / ONNX Runtime belong to ml_worker.py only.
+#   - Workers talk to the backbone exclusively over the astroctl-ipc stdio protocol; they
+#     open no sockets of their own (ADD §5.6 rule 4). Nothing here may imply otherwise.
+#   - These packages are installed on the stacking server only. The field node is packaged
+#     without workers/ entirely (ADD §5.6 rule 6).

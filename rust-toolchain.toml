@@ -1,0 +1,8 @@
+[toolchain]
+# Exact version, not the `stable` channel: an unpinned channel lets the workstation, CI and the
+# Pi silently compile with different compilers. 1.97.1 is also a hard floor — rusqlite 0.40 →
+# libsqlite3-sys 0.38 uses the unstable `cfg_select!` in its build script and fails to build on
+# 1.94 (E0658). Evidence: docs/evidence/dependency-survey-2026-07-29.md
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

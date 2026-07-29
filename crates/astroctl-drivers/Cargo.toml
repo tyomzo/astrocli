@@ -1,0 +1,17 @@
+[package]
+name = "astroctl-drivers"
+description = "Concrete device drivers: skywatcher, gphoto2 and the permanent simulators."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+# ADD §5.6 rule 1: these two, and nothing else internal, ever.
+astroctl-core = { workspace = true }
+astroctl-hal = { workspace = true }
+
+[lints]
+workspace = true

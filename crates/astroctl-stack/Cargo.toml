@@ -1,0 +1,15 @@
+[package]
+name = "astroctl-stack"
+description = "Stacking-server binary: ingest, job control, rebuild, preview and export."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+astroctl-core = { workspace = true }
+
+[lints]
+workspace = true

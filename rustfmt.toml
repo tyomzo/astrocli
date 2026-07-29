@@ -1,0 +1,7 @@
+# Stable-only options: anything nightly-gated would make `cargo fmt --check` emit warnings on
+# the pinned 1.97.1 toolchain and quietly stop being enforced.
+edition = "2021"
+max_width = 100
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true

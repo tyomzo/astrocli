@@ -21,7 +21,7 @@ against absent design is how a pack like this rots.
 
 | Folder | Delivery | Status |
 |--------|----------|--------|
-| `M0-scaffolding/` | workspace, core crates, both binaries boot, PWA shell over VPN | not started |
+| `M0-scaffolding/` | workspace, core crates, both binaries boot, PWA shell over VPN | in progress |
 | `M1-walking-skeleton/` | full GUI + two-node orchestration, all devices simulated | not started |
 | `M2-camera/` | real Canon R10 driver behind the unchanged `Camera` trait | not started |
 | `M3-mount/` | real HEQ5 Skywatcher driver + HIL bring-up | not started |

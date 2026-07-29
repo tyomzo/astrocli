@@ -1,7 +1,7 @@
 # M0-T01 — Git + Cargo workspace + crate skeletons + dependency lint
 
 **Milestone:** M0 · **Depends on:** — · **Crates:** all
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §3 (crate graph), ADD §5.6 (layout + dependency rules), IMP §2/M0
 
 ## Objective
@@ -23,7 +23,7 @@ Out of scope: any functional code, CI workflow files (M0-T07).
 
 ## Acceptance criteria
 
-- [ ] `cargo build --workspace` and `cargo clippy --workspace -- -D warnings` succeed
-- [ ] Dep-lint script passes, and **fails** when a forbidden edge is added (prove with a temporary test edge, then remove)
-- [ ] Fresh clone builds with only the rustup-provided toolchain, and `rustc --version` inside the repo reports 1.97.1 regardless of the user's default (proves the pin works)
-- [ ] Every crate's `cargo metadata` reports `license: MIT`
+- [x] `cargo build --workspace` and `cargo clippy --workspace -- -D warnings` succeed
+- [x] Dep-lint script passes, and **fails** when a forbidden edge is added (prove with a temporary test edge, then remove)
+- [x] Fresh clone builds with only the rustup-provided toolchain, and `rustc --version` inside the repo reports 1.97.1 regardless of the user's default (proves the pin works)
+- [x] Every crate's `cargo metadata` reports `license: MIT`

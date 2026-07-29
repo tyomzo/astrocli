@@ -1,0 +1,15 @@
+[package]
+name = "astroctl-field"
+description = "Field-node binary: axum API, WS hub, stack proxy and PWA serving."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+astroctl-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+# Rust
+target/
+
+# Node / frontend
+node_modules/
+dist/
+
+# Python workers
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editor / OS noise
+.DS_Store
+*.swp

@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# `spikes/` holds throwaway hardware-spike code (M2-T01, M3-T01) with its own `[workspace]`
+# stanzas. It is deliberately never built by `cargo build --workspace`.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# Toolchain floor. Pinned exactly in rust-toolchain.toml; see
+# docs/evidence/dependency-survey-2026-07-29.md for why 1.94 is not enough.
+rust-version = "1.97"
+license = "MIT"
+authors = ["Artiom Klimov"]
+publish = false
+
+# Shared dependency versions. Every crate refers to these with `{ workspace = true }` so the
+# whole tree moves versions in one place (ADD §5.6, SDD §2).
+[workspace.dependencies]
+# --- internal crates (paths only; nothing here is published) ---
+astroctl-core = { path = "crates/astroctl-core" }
+astroctl-hal = { path = "crates/astroctl-hal" }
+astroctl-drivers = { path = "crates/astroctl-drivers" }
+astroctl-safety = { path = "crates/astroctl-safety" }
+astroctl-session = { path = "crates/astroctl-session" }
+astroctl-pipeline = { path = "crates/astroctl-pipeline" }
+astroctl-solver = { path = "crates/astroctl-solver" }
+astroctl-planning = { path = "crates/astroctl-planning" }
+astroctl-guiding = { path = "crates/astroctl-guiding" }
+astroctl-transfer = { path = "crates/astroctl-transfer" }
+astroctl-llm = { path = "crates/astroctl-llm" }
+astroctl-ipc = { path = "crates/astroctl-ipc" }
+
+# --- external, versions per docs/evidence/dependency-survey-2026-07-29.md ---
+# Features are deliberately left to the consuming crate; only the version is shared.
+tokio = { version = "1.53" }
+axum = { version = "0.8" }
+serde = { version = "1", features = ["derive"] }
+thiserror = { version = "2" }
+tracing = { version = "0.1" }
+# `bundled` compiles SQLite from vendored C source — no system libsqlite3 on the Pi.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Deny-by-default lint policy, inherited by every crate via `[lints] workspace = true`.
+# Living here rather than in a CI flag means a local `cargo clippy` and CI agree by
+# construction; CI additionally passes `-D warnings` for rustc's own lints.
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }

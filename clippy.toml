@@ -1,0 +1,8 @@
+# Clippy *configuration*. The lint levels live in `[workspace.lints.clippy]` in Cargo.toml
+# (`clippy::all` at `deny`), so a local `cargo clippy` and CI agree by construction instead of
+# depending on someone remembering to pass `-D warnings`.
+#
+# Kept in step with `rust-version` in `[workspace.package]`. Stating it here as well makes
+# `clippy::incompatible_msrv` and the version-gated lints behave the same when clippy-driver is
+# invoked outside cargo (editors, rust-analyzer).
+msrv = "1.97"
