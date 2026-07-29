@@ -1,0 +1,100 @@
+# stacking-server.yaml
+stacking:
+  # --- Stacking method ---
+  method: sigma_clip       # mean, weighted_mean, median, sigma_clip,
+                           # kappa_sigma, winsorized_sigma_clip,
+                           # min_max_clip, linear_fit
+  sigma_low: 2.5           # sigma-clip / winsorized: lower rejection threshold
+  sigma_high: 3.0          # sigma-clip / winsorized: upper rejection threshold
+  kappa: 3.0               # kappa-sigma: rejection threshold (MAD-based)
+  max_iterations: 5        # iterative rejection: max passes
+  clip_low: 1              # min/max clip: discard N lowest per pixel
+  clip_high: 1             # min/max clip: discard N highest per pixel
+  live_approximation: true # use running approximation for live; full re-stack on demand
+
+  # --- Frame weighting ---
+  weight_mode: snr         # equal, snr, fwhm, background, custom
+  # custom weights are set per-frame in the UI
+
+  # --- Frame normalization ---
+  normalization: multiplicative_mean  # none, additive_mean, multiplicative_mean,
+                                      # median, background_region
+
+  # --- Registration ---
+  registration_method: affine  # affine, projective, translation_only
+  min_star_count: 15           # minimum detected stars to attempt registration
+  max_residual: 2.0            # pixels — reject registration if RMS residual exceeds this
+  detection_threshold: 5.0     # sep detection threshold (sigma above background)
+
+  # --- Reference frame ---
+  reference_mode: auto         # auto (best quality), manual, first
+  reference_frame: null        # frame number if reference_mode is manual
+
+  # --- Debayer ---
+  debayer_method: VNG          # bilinear, VNG, AHD, DCB
+
+  # --- Frame rejection (whole-frame) ---
+  reject_fwhm_max: 8.0        # arcsec — reject frames with FWHM above this
+  reject_star_count_min: 10   # reject frames with fewer detected stars
+  reject_eccentricity_max: 0.6 # reject frames with star eccentricity above this (trailing)
+  reject_background_max: null  # ADU — reject frames with background above this (clouds)
+
+  # --- Output ---
+  export_dir: /data/astro/stacks
+
+# Mirrored session archive — this is the authoritative copy (IPP-09, REL-13)
+storage:
+  sessions_dir: /data/astro/sessions
+  disk_warn_free_gb: 100
+  disk_critical_free_gb: 20   # ingest rejects new frames below this (REL-12)
+
+# Supervised Python compute/ML workers (ADR-13)
+workers:
+  python_interpreter: /data/astro/venv/bin/python  # venv the workers run in
+  compute_worker: workers/compute_worker.py
+  ml_worker: workers/ml_worker.py
+  health_ping_seconds: 5      # missed × 3 → kill and restart
+  restart_backoff_seconds: 2  # capped exponential
+  job_timeout_seconds: 300
+
+calibration:
+  library_dir: /data/astro/calibration
+  index_file: library.json  # or library.sqlite
+  dark_temp_tolerance: 2.0  # °C — match darks within this temperature range
+  dark_max_age_days: 180    # flag masters older than this for re-acquisition
+  default_master_method: sigma_clip  # method for generating master frames
+  default_master_sub_count: 30       # recommended minimum sub-frames per master
+
+ml:
+  models_dir: /data/astro/ml_models
+  device: auto              # "auto" (GPU if available), "cuda", "cpu"
+  noise_reduction:
+    model: astro_denoise_v1  # model name in models_dir
+    enabled: false           # opt-in (MLR-07)
+  star_separation:
+    model: starnet_v2
+    enabled: false
+  background_extraction:
+    model: astro_bgmodel_v1
+    enabled: false
+  reference_library_dir: /data/astro/references  # reference images per target
+
+gpu:
+  enabled: true
+  device: auto              # "auto", "cuda:0", or "cpu" (fallback)
+  vram_budget_gb: 20        # reserve ~4 GB for OS/display; use up to 20 GB for processing
+  accelerate:
+    registration: true      # GPU-accelerated star detection + warp
+    accumulation: true      # GPU-accelerated sigma-clip / rejection
+    debayer: true            # GPU-accelerated VNG/AHD
+    post_processing: true   # GPU-accelerated stretch, curves, color ops
+    ml_inference: true       # ML models on GPU (PyTorch CUDA / ONNX CUDA)
+
+server:
+  host: 0.0.0.0             # bind to the VPN interface IP in production (SEC-01)
+  port: 8471
+  auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
+  runtime_worker_threads: null  # null = one per core; heavy compute is in child processes,
+                            #   so there is nothing to reserve against here (SDD §7)
+  log_level: INFO
+  log_dir: /data/astro/logs

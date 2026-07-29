@@ -46,5 +46,22 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Deny-by-default lint policy, inherited by every crate via `[lints] workspace = true`.
 # Living here rather than in a CI flag means a local `cargo clippy` and CI agree by
 # construction; CI additionally passes `-D warnings` for rustc's own lints.
+
+# --- added by M0-T02/T03/T04 ---
+# The `detail` object of the API error envelope (SDD §4.2) and the `data` payload of every
+# event (§4.3) are free-form JSON, so `Value` reaches into astroctl-core itself.
+serde_json = { version = "1" }
+# Time (SDD §2: all persisted timestamps are UTC RFC 3339 with milliseconds). `chrono` rather
+# than `time` because SDD §4.3 specifies `Event.ts: DateTime<Utc>` literally. `default-features
+# = false` + `now`: we deliberately do NOT enable `clock`, which would pull `iana-time-zone` for
+# local-timezone support the backbone must never use — SDD §2 confines local time to UI rendering.
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "now"] }
+# YAML for the operator-facing config (PRD §8.1/§8.2). `serde_yaml` is deprecated and
+# unmaintained and `serde_yml` has since been deprecated too; `yaml_serde` is the YAML
+# organization's maintained continuation of dtolnay's crate (github.com/yaml/yaml-serde),
+# API-compatible, so `deny_unknown_fields` and the dotted key path already embedded in its
+# error messages both carry over unchanged (SDD §4.4).
+yaml_serde = { version = "0.10.4" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

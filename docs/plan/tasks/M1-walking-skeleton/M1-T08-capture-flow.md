@@ -15,7 +15,7 @@ via the three-state orchestrator skeleton.
 - Capture flow per SDD §5.3.2 order using T07's begin/commit: capture → download (simulated) → commit → sha256 (spawn_blocking) → metadata → `frame.saved` event; `capture.progress` events at each stage
 - Bulb path with countdown progress; abort route
 - Routes: camera connect/disconnect, settings GET/PUT (available values from capabilities), capture, capture/abort, battery, storage, `/api/session/current` + frame listing
-- Disk-critical behavior: capture request below critical threshold → 409 with `DISK_FULL` code (REL-12)
+- Disk-critical behavior: capture request below critical threshold → **507** with `DISK_FULL` code (REL-12). Not 409 — SDD §4.2 fixes one status per error code, and ingest already raises `DISK_FULL` as 507 (§5.11.2). A code that means different things on different nodes is exactly what the closed enum exists to prevent
 - PWA camera panel: settings selectors from available values, capture button with progress states, bulb duration input + countdown, battery/storage display; session frame list view
 
 ## PR split

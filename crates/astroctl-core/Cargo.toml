@@ -8,5 +8,19 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+[dependencies]
+# M0-T02 (types + error model), M0-T03 (event schema + bus), M0-T04 (config).
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+yaml_serde = { workspace = true }
+# tokio features are the minimum the bus and JSONL sink need: `sync` for `broadcast`,
+# `rt` to spawn the sink task, `fs`/`io-util` for the log write.
+tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
 [lints]
 workspace = true

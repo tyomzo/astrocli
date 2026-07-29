@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.6.2
+**Version:** 1.7.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.13.0 (requirements), ASTROCTL-ADD-001 v1.3.1 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.14.0 (requirements), ASTROCTL-ADD-001 v1.3.1 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -29,9 +29,10 @@
 
 **Change note (1.6.0):** §5.2.2 gains **mandatory pre-motion readback verification** — hardware testing showed `:h`, `:m` and `:i` return the absolute goto target, absolute break point and step period exactly, so the driver can verify a goto is correctly programmed before sending `J`. Given the mount does not validate the axis digit, this is the only check that catches an encoding fault before the motors move. §5.2.3 goto tolerance confirmed ample against a measured error of 0 counts across six gotos.
 
-**Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
+**Change note (1.6.2):** §5.10.4 claimed the `/api/transfer/status` route and the `transfer.status` event carried "the same data", but listed a fifth field (`attempts_current`) the §4.3 topic does not have. Resolved in favour of §4.3 — the retry counter is REST-only diagnostic detail. Surfaced by M0-T03.
+**Change note (1.7.0):** §4.1/§4.2 corrected while implementing them (M0-T02). Four of the five were holes in the very property these sections exist to guarantee. `AltAz` carried **public raw `f64` fields** in a section whose stated purpose is making unit bugs unrepresentable — alt/az are now `AltDegrees`/`AzDegrees` newtypes, named `alt`/`az` to match the §4.3 payload. The **derived `Deserialize`** on the validating newtypes was a bypass around their own constructors, and deserialization is how every coordinate this system acts on arrives — now `#[serde(try_from = "f64")]`. `Axis`/`Direction`/`SlewSpeed` **lacked serde derives** although §5.8.1's slew route deserializes all three by name. The §4.2 HTTP mapping was **silent on `DeviceError::Protocol` and `Busy`** (now 502 non-retryable and 409), and the "closed enum shared with the UI" was never enumerated anywhere — it is now a table, with `retryable` stated per code rather than only for the 502 pair. `CoreError`, referenced by §4.1 but defined nowhere, is now specified.
 
-**Change note (1.6.2):** §5.10.4 claimed the `/api/transfer/status` route and the `transfer.status` event carried "the same data", but listed a fifth field (`attempts_current`) the §4.3 topic does not have. Resolved in favour of §4.3 — the retry counter is REST-only diagnostic detail, not push-worthy telemetry. Surfaced by M0-T03 during implementation.
+**Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
 
 ---
 
@@ -145,32 +146,52 @@ Runtime task topology — stacking server:
 
 ```rust
 /// Right ascension in hours [0, 24). Constructor normalizes.
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[serde(try_from = "f64")]
 pub struct RaHours(f64);
 
 /// Declination in degrees [-90, +90]. Constructor validates.
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[serde(try_from = "f64")]
 pub struct DecDegrees(f64);
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+/// Altitude in degrees [-90, +90] (validates) and azimuth in degrees [0, 360)
+/// (normalizes), north through east. Same shape as the two above.
+pub struct AltDegrees(f64);
+pub struct AzDegrees(f64);
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct RaDec { pub ra: RaHours, pub dec: DecDegrees }
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
-pub struct AltAz { pub alt_deg: f64, pub az_deg: f64 }
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AltAz { pub alt: AltDegrees, pub az: AzDegrees }
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum TrackingMode { Sidereal, Lunar, Solar }
 
-#[derive(Copy, Clone, PartialEq)] pub enum Axis { Ra, Dec }
-#[derive(Copy, Clone, PartialEq)] pub enum Direction { North, South, East, West }
-#[derive(Copy, Clone, PartialEq)] pub enum SlewSpeed { Guide, Slow, Medium, Fast, Max }
+// serde too — §5.8.1's `/api/mount/slew` body deserializes all three by name.
+pub enum Axis { Ra, Dec }
+pub enum Direction { North, South, East, West }
+pub enum SlewSpeed { Guide, Slow, Medium, Fast, Max }
+
+/// Which side of the pier the tube is on; derived from the DEC counter (§5.2.3),
+/// carried in `mount.position` (§4.3).
+pub enum PierSide { East, West }
 
 /// Guide-pulse rate as a fraction of sidereal, (0.0, 1.0]. Constructor validates. (MNT-12)
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[serde(try_from = "f64")]
 pub struct GuideRate(f64);
 ```
 
-Newtype constructors (`RaHours::new`, `DecDegrees::new`) are the only way to build coordinate values; out-of-range input is a `CoreError::InvalidCoordinate`, never a wrapped/clamped silent fix.
+Newtype constructors (`RaHours::new`, `DecDegrees::new`, …) are the only way to build coordinate values; out-of-range input is a `CoreError::InvalidCoordinate`, never a wrapped/clamped silent fix. Non-finite input is rejected everywhere, normalizing types included — `NaN` is not a direction.
+
+**No public `f64` field carries a coordinate**, which is why alt/az are newtypes rather than the bare `alt_deg`/`az_deg` pair this section carried through v1.6.1: the API and the safety monitor both handle horizontal coordinates, and a design that makes RA/DEC unit-safe while leaving alt/az as loose floats protects the half that is not used by the altitude limit. Field names are `alt`/`az`, matching the `mount.position` payload of §4.3; the unit lives in the type, so the suffix was redundant anyway.
+
+**Deserialization goes through the constructors** (`#[serde(try_from = "f64")]`). A derived `Deserialize` would accept `{"dec": 91.0}` off the wire and hand it to the mount, which is the exact failure the newtypes exist to prevent — and every coordinate this system acts on arrives by deserialization.
+
+`CoreError` is this crate's own error type: `InvalidCoordinate { quantity, value, expected }`, rendering as `invalid declination: 91 is not within [-90, +90] degrees`. It maps to `VALIDATION` (422) at the API boundary (§4.2).
 
 ### 4.2 Error model
 
@@ -196,6 +217,32 @@ API error envelope (every non-2xx response):
 ```
 
 HTTP mapping: `NotConnected`/`Unsupported` → 409; `Timeout`/`Transport` → 502 (device side, `retryable: true`); `Rejected`/validation → 422; safety-limit rejection → 403 with `code: "LIMIT_ALTITUDE"`; auth failure → 401. Codes are a closed enum shared with the UI.
+
+`DeviceError::Protocol` and `DeviceError::Busy` are not in that sentence and need to be: an unparseable reply is an upstream-device failure like a timeout (**502**, but *not* retryable — it repeats deterministically until the driver or the firmware changes), and "busy" is the same class of answer as `NotConnected` — the device is healthy, its state is wrong (**409**).
+
+The closed enum, with the status and default retryability of each code. `ErrorCode::http_status()` and `ErrorCode::retryable()` are total functions over it, so a new code cannot be added without deciding both:
+
+| Code | Status | Retryable | Raised by |
+|------|--------|-----------|-----------|
+| `NOT_CONNECTED`, `UNSUPPORTED`, `BUSY` | 409 | no | device state (§5.1), orchestrator FSM (§5.6) |
+| `MOUNT_TIMEOUT`, `CAMERA_TIMEOUT`, `DEVICE_TIMEOUT` | 502 | **yes** | `DeviceError::Timeout`, qualified by which device |
+| `DEVICE_TRANSPORT` | 502 | **yes** | `DeviceError::Transport` |
+| `DEVICE_PROTOCOL` | 502 | no | `DeviceError::Protocol` |
+| `DEVICE_REJECTED` | 422 | no | `DeviceError::Rejected` |
+| `VALIDATION` | 422 | no | request/coordinate validation (`CoreError`, §4.1) |
+| `COMMAND_STALE` | 422 | no | staleness rejection (§5.8.1) |
+| `CHECKSUM_MISMATCH` | 422 | no | ingest (§5.11.2) |
+| `LIMIT_ALTITUDE`, `LIMIT_MERIDIAN` | 403 | no | safety monitor (§5.4, MNT-15/16) |
+| `SLEW_TTL_EXPIRED` | 403 | no | dead-man's switch (§5.8.1) — also an `alert` code |
+| `AUTH` | 401 | no | bearer middleware (§4.5) |
+| `FRAME_ID_CONFLICT` | 409 | no | ingest (§5.11.2) |
+| `DISK_FULL` | 507 | no | ingest below `disk_critical_free_gb` (§5.11.2, REL-12) |
+| `NOT_FOUND` | 404 | no | unknown session/frame |
+| `INTERNAL` | 500 | no | anything unhandled |
+
+One code, one status: `DISK_FULL` is 507 wherever it is raised. The M1-T08 task file currently says a *field-node* capture refused below the critical threshold answers 409 — that must move to 507, or the two refusals need different codes. A UI that maps codes to messages cannot also be asked to interpret the same code differently per route.
+
+`DeviceError` says *what* failed but not *which device*, while the UI needs to tell the operator that the mount stopped answering — hence the device-qualified timeout codes and the `ErrorCode::from_device_error(DeviceKind, &DeviceError)` mapping rather than a bare `From` impl. The status is a `u16`, not a framework type: `astroctl-core` sits below the API layer and must not pull axum into every crate (ADD §5.6).
 
 ### 4.3 Event schema
 

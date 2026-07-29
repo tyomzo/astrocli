@@ -1,7 +1,7 @@
 # M0-T04 — Configuration loading and validation
 
 **Milestone:** M0 · **Depends on:** M0-T01 · **Crates:** astroctl-core
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §4.4; PRD §8.1/§8.2 (YAML shapes, verbatim)
 
 ## Objective
@@ -19,7 +19,26 @@ the offending key, never silent default behavior.
 
 ## Acceptance criteria
 
-- [ ] Both PRD example YAMLs load and validate unchanged — this is the drift guard: `deny_unknown_fields` means PRD §8.1/§8.2 and these structs must agree exactly, in both directions. If the SDD references a key the PRD examples lack, the PRD is wrong and gets fixed (version bump + change note); do not add the field silently
-- [ ] Keys the design depends on are present and validated, not merely parsed: `mount.limits.slew_ttl_default_ms`/`slew_ttl_max_ms` (SDD §5.8.1), `server.max_command_age_ms` (§5.8.1), `camera.ops_via_cli` (§5.3.3), `camera.timeouts` (§5.3.1), `mount.serial` (§5.2.4), `storage.*` (§5.5, REL-12), `stacking_server.pacing` (§8.3.7), `server.runtime_worker_threads` (§7 — null means the per-node default, not one-per-core), stack-side `workers.*` (§5.12.3)
-- [ ] Fixture tests: unknown key, out-of-range value, missing required section — each error names the YAML path
-- [ ] `auth_token_env` handling: env var name captured, value never stored in the config struct debug output (redacted Debug impl)
+- [x] Both PRD example YAMLs load and validate unchanged — this is the drift guard: `deny_unknown_fields` means PRD §8.1/§8.2 and these structs must agree exactly, in both directions. If the SDD references a key the PRD examples lack, the PRD is wrong and gets fixed (version bump + change note); do not add the field silently
+- [x] Keys the design depends on are present and validated, not merely parsed: `mount.limits.slew_ttl_default_ms`/`slew_ttl_max_ms` (SDD §5.8.1), `server.max_command_age_ms` (§5.8.1), `camera.ops_via_cli` (§5.3.3), `camera.timeouts` (§5.3.1), `mount.serial` (§5.2.4), `storage.*` (§5.5, REL-12), `stacking_server.pacing` (§8.3.7), `server.runtime_worker_threads` (§7 — null means the per-node default, not one-per-core), stack-side `workers.*` (§5.12.3)
+- [x] Fixture tests: unknown key, out-of-range value, missing required section — each error names the YAML path
+- [x] `auth_token_env` handling: env var name captured, value never stored in the config struct debug output (redacted Debug impl)
+
+## Result notes
+
+- The drift guard is mechanical, not aspirational: `config/*.example.yaml` are byte-for-byte
+  copies of the PRD fenced blocks, and the test module `include_str!`s the PRD itself and
+  asserts the copies are still identical (reporting the first differing line) *before*
+  asserting they still load. Editing PRD §8.1/§8.2 without re-copying fails the build.
+- Audit of every config key referenced anywhere in the SDD, ADD, IMP and the task pack against
+  the PRD §8.1/§8.2 blocks found **no design-referenced key missing from the PRD** — the
+  §8.1/§8.2 completion in PRD change note 1.6.0 has held.
+- **Open PRD defect (not fixed here, needs an owner decision):** §8.1 `camera.driver` accepts
+  `ascom_alpaca`, but §8.1 defines no Alpaca address key under `camera` — only
+  `mount.ascom_host` exists. Under `deny_unknown_fields` that driver is unconfigurable. The
+  loader therefore rejects it at load with a message naming the gap, rather than accepting a
+  selection that cannot work. Fix is a commented `# ascom_host: "http://..."` under `camera:`
+  plus a PRD version bump; no Phase 1–3 code path is affected (Alpaca is HAL-10, later).
+- YAML crate: `yaml_serde` 0.10.4, the YAML organization's maintained fork of the deprecated
+  `serde_yaml`. Its errors already carry the dotted YAML path *and* line/column, so no
+  `serde_path_to_error` is needed.

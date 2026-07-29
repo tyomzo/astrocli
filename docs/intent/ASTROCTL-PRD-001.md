@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.13.0  
+**Version:** 1.14.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -27,6 +27,8 @@
 **Change note (1.12.2):** REL-03 annotated with hardware-verified camera recovery behaviour and the gvfs precondition; §4.2 goto accuracy measured at 0 counts error from 0.04° to 4°.
 
 **Change note (1.13.0):** §7 gains `chrono`, which was missing entirely despite SDD §4.3 specifying `DateTime<Utc>` — the dependency table listed no time crate at all. Feature selection is deliberate: no `clock`, so the backbone cannot reach for local time that SDD §2 confines to UI rendering. Surfaced by M0-T03.
+
+**Change note (1.14.0):** §7 gains `yaml_serde` (the config is YAML and no YAML crate was named). §8.1's `camera.driver` no longer offers `ascom_alpaca`: the value was selectable but had no address key to go with it, so under `deny_unknown_fields` an operator choosing it had nowhere to put the host. It returns with HAL-10. Both surfaced by M0-T04 during implementation.
 
 ---
 
@@ -1112,7 +1114,8 @@ mount:
   # ascom_host: "http://..."      # if driver=ascom_alpaca
 
 camera:
-  driver: gphoto2            # "gphoto2", "indi", "ascom_alpaca", "simulator"
+  driver: gphoto2            # "gphoto2", "indi", "simulator" ("ascom_alpaca" needs an
+                             #   address key that does not exist yet — arrives with HAL-10)
   default_iso: "1600"
   default_shutter: "30"
   default_format: "RAW+JPEG"
