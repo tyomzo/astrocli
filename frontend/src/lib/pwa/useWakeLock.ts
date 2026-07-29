@@ -18,7 +18,12 @@ import { useEffect, useState } from 'react';
  */
 
 export type WakeLockState =
-  /** No `navigator.wakeLock` (any browser that is not Chrome-on-Android, in practice). */
+  /**
+   * No `navigator.wakeLock`.
+   *
+   * In practice this is almost never an old browser — it is an **insecure origin**, which is why
+   * `DeviceCard` checks `isSecureContext` before it renders this state at all (`secureContext.ts`).
+   */
   | 'unsupported'
   /** Held: the screen will not sleep. */
   | 'held'
