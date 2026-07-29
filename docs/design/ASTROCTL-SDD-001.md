@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.7.0
+**Version:** 1.8.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.14.0 (requirements), ASTROCTL-ADD-001 v1.3.1 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.15.0 (requirements), ASTROCTL-ADD-001 v1.4.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -33,6 +33,8 @@
 **Change note (1.7.0):** §4.1/§4.2 corrected while implementing them (M0-T02). Four of the five were holes in the very property these sections exist to guarantee. `AltAz` carried **public raw `f64` fields** in a section whose stated purpose is making unit bugs unrepresentable — alt/az are now `AltDegrees`/`AzDegrees` newtypes, named `alt`/`az` to match the §4.3 payload. The **derived `Deserialize`** on the validating newtypes was a bypass around their own constructors, and deserialization is how every coordinate this system acts on arrives — now `#[serde(try_from = "f64")]`. `Axis`/`Direction`/`SlewSpeed` **lacked serde derives** although §5.8.1's slew route deserializes all three by name. The §4.2 HTTP mapping was **silent on `DeviceError::Protocol` and `Busy`** (now 502 non-retryable and 409), and the "closed enum shared with the UI" was never enumerated anywhere — it is now a table, with `retryable` stated per code rather than only for the 502 pair. `CoreError`, referenced by §4.1 but defined nowhere, is now specified.
 
 **Change note (1.6.1):** §3's crate graph drew `astroctl-safety → astroctl-drivers` as a compile-time dependency, contradicting ADD §5.6 rule 1 and its own §5.4, where `SafeMount` holds `Arc<dyn MountDevice>` — a HAL trait object, not a driver. Diagram corrected and the driver-naming rule stated explicitly.
+
+**Change note (1.8.0):** §5.9 given a real frontend design ahead of M0-T06, since that task sets the pattern five M1 tasks inherit. Stack settled (Tailwind over semantic tokens, headless primitives only where accessibility needs them, Zustand). **Colour architecture decided at M0 although night mode is Phase 4** — tokens now, `data-mode` override, true black surfaces — because the mechanism is cheap to establish and expensive to retrofit. Night-mode image handling specified, which nothing previously covered: a stretched star field is greyscale-white and would destroy the dark adaptation the mode protects, so image surfaces get a red-channel filter with a per-panel true-colour toggle. Touch targets raised to 60–70 px for primary controls on the grounds that the operator may be gloved. Store discipline expanded: selector-based subscription, three-state telemetry, resnapshot on `Lagged`.
 
 ---
 
@@ -632,7 +634,51 @@ One task serving two endpoints per client (§8.3 separation): `/ws` for JSON con
 
 ### 5.9 PWA (M1 scope)
 
-React + TypeScript, Vite build, output embedded in the binary via `include_dir!`. State: a thin store fed exclusively by WS events + snapshot (no REST polling); commands are REST calls that optimistically do nothing — UI state changes only when the corresponding event arrives (single source of truth). Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state (a tracking mount's motion is exactly predictable), rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
+**Stack.** React + TypeScript, Vite build, output embedded in the binary via `include_dir!`
+(ARC-02). Styling is **Tailwind** over a semantic token layer; headless primitives (Radix/Ark) are
+used only where accessible behaviour is genuinely needed — dialogs, sliders — not as a component
+library. State is **Zustand**. The reasoning is that bundle size is a *functional* requirement here
+rather than a nicety (USB-10 promises the shell opens while the tunnel is still connecting), and
+the visual language this app needs — near-black, red-capable, oversized targets, dense telemetry —
+is unusual enough that a general-purpose component library is something you fight rather than use.
+
+**Target platform.** Android/Chrome is the supported and tested target. iOS may work but is
+untested and is not gated by any acceptance criterion. **EXT-06 (Capacitor-readiness) is therefore
+advisory, not binding** — its stated motivation in PRD §11 was iOS PWA limitations. That buys three
+things worth having: the **Screen Wake Lock API**, so the display does not sleep mid-session while
+the operator watches live view; `beforeinstallprompt` for a real install flow rather than a
+share-sheet instruction; and reliance on service-worker cache persistence, which iOS evicts after
+about seven days of non-use and would otherwise have made USB-10's promise quietly conditional.
+
+**Colour architecture — decided at M0 even though night mode is Phase 4.** All colour resolves
+through semantic CSS custom properties (`--surface`, `--fg`, `--accent`, `--warn`, `--danger`),
+never literal values in components. USB-02's red/dim mode is then a `:root[data-mode="night"]`
+override in one file instead of a pass over every component. This ordering is deliberate: the
+*implementation* of night mode is Phase 4, but the *architecture that permits it cheaply* has to
+exist from the first component or it never will. Surfaces are true black rather than dark grey —
+better on the OLED panels these devices have, and better for dark adaptation.
+
+**Night mode and images.** A stretched star field is greyscale-white, so a preview at full
+brightness destroys exactly the dark adaptation the rest of night mode is protecting — recovery
+takes 20–30 minutes. Image surfaces therefore render through a red-channel filter at reduced
+brightness when night mode is active, with a clearly-labelled per-panel **"true colour"** toggle
+that auto-reverts after a short interval. The toggle is not a concession: framing and focus checks
+need honest pixels, and a mode the operator has to fight is a mode they will switch off entirely.
+
+**Touch targets.** USB-12's 44 px is the floor for incidental controls, not the goal for the ones
+that matter. The operator may be wearing gloves, which materially reduces pointing precision, so
+primary controls — D-pad, capture, e-stop — are **60–70 px**. The e-stop is larger still and holds
+a constant screen position across every view (USB-03) so it can be hit without looking at it.
+
+**Store discipline.** A thin store fed exclusively by WS events plus the connect snapshot — no REST
+polling. Commands are REST calls that **optimistically do nothing**: UI state changes only when the
+corresponding event arrives. On a link where a command may not have landed, optimistic UI actively
+lies about where the mount is, which is the one thing this display must never do. The store is
+shaped as an explicit reducer over the event stream, and subscription is selector-based because
+`mount.position` ticks at 1 Hz and must not re-render panels that do not read it. Telemetry carries
+three states — **confirmed, predicted, stale** — for the predictive display below. If the hub drops
+this client as a slow consumer (§5.8.3), the store must **resnapshot rather than resume from a
+hole**. Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state (a tracking mount's motion is exactly predictable), rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
 
 **The live-view panel must explain its own pauses.** During a capture the stream stops for about
 two seconds (§5.3.1 — one gphoto2 context, unavoidable). Driven by `capture.progress`, the panel

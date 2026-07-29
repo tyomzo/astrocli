@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.14.0  
+**Version:** 1.15.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -29,6 +29,8 @@
 **Change note (1.13.0):** §7 gains `chrono`, which was missing entirely despite SDD §4.3 specifying `DateTime<Utc>` — the dependency table listed no time crate at all. Feature selection is deliberate: no `clock`, so the backbone cannot reach for local time that SDD §2 confines to UI rendering. Surfaced by M0-T03.
 
 **Change note (1.14.0):** §7 gains `yaml_serde` (the config is YAML and no YAML crate was named). §8.1's `camera.driver` no longer offers `ascom_alpaca`: the value was selectable but had no address key to go with it, so under `deny_unknown_fields` an operator choosing it had nowhere to put the host. It returns with HAL-10. Both surfaced by M0-T04 during implementation.
+
+**Change note (1.15.0):** **Android is the supported and tested UI target**; iOS may work but is untested and gated by nothing. EXT-06 (Capacitor-readiness) becomes advisory rather than binding, since its stated motivation in §11 was iOS PWA limitations and there is no iOS device in the deployment. That permits Android capabilities the iOS-compatible subset would have forbidden — Screen Wake Lock so the display does not sleep mid-session, `beforeinstallprompt`, and reliance on service-worker cache persistence that iOS evicts after ~7 days. USB-09/ARC-14 narrowed accordingly.
 
 ---
 
@@ -933,7 +935,7 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 | ARC-11 | Frame transfer from field node to stacking server is resilient: local queue with retry, frames never lost if stacking server is temporarily unreachable or VPN tunnel drops |
 | ARC-12 | Calibration library lives on the stacking server and is managed independently of capture sessions |
 | ARC-13 | The operator's device (tablet, phone, or laptop) connects to the field node's web UI over VPN — the operator does not need to be physically co-located with the field rig |
-| ARC-14 | Web UI is delivered as a Progressive Web App (PWA) — installable to home screen on iOS and Android, launches full-screen without browser chrome, caches UI shell for offline availability. Any device with a modern browser and VPN access can operate the full system |
+| ARC-14 | Web UI is delivered as a Progressive Web App (PWA) — installable to the home screen on **Android**, launches full-screen without browser chrome, caches UI shell for offline availability. Any device with a modern browser and VPN access can operate the system; Android is what is tested |
 | ARC-15 | All inter-node communication (field node ↔ stacking server, browser ↔ field node, browser ↔ stacking server) assumes routed IP connectivity via VPN, not local network discovery |
 | ARC-16 | Three independent image processing pipelines (§5.9): control and live view run on the field node, processed pipeline runs on the stacking server — pipelines are decoupled and never block each other |
 | ARC-17 | Raw frames are the immutable source of truth; all processing pipelines read from stored frames, never modify them — reprocessing is a first-class operation, not an afterthought |
@@ -995,7 +997,7 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 | USB-06 | Stacking server status shows: connected/disconnected, queue depth, current stack frame count, last preview timestamp |
 | USB-07 | UI is fully functional over VPN from a device not co-located with the rig — all controls, previews, and status work remotely with no degradation beyond network latency |
 | USB-08 | Responsive layout: single-column on phone, multi-panel on tablet/desktop — all functionality accessible on both form factors |
-| USB-09 | PWA manifest with app name, icon set, theme color, and display: standalone — "Add to Home Screen" installs a proper app icon on iOS and Android |
+| USB-09 | PWA manifest with app name, icon set, theme color, and display: standalone — installable to the home screen on **Android** (the supported and tested target; iOS may work but is untested and not gated). Android's `beforeinstallprompt` is used for a real install flow |
 | USB-10 | Service worker caches the UI shell (HTML, JS, CSS, fonts, icons) so the app opens instantly even if the VPN tunnel is still connecting — data loads when connectivity is established |
 | USB-11 | Live view and stacking preview degrade gracefully over lower-bandwidth VPN links (adaptive JPEG quality, reduced frame rate) |
 | USB-12 | Touch-optimized controls: D-pad buttons, sliders, and capture button sized for finger interaction (minimum 44×44px tap targets) |
@@ -1009,7 +1011,7 @@ Non-functional requirements are **Must** unless marked otherwise inline.
 | EXT-03 | REST API is the primary integration surface; any external tool can drive the system via HTTP |
 | EXT-04 | Session sequences are defined as data (YAML/JSON), not code — editable and shareable |
 | EXT-05 | All events emitted on WebSocket for external monitoring/automation |
-| EXT-06 | PWA UI is structured for future Capacitor/Ionic wrapping — no browser-only APIs that would prevent packaging as a native app |
+| EXT-06 | PWA UI is structured for future Capacitor/Ionic wrapping where that costs nothing — **advisory, not binding**. Its motivation (§11) was iOS PWA limitations, and iOS is not a target. Android-only capabilities are therefore permitted where they materially improve the field experience: Screen Wake Lock so the display does not sleep mid-session, `beforeinstallprompt`, and service-worker cache persistence |
 
 ### 6.6 Security
 
@@ -1524,7 +1526,8 @@ Exit criteria: can autoguide with sub-arcsecond RMS, automatically flip at the m
 - Dedicated drivers for hardware beyond the reference implementations (Skywatcher mount, Canon gPhoto2, ASI/QHY guide cameras) — additional hardware is supported via INDI and ASCOM/Alpaca adapters (Phase 4), not bespoke drivers
 - Third-party driver development — the HAL enables community-contributed drivers but AstroCtl does not ship or maintain them
 - Online plate solving services (nova.astrometry.net) — all solving is local/offline
-- Native app store distribution (Capacitor/Ionic wrapper is a future option if PWA limitations arise on iOS, but not in initial scope)
+- Native app store distribution (a Capacitor/Ionic wrapper remains a future option, but iOS is not a target and its PWA limitations — the original motivation — do not apply)
+- iOS support: the PWA may work on iOS Safari but is untested and not gated by any acceptance criterion
 - Generative AI image enhancement — no GAN/diffusion-based "super-resolution" or detail synthesis; ML is limited to signal extraction and traditional-algorithm replacement (core principle: "ML enhances signal, never fabricates signal")
 - Training custom ML models — AstroCtl uses pre-trained models; training pipelines and datasets are out of scope
 - LLM fine-tuning — the system uses general-purpose LLMs with tool-use; no domain-specific fine-tuning is required or planned

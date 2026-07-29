@@ -1,12 +1,12 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.3.1
+**Version:** 1.4.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
-**Governing requirements:** ASTROCTL-PRD-001 v1.14.0
+**Governing requirements:** ASTROCTL-PRD-001 v1.15.0
 **Change note (1.1.0):** Implementation technology revised — Rust backbone with Python confined to stacking-server workers (ADR-03 reversed, ADR-13 added), aligning with the rifflab architecture.
 **Change note (1.2.0):** Guiding given an explicit architectural home (§5.2.1 Guiding Service, `astroctl-guiding` crate in §5.6) — GDE-* previously had no element. E-stop latency budget split into its three distinct measurement points (§9.1, §10). Repository-directory vs. artifact-name convention stated in §5.6. EXT-04 traced (§11).
 **Change note (1.2.1):** Governing-requirements pin advanced (dependency survey). §10's erfa risk restated: the mitigation depends on binding the *same C library astropy uses*, which the crate survey showed is not what the similarly-named `erfa` crate provides.
@@ -23,6 +23,8 @@
 **Change note (1.3.0):** §5.6 dependency rules 1 and 6 disambiguated during M0-T01, when they turned out not to be mechanically enforceable as written. Rule 1's "except the registry" had no literal implementation — `DriverRegistry` is a HAL type, so `astroctl-hal` cannot depend on the drivers it registers without a cycle; the rule now states that only the two binaries may name concrete drivers. Rule 6 conflicted with rule 5 over `astroctl-ipc`, which is worker-*related* but is inert protocol definitions; rule 6 now excludes GPU/ML runtimes and worker process management specifically, not the protocol crate.
 
 **Change note (1.3.1):** §5.5 gains the development/CI topology — two containers on separate network namespaces, which is how a single workstation exercises the two-node shape honestly and how the §9.1 latency and head-of-line-blocking requirements become automatically testable. Distinct from the STK-20 degenerate single-host case, which proves nothing about the deployment.
+
+**Change note (1.4.0):** ADR-12 extended — Android/Chrome is the supported PWA target and the iOS-compatible-subset discipline is recorded as rejected, with reasons. Paying its cost would have bought an option nobody holds while giving up Screen Wake Lock, which matters when the operator watches a live view for minutes at a time.
 
 ---
 
@@ -425,7 +427,7 @@ Per 12207 §6.4.4.3(d) — decisions, with alternatives considered and the reaso
 | ADR-09 | All GPU work (CuPy for array compute, PyTorch/ONNX for ML) lives in the Python compute workers, never in the backbone | GPU calls from the backbone (Rust CUDA via cudarc) | Fault isolation: a CUDA OOM/driver fault kills a worker, not the API; single owner of VRAM budget per worker (CMP-07); avoids the immature Rust CUDA ecosystem entirely |
 | ADR-10 | LLM agent as an ordinary authenticated API client; tools generated from OpenAPI + tier metadata | In-process function calls | ARC-20 (no privileged path); server-side tier enforcement stays the only gate (SEC-03); provider-agnostic by construction (LLM-16) |
 | ADR-11 | E-stop and safety limits live in the mount facade below the API | Enforcement in API layer or UI | Every caller passes through, including future scripting (MNT-15); e-stop path has a dedicated priority lane to the serial task (PRF-12) |
-| ADR-12 | React PWA served by the field node; WS-first state, REST for commands | Native app | ARC-02/ARC-14/EXT-06 mandates; Capacitor wrap remains open |
+| ADR-12 | React PWA served by the field node; WS-first state, REST for commands. **Android/Chrome is the supported target**; iOS untested, so EXT-06 is advisory and Android-only APIs (Screen Wake Lock, `beforeinstallprompt`) are permitted. Stack detailed in SDD §5.9 | Native app; iOS-compatible-subset discipline | ARC-02/ARC-14 mandates. The iOS-subset discipline was rejected because EXT-06's motivation was iOS PWA limitations and there is no iOS device in the deployment — paying its cost would buy an option nobody holds, while giving up Wake Lock, which matters when the operator watches a live view for minutes at a time |
 | ADR-13 | Worker IPC: versioned JSON over stdio, frames passed by filesystem path, workers supervised (spawn, health-ping, auto-restart) by the stack backbone. This IPC exists only inside the stacking server, between the Rust backbone and its Python child processes — it never crosses the network; field→stack frame delivery is HTTP per ADR-05, and the frame is on the stack's local disk before any worker sees it | gRPC/ZeroMQ (extra infrastructure for two co-located processes); PyO3 embedding (brings the GIL and Python crash domain into the backbone process — defeats the purpose) | Same-host processes need no network transport; stdio+paths is the rifflab-proven minimum; crash isolation preserved; protocol versioning catches drift at startup |
 
 ## 8. Candidate Architectures Evaluated
