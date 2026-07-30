@@ -32,11 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No toolchain action. The runner ships rustup, and rustup reads rust-toolchain.toml
+      # natively — `rustup show` triggers the install of the pinned version plus its components.
+      # The first draft used dtolnay/rust-toolchain with `toolchain: none` to mean "read the
+      # file"; the action treats that as a toolchain literally named `none` and fails before any
+      # gate runs. The version stays in exactly one place either way, which was the intent.
       - name: Install the pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          # Read from rust-toolchain.toml rather than restated; components come from it too.
-          toolchain: none
+        run: rustup show
 
       - uses: Swatinem/rust-cache@v2
         with:
