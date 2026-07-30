@@ -187,6 +187,11 @@ pub struct AppState {
     pub tickets: Arc<crate::ticket::TicketStore>,
     /// The latest event per stateful topic, for the connect snapshot (SDD §5.8.3).
     pub snapshots: Arc<crate::ws::SnapshotStore>,
+    /// The live-view fan-out and the camera stream feeding it (SDD §5.7, §8.3(5), M1-T09).
+    ///
+    /// One per node, not one per client: the camera has one sensor, and a second stream would be
+    /// a second USB conversation with a body that only has one to give.
+    pub liveview: Arc<crate::liveview::LiveViewHub>,
     /// Logging destination, for support questions.
     pub logging: LoggingInfo,
     /// The served certificate's expiry (SEC-07), or `None` on a plain-HTTP node.
@@ -201,6 +206,7 @@ pub struct AppState {
 ///
 /// `ApiError` itself cannot implement `IntoResponse`: it lives in `astroctl-core`, which sits
 /// below the API layer and must not pull axum into every crate in the workspace (SDD §4.2).
+#[derive(Debug)]
 pub struct ApiFailure(pub ApiError);
 
 impl IntoResponse for ApiFailure {
@@ -292,7 +298,30 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
         )
         .get("/api/camera/battery", RouteMeta::read(), camera::battery)
         .get("/api/camera/storage", RouteMeta::read(), camera::storage)
+        // Two more routes SDD §5.8.1's table does not list. §5.7 requires live view to be
+        // startable and stoppable — "stopping closes the stream server-side" is an M1-T09
+        // acceptance criterion — and the table has no row for either, because it describes the
+        // *socket* the frames arrive on and not the control that opens the tap.
+        //
+        // `low` and audited, matching the camera's other state-changing routes: starting live
+        // view moves no telescope, but it does start a sensor loop and a USB conversation, and a
+        // night where the stream was started nine times is a night whose log should say so.
+        .post(
+            "/api/camera/liveview/start",
+            RouteMeta::new(Tier::Low, true),
+            crate::liveview::start,
+        )
+        .post(
+            "/api/camera/liveview/stop",
+            RouteMeta::new(Tier::Low, true),
+            crate::liveview::stop,
+        )
         .get("/api/session/current", RouteMeta::read(), camera::session_current)
+        .get(
+            "/api/session/frames/{id}/preview.jpg",
+            RouteMeta::read(),
+            crate::liveview::preview,
+        )
         // ADR-07. Audited: a call that changes state on the other node is exactly as consequential
         // as one that changes state here, and this node cannot tell which is which — so it records
         // every one of them.
@@ -311,7 +340,7 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
     (api.into_router(), declarations)
 }
 
-/// The ticket-authenticated surface: `/ws`, and nothing else (SDD §4.5, §5.8.3).
+/// The ticket-authenticated surface: `/ws` and `/ws/liveview` (SDD §4.5, §5.8.3).
 ///
 /// Separate from [`router`] because it is authenticated differently, and separate at the
 /// *router* level rather than by a path exemption inside [`require_bearer`]. The distinction
@@ -324,7 +353,14 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
 /// false` — the record would fire on the *handshake*, reporting a 101 and a latency that is the
 /// upgrade rather than the session, which is a log line that looks like information and is not.
 pub fn ws_router() -> (Router<AppState>, Vec<RouteDecl>) {
-    let ws = ApiRouter::<AppState>::new().get("/ws", RouteMeta::read(), crate::ws::upgrade);
+    let ws = ApiRouter::<AppState>::new()
+        .get("/ws", RouteMeta::read(), crate::ws::upgrade)
+        // §8.3(5)'s second socket. It belongs *here*, beside `/ws`, for the reason this router
+        // exists at all: both are ticket-authenticated and neither may pass through the bearer
+        // layer. A liveview route added to `router()` instead would demand a bearer header the
+        // browser cannot attach to a WebSocket upgrade, and would look like a working route on
+        // every non-browser client.
+        .get("/ws/liveview", RouteMeta::read(), crate::liveview::upgrade);
     let declarations = ws.declarations();
     (ws.into_router(), declarations)
 }
@@ -901,37 +937,67 @@ mod tests {
         assert_eq!(ack["tier"], "low");
         assert_eq!(ack["audit"], true);
 
+        // The live-view controls and the preview image (M1-T09). None of the three is in
+        // §5.8.1's table — the table names the socket the frames arrive on, not the tap that
+        // opens it — so the declaration is where they are pinned.
+        let start = routes
+            .iter()
+            .find(|r| r["path"] == "/api/camera/liveview/start")
+            .expect("live view start is declared");
+        assert_eq!(start["method"], "POST");
+        assert_eq!(start["tier"], "low");
+        assert_eq!(start["audit"], true);
+
+        let preview = routes
+            .iter()
+            .find(|r| r["path"] == "/api/session/frames/{id}/preview.jpg")
+            .expect("the preview image is declared");
+        assert_eq!(preview["method"], "GET");
+        assert_eq!(
+            preview["tier"], "read",
+            "serving a cached image reads state and changes none"
+        );
+
         // Every route the router serves is declared — that is the §8.2 invariant, and the
         // declaration list is the only place a route can come from. The count is the review
         // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1,
-        // 15 → 16 is M1-T05's e-stop, and 16 → 26 is M1-T08's nine camera/session rows plus the
-        // fault acknowledgement. `/ws` is *not* among them because it is declared by
+        // 15 → 16 is M1-T05's e-stop, 16 → 26 is M1-T08's nine camera/session rows plus the
+        // fault acknowledgement, and 26 → 29 is M1-T09's live-view start/stop and the preview
+        // image. `/ws` and `/ws/liveview` are *not* among them because they are declared by
         // `ws_router()`, which is authenticated by ticket rather than by the bearer layer this
         // test drives.
-        assert_eq!(routes.len(), 26);
+        assert_eq!(routes.len(), 29);
     }
 
-    /// `/ws` is declared, published and outside the bearer layer — all three, because any two of
-    /// them without the third is a bug: undeclared means §8.2's table lies, unpublished means the
-    /// PWA cannot discover it, and inside the layer means a browser can never connect.
+    /// Both sockets are declared, published and outside the bearer layer — all three, because any
+    /// two of them without the third is a bug: undeclared means §8.2's table lies, unpublished
+    /// means the PWA cannot discover it, and inside the layer means a browser can never connect.
     #[test]
-    fn the_ws_route_is_declared_separately_from_the_bearer_authenticated_surface() {
+    fn the_ws_routes_are_declared_separately_from_the_bearer_authenticated_surface() {
         let (_, bearer) = router();
-        assert!(
-            !bearer.iter().any(|r| r.path == "/ws"),
-            "/ws must not be in the bearer-authenticated table (SDD §4.5: ticket, not header)"
-        );
+        for path in ["/ws", "/ws/liveview"] {
+            assert!(
+                !bearer.iter().any(|r| r.path == path),
+                "{path} must not be in the bearer-authenticated table (SDD §4.5: ticket, not \
+                 header) — a browser cannot attach a header to a WebSocket upgrade"
+            );
+        }
 
         let (_, ws) = ws_router();
-        assert_eq!(ws.len(), 1);
-        assert_eq!(ws[0].path, "/ws");
-        assert_eq!(ws[0].method, "GET");
-        assert_eq!(ws[0].meta.tier, Tier::Read);
-        assert!(
-            !ws[0].meta.audit,
-            "the audit record would fire on the handshake and report the upgrade's latency as \
-             the session's, which looks like information and is not"
+        assert_eq!(
+            ws.iter().map(|r| r.path).collect::<Vec<_>>(),
+            vec!["/ws", "/ws/liveview"],
+            "§8.3(5)'s two sockets, both ticket-authenticated"
         );
+        for route in &ws {
+            assert_eq!(route.method, "GET");
+            assert_eq!(route.meta.tier, Tier::Read);
+            assert!(
+                !route.meta.audit,
+                "the audit record would fire on the handshake and report the upgrade's latency \
+                 as the session's, which looks like information and is not"
+            );
+        }
     }
 
     #[tokio::test]

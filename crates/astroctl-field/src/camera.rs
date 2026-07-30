@@ -219,13 +219,50 @@ impl CameraFacade {
     /// up — so this is `INTERNAL` rather than `NOT_FOUND`: a node serving requests without a
     /// session has a startup bug, and telling the operator "no session" would send them looking
     /// for something to create.
-    fn session(&self) -> Result<Arc<Session>, ApiError> {
+    pub fn session(&self) -> Result<Arc<Session>, ApiError> {
         self.store.current().ok_or_else(|| {
             ApiError::new(
                 ErrorCode::Internal,
                 "this node has no open session; it should have opened one at startup (SDD §8.1)",
             )
         })
+    }
+
+    /// Subscribe to the camera's live-view stream (CAM-05, SDD §5.7 source 1).
+    ///
+    /// Thin on purpose: the driver's own `live_view_stream` is idempotent — two calls are two
+    /// cursors on one stream, not two sensor loops — so there is nothing for the facade to
+    /// arbitrate. What it does add is the §4.2 envelope, so live view refuses on a disconnected
+    /// camera the same way every other camera route does.
+    ///
+    /// **The stream pausing during a capture is not this layer's problem.** The driver skips
+    /// frames it cannot take rather than queueing them (M1-T06's `try_acquire`), and SDD §5.7
+    /// requires the gap be treated as normal — no reconnect, no alert. Nothing here watches for
+    /// it, which is what "treated as normal" means in code.
+    ///
+    /// # Errors
+    ///
+    /// The camera's own refusal — `NOT_CONNECTED` most often.
+    pub async fn live_view_stream(
+        &self,
+    ) -> Result<astroctl_hal::stream::FrameStream<astroctl_hal::camera::LiveViewFrame>, ApiError>
+    {
+        self.device
+            .live_view_stream()
+            .await
+            .map_err(|e| camera_failure(&e))
+    }
+
+    /// Tell the driver to stop producing live-view frames.
+    ///
+    /// # Errors
+    ///
+    /// The camera's own refusal.
+    pub async fn stop_live_view(&self) -> Result<(), ApiError> {
+        self.device
+            .stop_live_view()
+            .await
+            .map_err(|e| camera_failure(&e))
     }
 
     /// `GET /api/session/current` — SDD §5.8.1's "session.json view + frame list".
