@@ -414,12 +414,16 @@ mod tests {
     #[tokio::test]
     async fn an_undeclared_api_path_is_404_once_the_token_is_valid() {
         let node = TestNode::authenticated("s3cret");
-        // `/api/transfer/status` is in SDD §5.8.1's table and not in this build (M1-T11). That
-        // makes it the honest example: a route the design promises, that a client may well try,
-        // and that must answer 404 rather than the app shell. This test used `/api/mount/position`
-        // until M1-T03 declared it and `/api/camera/capture` until M1-T08 did — which is the
-        // failure mode the check exists for, caught twice now by the check itself.
-        let answer = get(&node, "/api/transfer/status", Some("s3cret")).await;
+        // `/api/planning/lst` is in ADD §5.7's route map and is Phase 2a, so it is not in this
+        // build. That makes it the honest example: a route the design promises, that a client may
+        // well try, and that must answer 404 rather than the app shell.
+        //
+        // This test used `/api/mount/position` until M1-T03 declared it, `/api/camera/capture`
+        // until M1-T08 did, and `/api/transfer/status` until M1-T11 did — caught three times now
+        // by the check itself, which is the failure mode it exists for. The third one exhausted
+        // SDD §5.8.1's Phase 1 table: **every row in it is now declared**, so the example had to
+        // move out to a later phase's surface, and there is no Phase 1 route left to move it to.
+        let answer = get(&node, "/api/planning/lst", Some("s3cret")).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.json()["code"], "NOT_FOUND");
         assert_eq!(answer.json()["retryable"], false);

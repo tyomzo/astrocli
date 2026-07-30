@@ -92,6 +92,7 @@ dependencies = [
  "astroctl-pipeline",
  "astroctl-safety",
  "astroctl-session",
+ "astroctl-transfer",
  "axum",
  "chrono",
  "futures-util",
@@ -230,6 +231,20 @@ name = "astroctl-transfer"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "axum",
+ "chrono",
+ "futures-util",
+ "getrandom 0.2.17",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

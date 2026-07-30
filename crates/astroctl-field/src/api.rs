@@ -184,6 +184,10 @@ pub struct AppState {
     /// status poll share this. It carries the frame store, so `/api/session/*` reaches the session
     /// through the same handle that writes to it.
     pub camera: Arc<crate::camera::CameraFacade>,
+    /// The transfer queue (SDD §5.10, M1-T11) — `/api/transfer/status` reads it, and the upload
+    /// loop drains it. `None` inside when this node does not transfer; the route exists either
+    /// way so that authentication does not behave differently depending on configuration.
+    pub transfer: Arc<crate::transfer::TransferFacade>,
     /// Outstanding WebSocket tickets (SDD §4.5).
     pub tickets: Arc<crate::ticket::TicketStore>,
     /// Executed `command_id`s and their answers (SDD §5.8.1, §8.3(4), M1-T10).
@@ -394,6 +398,15 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
             "/api/session/frames/{id}/preview.jpg",
             RouteMeta::read(),
             crate::liveview::preview,
+        )
+        // SDD §5.10.4. `read`/`NotACommand`: it observes the upload queue and changes nothing —
+        // not even the queue's own state, which only the drain loop moves. Unaudited for the same
+        // reason every other `read` row is: §8.2 puts the audit log on state changes, and "someone
+        // looked at the queue depth" is not one.
+        .get(
+            "/api/transfer/status",
+            RouteMeta::read(),
+            crate::transfer::status,
         )
         // ADR-07. Audited: a call that changes state on the other node is exactly as consequential
         // as one that changes state here, and this node cannot tell which is which — so it records
@@ -1088,11 +1101,11 @@ mod tests {
         // declaration list is the only place a route can come from. The count is the review
         // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1,
         // 15 → 16 is M1-T05's e-stop, 16 → 26 is M1-T08's nine camera/session rows plus the
-        // fault acknowledgement, and 26 → 29 is M1-T09's live-view start/stop and the preview
-        // image. `/ws` and `/ws/liveview` are *not* among them because they are declared by
-        // `ws_router()`, which is authenticated by ticket rather than by the bearer layer this
-        // test drives.
-        assert_eq!(routes.len(), 29);
+        // fault acknowledgement, 26 → 29 is M1-T09's live-view start/stop and the preview
+        // image, and 29 → 30 is M1-T11's `/api/transfer/status`. `/ws` and `/ws/liveview` are
+        // *not* among them because they are declared by `ws_router()`, which is authenticated by
+        // ticket rather than by the bearer layer this test drives.
+        assert_eq!(routes.len(), 30);
     }
 
     /// The route-eleven guard (M1-T10): no route that can change state escapes classification.

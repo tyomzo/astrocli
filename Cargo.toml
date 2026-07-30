@@ -140,6 +140,19 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # of which should be anywhere near a security token. Already in the tree under `ring`.
 getrandom = { version = "0.2" }
 
+# --- added by M1-T11 (transfer agent: the sending half of ADR-05) ---
+# The request/response types and `Bytes`/`Frame`. The client itself is `hyper-util`'s legacy
+# client, already in the tree for the `/stack/*` proxy (ADR-07), so the upload costs no second
+# HTTP stack. Deliberately not `reqwest`: it would bring a TLS stack, a cookie jar and a second
+# connection pool to send one multipart POST over a VPN that is already the encrypted layer
+# (PRD §7, ADD §5.5) — and its multipart body buffers, which is the one thing a 25 MB frame on a
+# Pi must not do.
+hyper = { version = "1", features = ["client", "http1"] }
+# `StreamBody` — the sender's half of §5.11.2's "never whole in RAM". The frame is read off the
+# SD card in chunks and handed to the socket as it goes, so peak memory is one chunk rather than
+# one frame.
+http-body-util = { version = "0.1" }
+
 # --- added by M1-T06 (simulator camera: FITS + JPEG renditions) ---
 # The JPEG half of the simulator's RAW+JPEG pair and every live-view frame (CAM-05). Chosen over
 # `image` and over `mozjpeg`: `image` is a whole codec framework where one encoder is wanted, and

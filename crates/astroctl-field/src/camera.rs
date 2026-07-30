@@ -213,6 +213,16 @@ impl CameraFacade {
         cleared
     }
 
+    /// The frame store this facade writes through.
+    ///
+    /// Exposed for M1-T11's queue reconciliation, which needs to list what is actually on disk.
+    /// A handle rather than a listing, because the store is the thing that cannot go stale — a
+    /// snapshot taken here would be wrong by the next exposure.
+    #[must_use]
+    pub fn store(&self) -> Arc<FrameStore> {
+        Arc::clone(&self.store)
+    }
+
     /// The active session, or the failure to report when there is not one.
     ///
     /// There always is one on a started node — SDD §8.1 opens or creates it before the API comes

@@ -23,6 +23,10 @@ astroctl-safety = { workspace = true }
 # id reservation, the disk gate and the sha256 all live there (SDD §5.5), and this binary is
 # where the camera driver and the session layout meet.
 astroctl-session = { workspace = true }
+# M1-T11: the durable upload queue of SDD §5.10. The crate owns the journal, the multipart POST
+# and the drain loop; this binary owns the `frame.saved` subscription, because recovering from a
+# missed event means reconciling against the frame store and the frame store is held here.
+astroctl-transfer = { workspace = true }
 # M1-T09: the decode/stretch/encode of SDD §5.7. It is pure — bytes in, bytes out — so this
 # binary owns everything about *when* a preview is rendered (the depth-1 queue, the blocking
 # pool, the cache path, the announcement) and the crate owns only what the image looks like.
