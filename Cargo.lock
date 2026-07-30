@@ -114,6 +114,11 @@ name = "astroctl-ipc"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
