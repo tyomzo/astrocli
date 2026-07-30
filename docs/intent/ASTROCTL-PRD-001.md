@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.17.0  
+**Version:** 1.18.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -39,6 +39,8 @@
 **Change note (1.17.0):** **§8.1 gains the `server.tls` block**, landed by M0-T09 together with the config struct and the shipped example — the three artefacts 1.16.0 said would move in one change set, and did. `cert_path`, `key_path`, `warn_days_before_expiry`. It ships **commented out**, because absence has to mean plain HTTP: `localhost` development is already a secure context to a browser, and the two-container harness of M0-T08 has no name to certify. A block that is present but unreadable is a startup failure naming the path, never a silent downgrade. SEC-07's expiry now appears in `/api/system/health` as `cert_expires_at`/`cert_days_remaining`, with `status` degrading to `warn` inside the threshold and staying there past it. Operator procedure, with the traps that cost time in practice, is `docs/ops/tls-setup.md`.
 
 **Change note (1.16.0):** **TLS on the operator↔field connection promoted from a "Could" to a Must**, and the reason recorded, after testing the M0-T06 PWA on a real Android phone over the LAN. Chrome gates the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 were unreachable over plain HTTP at any address other than `localhost` — and a VPN does not substitute, because the browser judges the origin and a tunnelled `http://` origin is still insecure. SEC-05 previously called TLS optional while ADD §4 already drew `HTTPS/WSS` on that link; the two now agree. New: SEC-06 (issuance must not require inbound exposure — DNS-01 or an externally issued certificate, so SEC-01 holds), SEC-07 (certificate expiry in `/api/system/health`, because an expired certificate revokes the secure context exactly as a missing one does), SEC-08 (the hostname must resolve through the VPN's DNS, or the UI becomes unreachable precisely when the field node runs standalone — defeating ARC-06). Inter-node TLS stays optional as SEC-09; no browser is involved on that path. §8.1 deliberately does **not** yet carry the `server.tls` block: a drift test holds the PRD schema, the shipped example and the config struct identical, and the config denies unknown fields, so the schema moves in M0-T09 with the implementation rather than ahead of it. An absent block will mean plain HTTP; an unreadable one a startup failure, never a silent downgrade.
+
+**Change note (1.18.0):** STK-35 added — the STK-08 registration transform republished as drift telemetry. Recorded from a design conversation (2026-07-30) about mixing the camera stream into pointing: within-frame correction needs the GDE guide camera and absolute anchoring stays with plate solving, but *between* frames the stacking server is already measuring drift every time it registers a frame, and nobody had scheduled that number's trip back to the operator. Nearly free in 2b — the ingest quality sidecar (M1-T12) already carries per-frame metadata the direction it needs to flow — and the drift direction doubles as a polar-alignment diagnostic.
 
 ---
 
@@ -508,6 +510,7 @@ The stacking method determines how pixel values from aligned frames are combined
 | STK-32 | Live stacking approximation mode: for methods that require all frames (median, sigma-clip), use a running approximation during live capture, then offer full-accuracy re-stack on demand or at session end | Should |
 | STK-33 | Debayer method selectable: bilinear, VNG, AHD, DCB — controls how the Bayer-pattern RAW sensor data is interpolated to RGB | Should |
 | STK-34 | Extended stacking methods: winsorized sigma-clip, min/max clip, linear fit rejection (not live-capable, computationally expensive — see method table) | Could |
+| STK-35 | **Registration offsets fed back as drift telemetry.** The registration transform STK-08 already computes for every frame — the per-frame translation against the reference — is republished to the field node alongside the STK-28 quality metrics, and surfaced next to the pointing readout as a drift rate with its trend. This is a by-product, not a new measurement: the stack must register every frame anyway, so drift observation between plate-solve anchors costs one field in data that already flows (the ingest control/quality sidecar). The drift *direction* is diagnostic and shown as such — declination drift indicates polar misalignment, RA drift a tracking-rate error — so an imaging session quietly measures polar alignment as a side effect. Differential only, by design: registration sees motion relative to the reference frame and cannot re-anchor pointing; absolute correction remains plate solving's job (sync). Alert when the rate trends toward the exposure length that would fail STK-09, *before* frames start being rejected | Could |
 
 **Stacking pipeline per frame (on stacking server):**
 
