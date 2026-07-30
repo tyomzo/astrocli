@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.19.0
+**Version:** 1.21.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -68,6 +68,26 @@
 **Change note (1.19.0):** two reconciliations from M1-T08 building §5.3.2 against the real T06/T07 handoffs. **The capture flow's ownership rule is broken at the driver boundary and the workaround is recorded:** §5.3.2 and `StagedFrame` both want the driver writing *into* the store's staged temporary, but HAL-03's `CaptureRequest{dir, stem}` has the driver append its own extension and manage its own temporary — there is no way to hand a driver the staged file. M1 captures into a session-owned scratch directory and renames onto the staged path, which preserves every durability property (the driver fsyncs the bytes before `capture` returns; `commit_frame`'s directory fsync makes the name durable). The honest fix is `CaptureRequest` carrying a full destination path, and it belongs to M2 when the gphoto2 driver defines what a real camera can accept. **`frame.saved` fires at `commit_frame`, not after the metadata write** — §5.3.2's ordering contradicted §5.5 note 3 and §4.3, which both say the frame is durable at commit; the sidecar is rebuildable and the frame is not, so the event announces the thing that cannot be re-made. §5.3.2's sequence is corrected to match. Also noted: `CaptureState` is exposing → downloading → saved; the task file's `saving` stage never existed in §4.3 and the exposure→download transition is inferred (one await, no progress callback) until the real driver can observe it.
 
 **Change note (1.20.0):** §5.8.1's staleness paragraph gains the six things M1-T10 had to decide before it could be implemented, and one correction. The correction first: the paragraph lists **"tracking off" among the stopping commands that are never staleness-rejected, but gives it no route** — it is a `mode` on `/api/mount/tracking`, so a per-route classification cannot express it and a per-*body* one would put a safety property in a field the client fills in. `/api/mount/tracking` is therefore `motion_initiating` whole, which over-refuses exactly one command whose refusal leaves the mount tracking — the state §7 already calls the safe one — while every stop that must never be refused (`slew/stop`, `capture/abort`, `estop`) has a route of its own. The five gaps: the envelope **travels in headers**, because §5.8.1's own route table writes the bodies without it and half the mutation surface (`park`, `unpark`, `capture/abort`, `fault/ack`, both live-view controls) declares no body extractor at all — putting it in the body would make a JSON body mandatory on `/api/mount/slew/stop`, reintroducing on a *stop* the parse-failure path §5.8.2 exists to remove; **only 2xx outcomes are replayable**, since a cached `502` would turn one bad cable moment into a permanently refused command and a cached `409 BUSY` would refuse a goto for five minutes after the mount went idle; **a concurrent duplicate is `409`, not a second execution**, held by a reservation that a dropped client releases, because the flaky tunnel this mechanism is for is exactly what cancels a handler mid-flight; **`/api/auth/ws-ticket` takes no envelope**, since replaying a nonce hands the second caller a ticket the first one spent; and **a future `issued_at` is skew, not staleness** — only "older than" refuses, or a fast clock would be unrecoverable. §8.3(4)'s "retries are idempotent" is bounded at 1024 entries, 5 min, 8 KiB per body. §8.2's `RouteMeta` gains `CommandClass` beside `tier`: a second axis, not a derivation, because `slew/stop` is `low`/`Stopping` and `park` is `high`/`MotionInitiating`. Landed by M1-T10.
+**Change note (1.21.0):** §5.10 corrected and completed by building it; the header version is also
+corrected, having been left at 1.19.0 when 1.20.0's note was added. **§5.10.1's `CREATE TABLE` does
+not parse** — it declares `session_id` twice and puts the `PRIMARY KEY` table constraint in the
+middle of the column list, which SQLite's grammar does not accept. Rewritten, with `last_error`
+added, because §5.10.1 makes `failed` "require operator action" while giving the operator no way to
+learn what the refusal was once the alert has scrolled past. **The terminal-state rule is narrowed
+from "a 4xx that is not 408/429" to the three codes §5.11.2 already calls definitive.** That rule
+predates §5.11.2 and is now contradicted by it (`507` is retryable, a dropped body is 5xx *because*
+it must not be terminal); read literally it would park an entire night's queue on a mistyped token,
+since `401` is a 4xx and is not 408/429. Parking is the only irreversible act this element performs
+and it now happens only on a verdict about the frame itself. **`queue_depth` is defined** to include
+the frame in flight, and **`state` is recorded as having no value for "reachable but refusing"** —
+a `507` is reported as `offline` and distinguished by its alert code, with the fourth state named as
+the right fix and deferred, since it is an §4.3 change. **The `frame.saved` subscription is placed in
+the field binary**, with the reconciliation that a dropped event requires — which also closes an
+unnamed window in §5.10.3, a node dying between `frame.saved` and the journal insert, in which the
+frame is never offered at all. §5.10.2's loop gains the §5.11.1 pre-flight and the insertion-order
+tiebreak that makes "drains in order" true at millisecond resolution. `synchronous = FULL` is argued
+rather than assumed. §8.3(7) remains unenforced per §5.10.4, and the agent now says so in its startup
+log rather than only in this document. Landed by M1-T11.
 
 ---
 
@@ -1062,30 +1082,66 @@ One SQLite database, `<queue_dir>/transfer.db`, WAL mode, single writer:
 
 ```sql
 CREATE TABLE queue (
-  session_id   TEXT NOT NULL,         -- 2026-07-29_ngc7000
-  frame_id     TEXT NOT NULL,         -- light_00042 — per-session counter (§5.5), so the
+  session_id   TEXT    NOT NULL,      -- 2026-07-29_ngc7000
+  frame_id     TEXT    NOT NULL,      -- light_00042 — per-session counter (§5.5), so the
                                       -- id alone recurs in every session; §5.11.2's dedup
                                       -- correction applies to this table identically
-  PRIMARY KEY (session_id, frame_id),
-  session_id   TEXT NOT NULL,
-  path         TEXT NOT NULL,         -- absolute; frame lives in the session dir, not copied
-  sha256       TEXT NOT NULL,
+  path         TEXT    NOT NULL,      -- absolute; frame lives in the session dir, not copied
+  sha256       TEXT    NOT NULL,
   size_bytes   INTEGER NOT NULL,
-  state        TEXT NOT NULL,         -- queued | uploading | acked | failed
+  state        TEXT    NOT NULL,      -- queued | uploading | acked | failed
   attempts     INTEGER NOT NULL DEFAULT 0,
-  queued_ts    TEXT NOT NULL,
+  queued_ts    TEXT    NOT NULL,
   acked_ts     TEXT,
-  reclaimable  INTEGER NOT NULL DEFAULT 0
+  reclaimable  INTEGER NOT NULL DEFAULT 0,
+  last_error   TEXT,                  -- why the last attempt failed; a `failed` row that
+                                      -- cannot say why asks the operator to reconstruct a
+                                      -- refusal from a log file that has already rotated
+  PRIMARY KEY (session_id, frame_id)  -- a table constraint, so it follows the columns
 );
+CREATE INDEX queue_by_age ON queue (state, queued_ts);
 ```
+
+`synchronous = FULL`, for the mirror image of the reason §5.11.3 gives on the receiving side. There
+an ack is a durability claim; here an **enqueue is a delivery promise**, and the two directions cost
+differently: a lost `acked` row costs one deduplicated retransmission, while a lost `queued` row is a
+frame that is never sent at all — nothing rescans the session directory, so the row is the only
+record that the frame is owed. At one exposure every thirty seconds the extra fsync is unmeasurable.
+
+`frame.saved` (§4.3) carries no `session_id`, so the first half of the key is derived from the frame's
+path — `<sessions>/<session_id>/frames/<frame_id>.<ext>` (§5.5). Deriving it per frame rather than
+holding "the current session" is the correct reading and not merely the available one: a node that
+rolls over to a new session would otherwise keep filing frames under the old id, and the archive
+would mirror them into the wrong directory.
 
 Frames are **referenced, never copied** into a spool: `queue_dir` holds only the journal. This
 keeps the write-once frame the single copy on the field node (REL-11) and makes enqueue O(1).
 
 State transitions: `queued → uploading → acked`, with `uploading → queued` on any failure.
-`failed` is terminal and requires operator action; it is reached only when the stack node
-returns a *definitive* rejection (checksum mismatch after re-read, or a 4xx that is not 408/429).
-Transport failure is never terminal — an unreachable stack is a normal operating state.
+`failed` is terminal and requires operator action. Transport failure is never terminal — an
+unreachable stack is a normal operating state.
+
+**What makes a rejection definitive is that it is about the frame, not that it is a 4xx.** This
+paragraph originally said "a 4xx that is not 408/429", which predates §5.11.2: that section then
+enumerated the answers the receiver actually gives and made two of them disagree with their status
+class — `507 DISK_FULL` carries `retryable: true`, and a dropped body is mapped to 5xx *because*
+abandoning a good frame over a bad link would lose it. The status class is therefore no longer the
+discriminator. Exactly three codes park a frame, and they are the three §5.11.2's closing paragraph
+already calls definitive: **`CHECKSUM_MISMATCH`, `VALIDATION`, `FRAME_ID_CONFLICT`**. Every other
+refusal is about the link or the deployment — a `401` is a token the operator can fix, a `404` is a
+node that has not been upgraded yet, a `507` is a disk that can be emptied — and each becomes
+correct again without the frame changing at all. Parking is the only irreversible thing this element
+does, and the blanket rule would have spent a whole night's queue on a mistyped token.
+
+Two locally-determined refusals join them, because no retry can change them either: a frame whose
+file has been removed (`FRAME_MISSING`), and one whose size on disk no longer matches the size
+recorded with its checksum (`FRAME_CHANGED`). Both are checked before the body is committed to, so
+they cost a `stat` rather than 25 MB of a shaped link.
+
+A `200` whose echoed checksum is *not* the one sent is neither an ack nor a refusal — it is an
+exchange that cannot be interpreted, so the frame's fate is unknown and the only way to learn it is
+to ask again. It is re-offered a bounded number of times and then parked; unbounded retry of an
+answer nobody can read is a queue that never drains.
 
 #### 5.10.2 Upload loop
 
@@ -1094,11 +1150,27 @@ concurrency buys nothing on a constrained tunnel):
 
 ```
 subscribe frame.saved ─► insert row (queued) ─► notify uploader
-uploader: pick oldest queued ─► mark uploading ─► POST multipart to stack /api/ingest
-          ─► on 200 {sha256, stored}: verify echoed sha == ours
+uploader: pick oldest queued ─► mark uploading ─► HEAD pre-flight (§5.11.1) ─► POST multipart
+          ─► on 204 + matching X-Astroctl-Sha256: acked without sending a body
+          ─► on 200 {sha256, stored, duplicate}: verify echoed sha == ours
                  ─► mark acked, reclaimable=1, emit transfer.acked
-          ─► on transport error / 5xx / timeout: mark queued, attempts+=1, backoff
+          ─► on transport error / 5xx / timeout / 507: mark queued, attempts+=1, backoff
 ```
+
+"Pick oldest queued" is ordered by `queued_ts` **then insertion order**. The tiebreak is
+load-bearing rather than pedantic: §2 fixes timestamps at millisecond resolution, so two frames
+enqueued in the same millisecond would otherwise drain in whatever order the database reached them,
+and "the queue drains in order" is a property an operator watches happen.
+
+**The `frame.saved` subscription belongs to the field binary, not to this crate.** The bus drops
+events for a slow subscriber rather than applying backpressure (§4.3), and a missed `frame.saved` is
+a frame that is never queued and therefore never archived — with no symptom until someone counts
+frames on the far end. The only recovery is to reconcile the queue against the frames actually on
+disk, and the thing that knows what is on disk is the frame store (§5.5), which the binary holds.
+That reconciliation also closes a window this section did not name: a node that dies between
+`frame.saved` and the insert would otherwise never offer that frame at all, so it runs at startup as
+well as on lag. It reads each frame's checksum from `control/quality_<id>.json` rather than
+recomputing it, and only re-hashes a frame whose sidecar is missing.
 
 Backoff is capped exponential from `stacking_server.retry_interval` (config), doubling to a
 5-minute ceiling. **One** `alert` is emitted when the link transitions to offline and one when
@@ -1116,7 +1188,23 @@ that the archive of record has the frame.
 
 #### 5.10.4 Interface
 
-`GET /api/transfer/status` → `{state, queue_depth, oldest_queued_age_s, last_ack_ts, attempts_current}`.
+`GET /api/transfer/status` → `{v, state, queue_depth, oldest_queued_age_s, last_ack_ts, attempts_current}`.
+
+`queue_depth` counts `queued` **and** `uploading` — everything this node still owes the archive. The
+operator's question behind the field is "how many frames have not got there yet", and a frame halfway
+up the link has not; counting only `queued` would make a queue with one frame left in it read `0` for
+the twenty minutes that frame is being uploaded, which is exactly when someone is watching.
+`attempts_current` is the attempt counter of the row at the head of that order, so it is the counter
+of the frame the operator can see stalling.
+
+`state` has no value for "reachable but refusing". §4.3 gives three — `idle`, `uploading`, `offline`
+— and a stack node answering `507 DISK_FULL` is none of them: it is reachable, so `offline` is
+literally wrong, but the queue is not draining, so `idle` would be a lie and `uploading` a worse one.
+It is reported as `offline`, which is the only one of the three that makes the PWA show a problem,
+and the distinction the operator needs is carried by the `alert` code (`STACK_DISK_FULL` rather than
+`STACK_UNREACHABLE`) instead. A fourth state is the right fix and is an §4.3 change, so it is not
+made here.
+
 The `transfer.status` **event** (§4.3) carries the first four of those; `attempts_current` is
 REST-only, because a retry counter ticking behind a temporarily unreachable stack node is
 diagnostic detail the operator can pull when they care, not something worth pushing to every

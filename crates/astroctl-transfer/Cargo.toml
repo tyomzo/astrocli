@@ -11,5 +11,58 @@ publish.workspace = true
 [dependencies]
 astroctl-core = { workspace = true }
 
+# M1-T11 (transfer agent). Every version is already pinned in the root manifest; only `hyper`
+# and `http-body-util` are new to the workspace, and the comment there says why.
+#
+# `rusqlite`: the journal of ADR-06/SDD §5.10.1. Synchronous, so every statement runs inside
+#   `spawn_blocking` — the field node has `min(2, cores-2)` runtime workers (SDD §7).
+# `hyper` + `hyper-util` + `http-body-util` + `futures-util`: the upload of §5.10.2. The legacy
+#   client is the same one the `/stack/*` proxy uses, and `StreamBody` over a `futures_util`
+#   stream is what keeps a 25 MB frame off the heap.
+# `getrandom`: the multipart boundary. It is compared against every byte of a 25 MB binary raw,
+#   so it is 128 bits from the OS CSPRNG rather than a counter — the same crate and the same
+#   argument as the ws-ticket (SDD §4.5), and no PRNG framework for one delimiter.
+# `chrono`: the timestamp type SDD §2 fixes, so a journal row and the event about it are
+#   comparable as text.
+# `tokio`: the agent is a task on the field node's runtime.
+rusqlite = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+futures-util = { workspace = true }
+getrandom = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+
+[dev-dependencies]
+# The stand-in stack node the upload tests POST at: a real socket, so the assertions are about
+# what crossed the wire rather than about what this crate intended to send. `multipart` is what
+# the *receiver* parses with (astroctl-stack's manifest says the same), so the double sees the
+# body exactly as the real node does.
+axum = { workspace = true, features = ["multipart"] }
+# The double hashes what actually arrived, so "the frame survived the streaming body" is asserted
+# on the bytes rather than on a byte count the sender supplied.
+sha2 = { workspace = true }
+
+# The T-XFER-1 fixture: a process that can actually be SIGKILLed with a row in `uploading`. It
+# lives in `testdata/` because that is what it is — a fixture, the twin of
+# `astroctl-session/testdata/crash_harness.rs` — and it is declared as a `[[bin]]` only because
+# `CARGO_BIN_EXE_*` is the one mechanism that hands an integration test the path to an executable
+# cargo has built. Neither deployment image copies it: `deploy/Dockerfile.*` name what they install.
+[[bin]]
+name = "transfer-queue-crash-harness"
+path = "testdata/crash_harness.rs"
+
 [lints]
 workspace = true

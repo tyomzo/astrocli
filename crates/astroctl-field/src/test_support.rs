@@ -178,19 +178,36 @@ fn simulated_devices(yaml: &str) -> String {
          drivers, so the test fixtures are silently running against whatever it does select"
     );
 
+    let root = node_dir();
     let sessions = simulated.replace(
         "sessions_dir: /data/astro/sessions",
-        &format!("sessions_dir: {}", sessions_dir().display()),
+        &format!("sessions_dir: {}", root.join("sessions").display()),
     );
     assert_ne!(
         sessions, simulated,
         "config/field-node.example.yaml no longer puts sessions at /data/astro/sessions, so the \
          test suite is about to write frames wherever it now points"
     );
-    sessions
+
+    // M1-T11: the transfer journal moves for exactly the reason the session root does — the
+    // operator's `/data/astro/transfer_queue` does not exist on a build machine, and `Journal::open`
+    // creates what it is given, so leaving it would have the test suite create a directory at the
+    // filesystem root. Under the same per-node root, so one node's queue and its frames go together.
+    let queue = sessions.replace(
+        "queue_dir: /data/astro/transfer_queue",
+        &format!("queue_dir: {}", root.join("transfer_queue").display()),
+    );
+    assert_ne!(
+        queue, sessions,
+        "config/field-node.example.yaml no longer puts the transfer queue at \
+         /data/astro/transfer_queue, so the test suite is about to write a journal wherever it \
+         now points"
+    );
+    queue
 }
 
-/// A session root nothing else is using.
+/// A per-node scratch root nothing else is using — the session tree and the transfer journal both
+/// live under it.
 ///
 /// Under the OS temporary directory rather than `target/`, because `CARGO_TARGET_TMPDIR` is only
 /// set for integration tests and these are unit tests. Not deleted on drop: the fixture that owns
@@ -198,7 +215,7 @@ fn simulated_devices(yaml: &str) -> String {
 /// (see `mount.rs`'s `node()`), so a `Drop` guard here would delete the session directory out from
 /// under a running test. The frames are 128×96 (see [`state_with`]), so what accumulates is
 /// kilobytes in a directory the OS already sweeps.
-fn sessions_dir() -> std::path::PathBuf {
+fn node_dir() -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -327,6 +344,20 @@ pub async fn state_with_camera(
         bus.clone(),
     ));
 
+    let transfer = if config.stacking_server.enabled {
+        let journal =
+            astroctl_transfer::Journal::open(config.stacking_server.queue_dir.join("transfer.db"))
+                .await
+                .expect("the fixture must open a transfer journal");
+        Arc::new(crate::transfer::TransferFacade::enabled(Arc::new(
+            astroctl_transfer::TransferQueue::new(journal, bus.clone()),
+        )))
+    } else {
+        Arc::new(crate::transfer::TransferFacade::disabled(
+            "the stacking server is disabled on this node (`stacking_server.enabled: false`)",
+        ))
+    };
+
     AppState {
         proxy: Arc::new(StackProxy::new(&config.stacking_server)),
         runtime: RuntimeSizing {
@@ -355,6 +386,11 @@ pub async fn state_with_camera(
             std::time::Duration::from_millis(max_command_age_ms),
         )),
         snapshots: Arc::new(crate::ws::SnapshotStore::new()),
+        // The queue, opened but with **no agent running**: the fixture builds state, and starting
+        // an uploader that would dial `stacking_server.host` from every route test is exactly the
+        // background traffic a unit test should not have. The tests that need a running agent call
+        // `transfer::start` themselves.
+        transfer,
         // Idle, exactly as the binary's is until something starts the camera stream. A fixture
         // that pre-started it would make every test that touches `/ws/liveview` depend on a
         // sensor loop none of them asked for.

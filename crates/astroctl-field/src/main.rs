@@ -49,6 +49,7 @@ mod telemetry;
 mod test_support;
 mod ticket;
 mod tls;
+mod transfer;
 mod vitals;
 mod watchdog;
 mod ws;
@@ -270,6 +271,19 @@ async fn serve(
         Arc::clone(&store),
         bus.clone(),
     ));
+    // --- 5c. the transfer queue, opened and recovered (SDD §5.10.3, §8.1) ---------------------
+    //
+    // Before the API for the reason §8.1 orders everything else that way: a node whose queue
+    // directory is unwritable must fail where the operator is looking, not at the first frame of
+    // the night. The subscriber is taken here rather than inside so that the agent cannot miss a
+    // `frame.saved` published between its construction and its first `recv`.
+    // The store is taken *from the camera facade* rather than from the local variable, even though
+    // they are the same `Arc`: the reconciliation has to scan the store the captures actually
+    // write through, and naming it that way makes that a property of the call rather than of two
+    // bindings happening to agree.
+    let (transfer, transfer_agent) =
+        transfer::start(&config, camera.store(), bus.clone(), bus.subscribe()).await?;
+
     let snapshots = Arc::new(ws::SnapshotStore::new());
     // Built before the API because a handler may be serving `/ws/liveview` the instant the
     // listener binds, and an `Option` filled in later would be a `None` the upgrade would have to
@@ -293,6 +307,7 @@ async fn serve(
         certificate: tls.as_ref().map(tls::Materials::status),
         mount: Arc::clone(&mount),
         camera: Arc::clone(&camera),
+        transfer: Arc::clone(&transfer),
         tickets: Arc::new(ticket::TicketStore::new()),
         // SDD §5.8.1's staleness budget is read once, here, and never again: a handler that
         // re-read the config would be a second place for the number to come from.
@@ -414,6 +429,14 @@ async fn serve(
     // and must be gone before step 5 drops the rest — the same accounting as the two polls
     // below, and the same one the facade and the capture task needed.
     previews.abort().await;
+    // The transfer agent, for the same reason and with one addition of its own: an upload in
+    // flight right now is **abandoned, not awaited**. §5.10.3 makes that safe by design — the row
+    // stays `uploading`, the next startup returns it to `queued`, and ingest deduplicates the
+    // re-send — so unlike the capture in step 3, there is nothing here worth paying a budget for.
+    // Its uploader publishes `transfer.acked`, so it holds a bus handle like the preview worker.
+    if let Some(agent) = transfer_agent {
+        agent.abort().await;
+    }
     watchdog.abort();
     let _ = watchdog.await;
     // The poll task publishes, so it holds a bus sender and must stop before step 5 drops the
@@ -454,6 +477,9 @@ async fn serve(
     mount.abort_inflight();
     drop(mount);
     drop(camera);
+    // M1-T11 added a fifth: the transfer facade holds a bus handle through its queue, which the
+    // status route needs for as long as the API is up and must not hold for a moment longer.
+    drop(transfer);
     drop(store);
     drop(bus);
     if let Some(sink) = sink {
