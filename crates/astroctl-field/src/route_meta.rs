@@ -191,6 +191,22 @@ where
         self.declare(path, "POST", meta, axum::routing::post(handler))
     }
 
+    /// Declare a `PUT` route.
+    ///
+    /// One row in SDD §5.8.1 uses it — `/api/camera/settings`, whose GET and PUT are the same
+    /// path on two tiers — and it is a `PUT` rather than a `POST` because sending the settings
+    /// twice must leave the camera where sending them once did. That is the whole distinction the
+    /// method carries, and it is worth carrying on the one route where an operator's retry over a
+    /// flaky tunnel is otherwise indistinguishable from a second change.
+    #[must_use]
+    pub fn put<H, T>(self, path: &'static str, meta: RouteMeta, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.declare(path, "PUT", meta, axum::routing::put(handler))
+    }
+
     /// Declare a route serving every method — the `/stack/*` proxy (SDD §5.8.1).
     #[must_use]
     pub fn any<H, T>(self, path: &'static str, meta: RouteMeta, handler: H) -> Self

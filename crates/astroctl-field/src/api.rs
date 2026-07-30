@@ -43,6 +43,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::auth::{require_bearer, AuthPolicy};
+use crate::camera;
 use crate::mount;
 use crate::proxy::{self, StackProxy};
 use crate::route_meta::{ApiRouter, RouteDecl, RouteMeta, Tier};
@@ -263,6 +264,35 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
             RouteMeta::new(Tier::BlockedForLlm, true),
             mount::estop,
         )
+        // --- SDD §5.8.1: the camera rows (M1-T08) ------------------------------------------
+        //
+        // Tiers verbatim from §5.8.1: capture is `medium` beside goto, because §8.2's tier is a
+        // *consequence* class and an exposure the operator did not ask for costs a slot in the
+        // night rather than a telescope. Everything that changes state is audited, capture most
+        // of all — the audit line is what ties a frame in the session directory to the request
+        // that asked for it.
+        .post("/api/camera/connect", RouteMeta::new(Tier::Low, true), camera::connect)
+        .post("/api/camera/disconnect", RouteMeta::new(Tier::Low, true), camera::disconnect)
+        .get("/api/camera/settings", RouteMeta::read(), camera::settings)
+        .put("/api/camera/settings", RouteMeta::new(Tier::Low, true), camera::update_settings)
+        .post("/api/camera/capture", RouteMeta::new(Tier::Medium, true), camera::capture)
+        .post(
+            "/api/camera/capture/abort",
+            RouteMeta::new(Tier::Low, true),
+            camera::abort_capture,
+        )
+        // The one route SDD §5.8.1's table does not list, because §5.6 is where it is required:
+        // "Faulted (from any state; operator ack → Idle)" has no way to happen without a route to
+        // do it on. `low` and audited — it changes nothing about the telescope, but a night in
+        // which a fault was acknowledged three times is a night whose log should say so.
+        .post(
+            "/api/camera/fault/ack",
+            RouteMeta::new(Tier::Low, true),
+            camera::acknowledge_fault,
+        )
+        .get("/api/camera/battery", RouteMeta::read(), camera::battery)
+        .get("/api/camera/storage", RouteMeta::read(), camera::storage)
+        .get("/api/session/current", RouteMeta::read(), camera::session_current)
         // ADR-07. Audited: a call that changes state on the other node is exactly as consequential
         // as one that changes state here, and this node cannot tell which is which — so it records
         // every one of them.
@@ -834,13 +864,51 @@ mod tests {
             .expect("the tier is published");
         assert_eq!(blocked["llm_callable"], false);
 
+        // The camera rows of §5.8.1, and the one route §5.6 requires that §5.8.1 does not list.
+        let capture = routes
+            .iter()
+            .find(|r| r["path"] == "/api/camera/capture")
+            .expect("capture is declared");
+        assert_eq!(
+            capture["tier"], "medium",
+            "an exposure the operator did not ask for is a `medium` consequence, beside goto"
+        );
+        assert_eq!(capture["audit"], true);
+        assert_eq!(capture["method"], "POST");
+
+        // The same path on two methods and two tiers: reading the settings is `read`, changing
+        // them is `low`. A table that collapsed them would have to pick one, and Phase 2c's
+        // confirmation policy would then either confirm every read or confirm no change.
+        let settings: Vec<_> = routes
+            .iter()
+            .filter(|r| r["path"] == "/api/camera/settings")
+            .collect();
+        assert_eq!(settings.len(), 2, "{settings:?}");
+        assert!(settings
+            .iter()
+            .any(|r| r["method"] == "GET" && r["tier"] == "read"));
+        assert!(settings
+            .iter()
+            .any(|r| r["method"] == "PUT" && r["tier"] == "low" && r["audit"] == true));
+
+        // SDD §5.6's "operator ack → Idle" has no row in §5.8.1's table, and a state that cannot
+        // be cleared is a node that stops capturing for the night.
+        let ack = routes
+            .iter()
+            .find(|r| r["path"] == "/api/camera/fault/ack")
+            .expect("the fault acknowledgement is declared");
+        assert_eq!(ack["method"], "POST");
+        assert_eq!(ack["tier"], "low");
+        assert_eq!(ack["audit"], true);
+
         // Every route the router serves is declared — that is the §8.2 invariant, and the
         // declaration list is the only place a route can come from. The count is the review
-        // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1, and
-        // 15 → 16 is M1-T05's e-stop. `/ws` is *not* among them because it is declared by
+        // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1,
+        // 15 → 16 is M1-T05's e-stop, and 16 → 26 is M1-T08's nine camera/session rows plus the
+        // fault acknowledgement. `/ws` is *not* among them because it is declared by
         // `ws_router()`, which is authenticated by ticket rather than by the bearer layer this
         // test drives.
-        assert_eq!(routes.len(), 16);
+        assert_eq!(routes.len(), 26);
     }
 
     /// `/ws` is declared, published and outside the bearer layer — all three, because any two of

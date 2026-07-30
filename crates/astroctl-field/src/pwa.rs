@@ -414,12 +414,12 @@ mod tests {
     #[tokio::test]
     async fn an_undeclared_api_path_is_404_once_the_token_is_valid() {
         let node = TestNode::authenticated("s3cret");
-        // `/api/camera/capture` is in SDD §5.8.1's table and not in this build (M1-T08). That
+        // `/api/transfer/status` is in SDD §5.8.1's table and not in this build (M1-T11). That
         // makes it the honest example: a route the design promises, that a client may well try,
         // and that must answer 404 rather than the app shell. This test used `/api/mount/position`
-        // until M1-T03 declared it — which is the failure mode the check exists for, caught by
-        // the check itself.
-        let answer = get(&node, "/api/camera/capture", Some("s3cret")).await;
+        // until M1-T03 declared it and `/api/camera/capture` until M1-T08 did — which is the
+        // failure mode the check exists for, caught twice now by the check itself.
+        let answer = get(&node, "/api/transfer/status", Some("s3cret")).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.json()["code"], "NOT_FOUND");
         assert_eq!(answer.json()["retryable"], false);
