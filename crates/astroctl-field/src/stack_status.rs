@@ -220,7 +220,10 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_stacking_server_publishes_no_status_rather_than_offline() {
         let node = TestNode::authenticated("s3cret").with_stack_disabled();
-        let proxy = Arc::new(StackProxy::new(&node.config().stacking_server, Some("s3cret")));
+        let proxy = Arc::new(StackProxy::new(
+            &node.config().stacking_server,
+            Some("s3cret"),
+        ));
         assert!(spawn(proxy, EventBus::new()).is_none());
     }
 
@@ -261,6 +264,9 @@ mod tests {
     #[test]
     fn the_republish_interval_is_a_multiple_of_the_poll_so_a_tick_lands_on_it() {
         assert_eq!(REPUBLISH_INTERVAL.as_secs() % POLL_INTERVAL.as_secs(), 0);
-        assert!(POLL_TIMEOUT < POLL_INTERVAL, "a poll must finish before the next one starts");
+        assert!(
+            POLL_TIMEOUT < POLL_INTERVAL,
+            "a poll must finish before the next one starts"
+        );
     }
 }

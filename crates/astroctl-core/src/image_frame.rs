@@ -118,7 +118,12 @@ mod tests {
     /// round-tripping through a decoder that could share a mistake with the encoder.
     #[test]
     fn the_envelope_has_the_layout_5_8_3_specifies() {
-        let frame = encode(FrameKind::Preview, b"\xff\xd8jpeg", ts(), Some("light_00042"));
+        let frame = encode(
+            FrameKind::Preview,
+            b"\xff\xd8jpeg",
+            ts(),
+            Some("light_00042"),
+        );
 
         assert_eq!(&frame[0..4], MAGIC);
         assert_eq!(frame[4], PROTOCOL_VERSION);
@@ -126,7 +131,8 @@ mod tests {
 
         let meta_len = usize::from(u16::from_be_bytes([frame[6], frame[7]]));
         let meta: serde_json::Value =
-            serde_json::from_slice(&frame[HEADER_LEN..HEADER_LEN + meta_len]).expect("meta is json");
+            serde_json::from_slice(&frame[HEADER_LEN..HEADER_LEN + meta_len])
+                .expect("meta is json");
         assert_eq!(meta["ts"], "2026-07-29T21:04:05.123Z");
         assert_eq!(meta["frame_id"], "light_00042");
 
@@ -142,7 +148,8 @@ mod tests {
 
         let meta_len = usize::from(u16::from_be_bytes([frame[6], frame[7]]));
         let meta: serde_json::Value =
-            serde_json::from_slice(&frame[HEADER_LEN..HEADER_LEN + meta_len]).expect("meta is json");
+            serde_json::from_slice(&frame[HEADER_LEN..HEADER_LEN + meta_len])
+                .expect("meta is json");
         assert!(
             meta.get("frame_id").is_none(),
             "the key must be absent, not null: {meta}"

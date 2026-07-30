@@ -194,7 +194,10 @@ impl StackProxy {
             .path_and_query(path)
             .build()
             .map_err(|error| {
-                ApiError::new(ErrorCode::Validation, format!("cannot address `{path}`: {error}"))
+                ApiError::new(
+                    ErrorCode::Validation,
+                    format!("cannot address `{path}`: {error}"),
+                )
             })?;
 
         let mut request = hyper::Request::builder()
@@ -202,7 +205,10 @@ impl StackProxy {
             .uri(uri)
             .body(Body::empty())
             .map_err(|error| {
-                ApiError::new(ErrorCode::Validation, format!("cannot build the request: {error}"))
+                ApiError::new(
+                    ErrorCode::Validation,
+                    format!("cannot build the request: {error}"),
+                )
             })?;
         if let Some(value) = self.authorization.clone() {
             request.headers_mut().insert(header::AUTHORIZATION, value);
@@ -379,10 +385,11 @@ impl StackProxy {
             }
         });
 
-        let response = tokio::time::timeout(UPSTREAM_TIMEOUT, sender.send_request(upstream_request))
-            .await
-            .map_err(|_| unreachable_stack(&upstream, "the upgrade handshake timed out"))?
-            .map_err(|error| unreachable_stack(&upstream, &error.to_string()))?;
+        let response =
+            tokio::time::timeout(UPSTREAM_TIMEOUT, sender.send_request(upstream_request))
+                .await
+                .map_err(|_| unreachable_stack(&upstream, "the upgrade handshake timed out"))?
+                .map_err(|error| unreachable_stack(&upstream, &error.to_string()))?;
 
         if response.status() != StatusCode::SWITCHING_PROTOCOLS {
             // The stack node refused — most usefully a 401, which on this path means the two
@@ -402,10 +409,8 @@ impl StackProxy {
         // Both halves are now committed. Copying starts once *this* node's 101 has reached the
         // browser, which is what `client_upgrade` resolving means.
         let (mut parts, _) = response.into_parts();
-        let upstream_upgrade = hyper::upgrade::on(hyper::Response::from_parts(
-            parts.clone(),
-            Body::empty(),
-        ));
+        let upstream_upgrade =
+            hyper::upgrade::on(hyper::Response::from_parts(parts.clone(), Body::empty()));
         tokio::spawn(async move {
             tunnel(client_upgrade, upstream_upgrade, path_for_log).await;
         });
@@ -668,7 +673,10 @@ mod tests {
             ("/stack/ws/preview?ticket=deadbeef", "/ws/preview"),
             ("/stack/ws/preview?ticket=deadbeef&x=1", "/ws/preview?x=1"),
             ("/stack/ws/preview?x=1&ticket=deadbeef", "/ws/preview?x=1"),
-            ("/stack/ws/preview?x=1&ticket=deadbeef&y=2", "/ws/preview?x=1&y=2"),
+            (
+                "/stack/ws/preview?x=1&ticket=deadbeef&y=2",
+                "/ws/preview?x=1&y=2",
+            ),
             // A parameter that merely starts with the same letters is not the ticket.
             ("/stack/api/x?ticketed=1", "/api/x?ticketed=1"),
         ];
@@ -912,10 +920,7 @@ mod tests {
             let auth = Arc::clone(&state.auth);
             let app = api::with_auth(api::with_state(router, state.clone()), auth);
 
-            for uri in [
-                "/stack/ws/preview",
-                "/stack/ws/preview?ticket=never-issued",
-            ] {
+            for uri in ["/stack/ws/preview", "/stack/ws/preview?ticket=never-issued"] {
                 let response = app
                     .clone()
                     .oneshot(
@@ -1001,10 +1006,16 @@ mod tests {
             );
 
             headers.insert(header::UPGRADE, HeaderValue::from_static("WebSocket"));
-            assert!(is_websocket_upgrade(&headers), "the token is case-insensitive");
+            assert!(
+                is_websocket_upgrade(&headers),
+                "the token is case-insensitive"
+            );
 
             headers.insert(header::UPGRADE, HeaderValue::from_static("h2c"));
-            assert!(!is_websocket_upgrade(&headers), "a different protocol is not ours");
+            assert!(
+                !is_websocket_upgrade(&headers),
+                "a different protocol is not ours"
+            );
         }
     }
 
@@ -1020,12 +1031,11 @@ mod tests {
         use crate::api;
         use crate::test_support::{state_with, TestNode};
         use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-        use axum::response::Response as AxumResponse;
         use axum::extract::Request as AxumRequest;
+        use axum::response::Response as AxumResponse;
         use axum::routing::get;
         use futures_util::{SinkExt, StreamExt};
         use std::net::SocketAddr;
-        use std::sync::Arc;
         use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
         type Socket = tokio_tungstenite::WebSocketStream<
@@ -1106,8 +1116,11 @@ mod tests {
             // upgrade it is meant to be exercising — which is exactly what it did.
             let (router, declarations) = api::router();
             let (ws_router, ws_declarations) = api::ws_router();
-            let state =
-                state_with(&node, declarations.into_iter().chain(ws_declarations).collect()).await;
+            let state = state_with(
+                &node,
+                declarations.into_iter().chain(ws_declarations).collect(),
+            )
+            .await;
             let app = crate::assemble(router, ws_router, state.clone());
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1199,7 +1212,10 @@ mod tests {
                     break bytes.to_vec();
                 }
             };
-            assert_eq!(echoed, payload, "the tunnel must not re-frame or alter bytes");
+            assert_eq!(
+                echoed, payload,
+                "the tunnel must not re-frame or alter bytes"
+            );
         }
 
         /// REL-10 through the proxy: the stacking server can go away and come back, and a
@@ -1232,7 +1248,10 @@ mod tests {
             let refused = tokio::time::timeout(Duration::from_secs(5), open(addr, &ticket))
                 .await
                 .expect("the attempt must not hang");
-            assert!(refused.is_err(), "a tunnel to a node that is not there must fail");
+            assert!(
+                refused.is_err(),
+                "a tunnel to a node that is not there must fail"
+            );
 
             // It comes back on the same port — a restart, as far as the field node can tell.
             let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{upstream_port}"))

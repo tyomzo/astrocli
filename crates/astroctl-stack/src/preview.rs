@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 
 use astroctl_core::bus::EventBus;
 use astroctl_core::error::ErrorCode;
-use astroctl_core::event::{Alert, WorkerState};
+use astroctl_core::event::Alert;
 use astroctl_core::image_frame::{encode, FrameKind};
 use astroctl_ipc::protocol::JobKind;
 use astroctl_ipc::supervisor::{JobFailure, WorkerHandle, WorkerStatus};
@@ -323,12 +323,7 @@ pub fn spawn(
     PreviewPipeline { worker, queue }
 }
 
-async fn run(
-    queue: Arc<PreviewQueue>,
-    hub: Arc<PreviewHub>,
-    workers: WorkerHandle,
-    bus: EventBus,
-) {
+async fn run(queue: Arc<PreviewQueue>, hub: Arc<PreviewHub>, workers: WorkerHandle, bus: EventBus) {
     // Edge-triggered, exactly as ingest's REL-12 refusal is: a field node uploading all night
     // against a worker whose dependencies are missing would otherwise produce one alert per frame,
     // and an alert per frame is an alert the operator learns to ignore (SDD §5.10.4).
@@ -573,7 +568,11 @@ mod tests {
     async fn a_burst_of_ingests_previews_only_the_newest() {
         let queue = PreviewQueue::new();
         for id in ["light_00001", "light_00002", "light_00003"] {
-            queue.offer("2026-07-29_m31", id, PathBuf::from(format!("/frames/{id}.fits")));
+            queue.offer(
+                "2026-07-29_m31",
+                id,
+                PathBuf::from(format!("/frames/{id}.fits")),
+            );
         }
 
         assert_eq!(queue.take().await, Some(job("light_00003")));
@@ -659,7 +658,12 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await
         {
             if event.topic == Topic::Alert {
-                alerts.push(event.data["severity"].as_str().unwrap_or_default().to_owned());
+                alerts.push(
+                    event.data["severity"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
             }
         }
         assert_eq!(
@@ -694,6 +698,7 @@ mod tests {
     /// so rather than claiming a `Ready` process that does not exist (§5.12.3).
     #[test]
     fn a_node_with_no_worker_started_reports_stopped_not_ready() {
+        use astroctl_core::event::WorkerState;
         assert_eq!(WorkerStatus::default().state, WorkerState::Stopped);
         assert_ne!(
             WorkerStatus::default().state,
@@ -835,7 +840,9 @@ mod e2e {
     #[tokio::test]
     async fn a_client_connecting_late_is_sent_the_frame_already_in_the_slot() {
         let node = Node::start().await;
-        node.state.previews.publish(b"\xff\xd8already", "light_00007");
+        node.state
+            .previews
+            .publish(b"\xff\xd8already", "light_00007");
 
         let mut socket = node.open(Some(TOKEN)).await.expect("the socket opens");
         let (frame_id, jpeg) = next_frame(&mut socket).await;
@@ -847,8 +854,14 @@ mod e2e {
     #[tokio::test]
     async fn every_attached_client_receives_each_new_preview_once() {
         let node = Node::start().await;
-        let mut first = node.open(Some(TOKEN)).await.expect("the first socket opens");
-        let mut second = node.open(Some(TOKEN)).await.expect("the second socket opens");
+        let mut first = node
+            .open(Some(TOKEN))
+            .await
+            .expect("the first socket opens");
+        let mut second = node
+            .open(Some(TOKEN))
+            .await
+            .expect("the second socket opens");
 
         node.state.previews.publish(b"\xff\xd8one", "light_00001");
         assert_eq!(next_frame(&mut first).await.0, "light_00001");

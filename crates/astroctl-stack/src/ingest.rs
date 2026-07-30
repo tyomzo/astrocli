@@ -369,11 +369,9 @@ pub async fn ingest(
             // path by which a sick worker turns a stored frame into a 5xx and a retransmission.
             // A preview that never happens costs the operator an image they can get by capturing
             // again; an ingest that fails over one costs 25 MB of a shaped link.
-            state.preview_queue.offer(
-                &meta.session_id,
-                &meta.frame_id,
-                archive.frame_path(frame),
-            );
+            state
+                .preview_queue
+                .offer(&meta.session_id, &meta.frame_id, archive.frame_path(frame));
             Ok(Json(ack(&meta, false)))
         }
         Outcome::Duplicate(_) => {

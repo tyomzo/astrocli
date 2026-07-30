@@ -1293,7 +1293,9 @@ mod tests {
         // it with a ticket because it cannot attach a header, so a declaration under `router()`
         // would answer 401 to every upgrade while looking like a working route to `curl`.
         assert!(
-            !bearer.iter().any(|r| r.path.starts_with(crate::proxy::WS_PREFIX)),
+            !bearer
+                .iter()
+                .any(|r| r.path.starts_with(crate::proxy::WS_PREFIX)),
             "the stacking server's sockets must not be behind the bearer layer either"
         );
 
