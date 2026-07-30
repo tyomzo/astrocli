@@ -90,6 +90,18 @@ describe('surfacePhase', () => {
     expect(phase.elapsedS).toBeCloseTo(8, 5);
   });
 
+  it('counts up rather than down once the shutter has closed', () => {
+    // Found by running the app: the surface showed "0s left" under a download that then took
+    // another eight seconds. The exposure's length is a countdown for the *exposure* and says
+    // nothing about a download, so past the shutter there is nothing honest to count down to.
+    const phase = surfacePhase(
+      input({ capture: progress('downloading', 5), captureAt: NOW, exposureSeconds: 5 }),
+    );
+    if (phase.kind !== 'capturing') throw new Error(`expected capturing, got ${phase.kind}`);
+    expect(phase.remainingS).toBeNull();
+    expect(phase.elapsedS).toBeCloseTo(5, 5);
+  });
+
   it('treats downloading as an explained gap too', () => {
     // M1-T08's handoff names both: `exposing` and `downloading` are the states in which the
     // sensor is unavailable. Only reading `exposing` would produce a false stall in the seconds

@@ -208,8 +208,15 @@ function explainsTheGap(input: SurfaceInput): SurfacePhase | null {
   // second term matters on a slow link, where the event itself may be seconds old.
   const elapsedS = capture.elapsed_s + (input.now - captureAt) / 1000;
 
+  // A countdown is only meaningful while the shutter is open. Once the node is *reading the frame
+  // off the camera* the exposure is over and its length says nothing about how long the download
+  // has left — found by running the app, which showed "0s left" sitting under a download that
+  // then took another eight seconds. Counting up is the honest answer for a wait whose length
+  // nothing knows.
   const remainingS =
-    input.exposureSeconds === null ? null : Math.max(0, input.exposureSeconds - elapsedS);
+    input.exposureSeconds === null || capture.state === 'downloading'
+      ? null
+      : Math.max(0, input.exposureSeconds - elapsedS);
 
   // The second bound, and only when the exposure's length is known: a node that kept ticking
   // through an exposure running far past its configured length is describing something other
