@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.14.0
+**Version:** 1.14.1
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -54,6 +54,8 @@
 **Change note (1.13.0):** §5.8.1's field health response gains SEC-07's certificate expiry — `cert_expires_at`, `cert_days_remaining`, and a third `status` value `warn`. `warn` is derived when the response is built and never stored: it is a property of the clock rather than a lifecycle transition, so the `starting`→`ok` cell of §8.1 keeps exactly the two states it names, and a renewed certificate turns the warning off without anything having to reset it. TLS itself terminates in `astroctl-field` (ADD §4); the operator procedure is `docs/ops/tls-setup.md`. Landed by M0-T09.
 
 **Change note (1.14.0):** §5.11 specified to the level M1-T11 can implement against, because the ingest contract has two sides and only one of them was written down. The `meta` part now has a schema (§5.11.1) rather than a parenthesized list of field names — it gained `v` and `ext`, the second because §5.11.1's ack format could not name the stored file without it and the first because the object is strict about unknown keys. The procedure (§5.11.2) records six ordering properties that were implicit and are each one bug away from data loss: the dedup key is `(session_id, frame_id)` and **not** `frame_id`, since §5.5's per-session counters make `light_00042` recur in every session; the temporary carries a nonce, since two overlapping retries otherwise write through a rename into a stored frame; the link is `renameat2(RENAME_NOREPLACE)`, since check-then-rename has a window a retry fits through and `EEXIST` is also the crash-recovery signal; the journal row follows the frame, since REL-13's authority may under-claim but never over-claim; a *definitive* answer is delivered only after the body is drained, since an early response is lost to a client still writing and the frame would then be retried forever; and the derived metadata files are outside the ack, since they are rebuildable and the frame is not. §5.11.3 pins `ingest.db` to the archive volume with `synchronous = FULL`, names the shared layout fixture, gives `session.json` a shape, states that the archive opens before the socket, and adds the startup sweep of leftover temporaries. Response bodies gain the `v` §2 requires of every externally visible schema. Landed by M1-T12.
+
+**Change note (1.14.1):** §5.11.2's first ordering property described the wrong failure. A bare `frame_id` dedup key does not produce a false `duplicate: true` — the two frames' hashes differ, so the sha comparison separates them. It fires the **conflict** branch, `409 FRAME_ID_CONFLICT`, which is terminal: the sender stops retrying and the frame is lost. The fix (key on `(session_id, frame_id)`) was right; the justification was not, and a justification that names the wrong mechanism invites someone to "fix" it by comparing hashes more carefully instead of keying on the session.
 
 ---
 
@@ -1055,9 +1057,15 @@ Hashing happens *during* the stream, so a corrupt 25 MB upload costs one disk wr
 second pass. Six properties of that order are load-bearing:
 
 1. **The dedup key is `(session_id, frame_id)`, not `frame_id`.** §5.5 hands out frame ids from a
-   per-session counter, so `light_00042` recurs in every session; on a node that mirrors many
-   sessions a bare `frame_id` key would make the second session's frame 42 a duplicate of the
-   first's. (§5.10.1's `frame_id TEXT PRIMARY KEY` holds only within one field node's queue.)
+   per-session counter, so `light_00042` recurs in every session. On a node that mirrors many
+   sessions, a bare `frame_id` key rejects the second session's frame 42 as
+   **`409 FRAME_ID_CONFLICT`** — same id, different bytes — and that verdict is terminal, so the
+   sender stops retrying and the frame is simply lost. The near miss is worth naming: the failure
+   is *not* a false `duplicate: true`, because the two frames' hashes differ and the sha
+   comparison would separate them. It is the conflict branch firing on two frames that were never
+   in conflict, which is why fixing this by comparing hashes harder does not work — the key itself
+   has to carry the session. (§5.10.1's `frame_id TEXT PRIMARY KEY` holds only within one field
+   node's queue.)
 2. **The temporary carries a nonce.** Two overlapping uploads of one frame id would otherwise
    share `.tmp_<frame_id>`, and the loser goes on writing into a descriptor the winner has already
    renamed *into the archive* — a stored raw modified after the fact, which REL-11 forbids.
