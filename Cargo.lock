@@ -210,8 +210,10 @@ name = "astroctl-stack"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "astroctl-ipc",
  "axum",
  "chrono",
+ "futures-util",
  "rusqlite",
  "rustix",
  "serde",
@@ -220,6 +222,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tracing",
  "tracing-appender",

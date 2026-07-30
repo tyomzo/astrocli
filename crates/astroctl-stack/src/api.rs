@@ -7,8 +7,12 @@
 //!
 //! # What is not here yet
 //!
-//! `/ws` and `/ws/preview` (M1-T14). They are listed in SDD §5.11.1 and land with the task that
-//! gives them something to push; declaring them now would mean a socket that never sends.
+//! `/ws`, the JSON status socket of SDD §5.11.1. `/ws/preview` landed with M1-T14 because the
+//! preview pipeline gave it something to push; `/ws` still has no subscriber. The field node
+//! republishes this node's health as `stack.status` by polling `/api/system/health` and
+//! `/api/stacking/stats` (§4.3, USB-06), so a JSON socket here would be a socket that never
+//! sends — and declaring one is how a route ends up in `/api/system/info` promising a stream
+//! nobody feeds.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -17,6 +21,7 @@ use astroctl_core::bus::{EventBus, EVENT_BUS_CAPACITY};
 use astroctl_core::config::StackConfig;
 use astroctl_core::error::ApiError;
 use astroctl_core::event::{WorkerState, EVENT_SCHEMA_VERSION};
+use astroctl_ipc::supervisor::WorkerHandle;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -25,6 +30,7 @@ use serde::Serialize;
 
 use crate::auth::{require_bearer, AuthPolicy};
 use crate::ingest::{self, Ingest, MAX_UPLOAD_BYTES};
+use crate::preview::{self, PreviewHub, PreviewQueue};
 use crate::route_meta::{ApiRouter, RouteDecl, RouteMeta, Tier};
 use crate::vitals::{self, Uptime};
 
@@ -123,6 +129,17 @@ pub struct AppState {
     pub logging: LoggingInfo,
     /// The mirrored archive and its journal (SDD §5.11).
     pub ingest: Arc<Ingest>,
+    /// The `/ws/preview` fan-out and the timestamp of the last preview (SDD §5.11.1, M1-T14).
+    pub previews: Arc<PreviewHub>,
+    /// The depth-1 slot the ingest handler drops a frame into on the ack path (SDD §5.8.3).
+    pub preview_queue: Arc<PreviewQueue>,
+    /// The compute worker's supervisor (SDD §5.12.3).
+    ///
+    /// Held as a handle, not an `Option`: [`astroctl_ipc::supervisor::spawn`] cannot fail and
+    /// starts no process, so a running node always has a supervisor even when it has never had a
+    /// worker. That is what lets `/api/system/health` report `stopped` — the honest idle state —
+    /// rather than the `null` it answered while there was no supervisor at all.
+    pub workers: WorkerHandle,
 }
 
 /// An [`ApiError`] on its way out as a response.
@@ -175,7 +192,13 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
             "/api/ingest/{session_id}/{frame_id}",
             RouteMeta::read(),
             ingest::preflight,
-        );
+        )
+        // §5.11.1's binary preview socket. Unlike the field node's two WS routes it sits *inside*
+        // the bearer layer, and that difference is the whole of §4.5's reasoning: tickets exist
+        // because a browser cannot put an `Authorization` header on an upgrade, and the only
+        // client of this socket is the field node's proxy, which is not a browser. §4.5 says so
+        // outright — "it has no need of a ticket".
+        .get("/ws/preview", RouteMeta::read(), preview::upgrade);
 
     let declarations = api.declarations();
     (api.into_router(), declarations)
@@ -212,6 +235,11 @@ impl Versions {
 }
 
 /// The `worker` object of SDD §5.11.1.
+///
+/// `state` and `restarts` are §5.11.1's two fields. The restart counter is the one §5.12.3
+/// singles out — "a worker quietly restarting every few minutes is the failure mode most likely
+/// to go unnoticed" — and it is what the field node forwards into `stack.status` for the same
+/// reason.
 #[derive(Debug, Serialize)]
 pub struct WorkerHealth {
     state: WorkerState,
@@ -227,15 +255,23 @@ pub struct HealthResponse {
     clock_synced: bool,
     uptime_s: u64,
     versions: Versions,
-    /// `null` until the worker supervisor exists (M1-T13, SDD §5.12.3).
+    /// The supervisor's view of the compute worker.
     ///
-    /// Not `{state: "stopped", restarts: 0}`: that would be a claim about a supervisor that is
-    /// not running, and "no worker has been started" and "the worker stopped" are different
-    /// facts for anyone reading this to decide whether to retry a job.
+    /// Still an `Option` in the schema, and now always `Some` on a running node: M1-T13 gave the
+    /// node a supervisor, so "there is no supervisor" stopped being a state this binary can be
+    /// in. The idle answer is `{state: "stopped", restarts: 0}`, which is a claim about a
+    /// supervisor that *is* running and has no worker up — the distinction the earlier `null`
+    /// existed to preserve, now carried by `WorkerState::Stopped` instead (SDD change note
+    /// 1.16.0). The field is kept optional so a future node that genuinely has no worker — an
+    /// ingest-only mirror — has a way to say so.
     worker: Option<WorkerHealth>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
+    let worker = preview::worker_health(Some(&state.workers)).map(|status| WorkerHealth {
+        state: status.state,
+        restarts: status.restarts,
+    });
     Json(HealthResponse {
         v: API_SCHEMA_VERSION,
         status: state.status.get(),
@@ -243,7 +279,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         clock_synced: vitals::clock_synced(),
         uptime_s: state.uptime.seconds(),
         versions: Versions::current(),
-        worker: None,
+        worker,
     })
 }
 
@@ -446,10 +482,13 @@ mod tests {
         );
         assert!(body["clock_synced"].is_boolean(), "{body}");
         assert_eq!(body["versions"]["astroctl"], env!("CARGO_PKG_VERSION"));
-        // §5.11.1 lists a `worker` object; M1-T13 supplies the supervisor that fills it, and
-        // until then the field is present and explicitly null rather than invented.
+        // §5.11.1's `worker` object, filled by M1-T13's supervisor. A node that has just started
+        // reports `stopped` with no restarts — the honest state of an on-demand supervisor whose
+        // first job has not arrived (§5.12.3). Asserting `ready` here would be asserting that a
+        // Python process is running, which at this point in a node's life it is not.
         assert!(body.get("worker").is_some(), "the key is present: {body}");
-        assert_eq!(body["worker"], Value::Null);
+        assert_eq!(body["worker"]["state"], "stopped", "{body}");
+        assert_eq!(body["worker"]["restarts"], 0, "{body}");
     }
 
     /// The acceptance criterion, stack side: SDD §7 defaults this node to one worker per core.
@@ -480,8 +519,14 @@ mod tests {
 
         assert_eq!(body["node"], "stack");
         let routes = body["routes"].as_array().expect("routes is a list");
-        // 5 = health, info, ingest, stats, and the §5.11.1 pre-flight.
-        assert_eq!(routes.len(), 5);
+        // 6 = health, info, ingest, stats, the §5.11.1 pre-flight, and `/ws/preview`.
+        assert_eq!(routes.len(), 6);
+        // The preview socket is declared like any other route, which is what puts it inside the
+        // bearer layer — §4.5's ticket exception is for browsers, and this socket has none.
+        assert!(
+            routes.iter().any(|r| r["path"] == "/ws/preview"),
+            "the preview socket is declared: {body}"
+        );
         let ingest = routes
             .iter()
             .find(|r| r["path"] == "/api/ingest")

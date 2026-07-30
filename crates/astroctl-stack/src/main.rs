@@ -43,6 +43,7 @@ mod cli;
 mod ingest;
 mod journal;
 mod mirror;
+mod preview;
 mod route_meta;
 mod telemetry;
 #[cfg(test)]
@@ -219,6 +220,25 @@ async fn serve(
     }
     tracing::info!(path = %mirror.root().display(), "session archive open");
 
+    // --- 4c. the worker supervisor and the preview pipeline (SDD §5.12.3, §5.11.1) -------------
+    //
+    // `spawn` starts **no process**: §5.12.3 supervises workers as on-demand children, so the
+    // first submitted job is what brings one up and a node with nothing to compute holds no
+    // Python interpreter and no GPU context. That is the same principle as the field node not
+    // connecting hardware at startup, and it is why this line is cheap enough to run before the
+    // socket is bound.
+    let workers = astroctl_ipc::supervisor::spawn(&config.workers, &bus);
+    let previews = Arc::new(preview::PreviewHub::new());
+    let preview_queue = Arc::new(preview::PreviewQueue::new());
+    // The pipeline is handed the *only* `WorkerHandle` this node keeps, so dropping it at
+    // shutdown is what stops the supervisor — see the teardown below.
+    let preview_pipeline = preview::spawn(
+        Arc::clone(&preview_queue),
+        Arc::clone(&previews),
+        workers.clone(),
+        bus.clone(),
+    );
+
     let status = Arc::new(StatusCell::starting());
     let (router, declarations) = api::router();
     let state = AppState {
@@ -231,6 +251,9 @@ async fn serve(
         logging,
         config: Arc::clone(&config),
         ingest: Arc::new(ingest::Ingest::new(mirror)),
+        previews,
+        preview_queue,
+        workers,
     };
     let app = api::with_auth(router.with_state(state), auth);
 
@@ -279,7 +302,17 @@ async fn serve(
     // 2. stop the watchdogs.
     watchdog.abort();
     let _ = watchdog.await;
-    // 3. worker supervisor teardown — M1-T13.
+    // 3. worker supervisor teardown.
+    //
+    // The pipeline task holds an `EventBus` clone (it publishes `STACK_PREVIEW_FAILED`) and the
+    // node's only `WorkerHandle`; aborting and joining it drops both. The supervisor stops when
+    // its last handle goes — `astroctl-ipc`'s contract — and *it* holds a bus clone too, for its
+    // `WORKER_*` alerts. `spawn` returns no join handle, so this cannot be awaited directly; what
+    // makes it correct anyway is step 4: dropping the last sender wakes the supervisor
+    // immediately, and the flush below is an `await`, so the runtime polls the woken supervisor
+    // to completion long before the timeout. A worker process still running is killed by
+    // `kill_on_drop`, which is why no Python child outlives this either.
+    preview_pipeline.abort().await;
     // 4. flush the event log: dropping every `EventBus` handle closes the sink's subscriber.
     drop(bus);
     if let Some(sink) = sink {

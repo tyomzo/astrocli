@@ -256,6 +256,21 @@ impl SessionMirror {
         &self.journal
     }
 
+    /// Where a stored frame lives: `<sessions_dir>/<session_id>/frames/<frame_id>.<ext>`.
+    ///
+    /// The one place that composes this path outside [`Self::commit`], and it exists for M1-T14:
+    /// ADR-13 passes frames to the worker **by filesystem path**, never as bytes, so the preview
+    /// pipeline needs the same name `commit` linked the frame under. Derived from the validated
+    /// [`FrameRef`] rather than read back out of the journal — the journal stores a *relative*
+    /// path for portability, and re-deriving it here keeps one definition of the layout instead
+    /// of a second that has to agree.
+    #[must_use]
+    pub fn frame_path(&self, frame: FrameRef<'_>) -> PathBuf {
+        self.session_dir(frame.session_id)
+            .join(FRAMES_DIR)
+            .join(format!("{}.{}", frame.frame_id, frame.ext))
+    }
+
     /// What this node already holds under `(session_id, frame_id)`.
     ///
     /// # Errors
