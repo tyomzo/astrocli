@@ -126,6 +126,20 @@ rustls-pemfile = { version = "2.2" }
 # the expiry needs a real X.509 parser. Pure Rust, no OpenSSL.
 x509-parser = { version = "0.18" }
 
+# --- added by M1-T03 (WS hub, ws-ticket) ---
+# `StreamExt::split` on axum's `WebSocket`. The hub gives the read half and the write half to
+# separate tasks so that neither ever holds the other up — a client stalled on a write must not
+# stop the reader from answering pings, and the reader must not sit inside a `select!` whose
+# other branch could cancel a partially-read frame. Already in the tree transitively; naming it
+# is what makes `split` callable. `default-features = false` drops the executor and the async-await
+# macro machinery this does not use.
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# The ws-ticket's randomness (SDD §4.5: "cryptographically random, at least 128 bits, generated
+# by the server"). `getrandom` rather than `rand`: this needs exactly one thing — bytes from the
+# OS CSPRNG — and `rand` would bring a PRNG, a distribution framework and a seeding policy, none
+# of which should be anywhere near a security token. Already in the tree under `ring`.
+getrandom = { version = "0.2" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 

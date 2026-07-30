@@ -48,7 +48,7 @@ export type WorkerState = 'starting' | 'ready' | 'busy' | 'restarting' | 'failed
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 
 /**
- * The closed `ErrorCode` set of SDD §4.2 — 24 codes, the order of `ErrorCode::ALL`.
+ * The closed `ErrorCode` set of SDD §4.2 — 25 codes, the order of `ErrorCode::ALL`.
  *
  * Exported as a value as well as a type because the UI switches on these strings and a typo in a
  * `case` label is otherwise silent.
@@ -57,6 +57,11 @@ export const ERROR_CODES = [
   'NOT_CONNECTED',
   'UNSUPPORTED',
   'BUSY',
+  // A motion that had started was stopped before it finished (SDD §4.2 change note, M1-T03).
+  // A goto interrupted by an e-stop used to answer `DEVICE_REJECTED`/422, which told the
+  // operator their request was malformed at the moment their emergency stop worked. 409, and
+  // not retryable — re-issuing the goto would drive the mount back into whatever stopped it.
+  'ABORTED',
   'MOUNT_TIMEOUT',
   'CAMERA_TIMEOUT',
   'DEVICE_TIMEOUT',
@@ -103,12 +108,34 @@ export interface MountPosition {
   pier_side: PierSide;
 }
 
+/**
+ * `mount.status`.
+ *
+ * `tracking_mode` is the rate the mount settled on, and it is `null` whenever `tracking` is
+ * `false`. It exists because the pair `{tracking: true}` alone could not say *which* rate was
+ * running, so `TrackingControl` could show that the mount was tracking and had to leave every
+ * rate button unhighlighted rather than guess from the last button pressed — which would have
+ * been wrong after any reconnect. Added to the §4.3 payload by M1-T03 at M1-T04's request.
+ *
+ * Kept alongside `tracking` rather than replacing it: most of the UI binds to the boolean, and a
+ * `null` check is a worse thing to ask of every consumer.
+ */
 export interface MountStatus {
   state: MountState;
   tracking: boolean;
+  tracking_mode: TrackingRate | null;
   slewing: boolean;
   parked: boolean;
 }
+
+/**
+ * The rates a mount can track at — `astroctl_core::types::TrackingMode`.
+ *
+ * Not the same set as the tracking *command*'s `mode`, which also accepts `"off"`. Off is not a
+ * rate: the HAL splits starting and stopping into two methods, and `tracking_mode: null` is how
+ * the event says the drive is not running.
+ */
+export type TrackingRate = 'sidereal' | 'lunar' | 'solar';
 
 export interface CameraStatus {
   connected: boolean;
@@ -307,7 +334,21 @@ export function parseEvent(value: unknown): TelemetryEvent | null {
       const slewing = bool(data['slewing']);
       const parked = bool(data['parked']);
       if (state === null || tracking === null || slewing === null || parked === null) return null;
-      return { topic: 'mount.status', ts, data: { state, tracking, slewing, parked } };
+      // `tracking_mode` is narrowed but never required: a node older than this bundle does not
+      // send it, and refusing the frame over a missing field would blank the mount panel against
+      // a node that is working perfectly. Unreadable or absent both become `null`, which is the
+      // same thing the UI shows for "tracking is off" — and the `tracking` boolean beside it is
+      // what distinguishes the two.
+      const tracking_mode = oneOf(data['tracking_mode'], [
+        'sidereal',
+        'lunar',
+        'solar',
+      ] as const);
+      return {
+        topic: 'mount.status',
+        ts,
+        data: { state, tracking, tracking_mode, slewing, parked },
+      };
     }
     case 'camera.status': {
       const connected = bool(data['connected']);

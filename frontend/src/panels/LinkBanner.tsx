@@ -7,10 +7,24 @@ import { useUiStore } from '../store/ui';
 import { Button } from '../ui/Button';
 
 /**
- * What the link is doing, whenever that is not "working" — SDD §5.9, §8.3(8), REL-10.
+ * What the connection is doing, whenever that is not "working" — SDD §5.9, §8.3(8), REL-10.
  *
  * Silent when live: a banner that is always there is furniture, and the header badge already
  * carries the steady state.
+ *
+ * # The words here are the operator's, not ours
+ *
+ * This banner used to open with "The event link is down". An operator read it and asked what an
+ * event link was — a fair question, because it names an implementation detail (a WebSocket
+ * carrying `Event` frames) rather than anything they can act on. What they need to know is that
+ * the app is no longer in touch with the telescope, so what is on screen may be stale and a
+ * command may not arrive.
+ *
+ * The rule the strings below follow: say what is true of *the telescope*, then what it means for
+ * *commands*, then what the app is doing about it. Nothing names a transport, a ticket, a
+ * socket or a frame. The register is plain rather than reassuring — an operator standing in a
+ * field at 2 a.m. is not helped by cheerfulness, and "reconnecting" with a countdown is more
+ * informative than "oops!".
  *
  * # A bad token is a dead end, and says so
  *
@@ -19,12 +33,16 @@ import { Button } from '../ui/Button';
  * reason, so this banner is the only thing that can move the operator forward — hence the button
  * straight to the credential. A spinner here would be the failure the requirement names.
  *
+ * "Token" survives the rewording, deliberately: it is the label on the field the operator typed
+ * it into (`ConnectPanel`), so renaming it here would make the message point at a control that
+ * no longer matches it.
+ *
  * # Reconnection is narrated, not hidden
  *
  * The countdown and the attempt number are shown because the alternative is an operator watching
  * a frozen panel deciding whether to reload the app in the dark, mid-session. The reason the last
- * attempt failed is shown for the same reason: "the node refused the ticket" and "nothing
- * answered" send them to different places.
+ * attempt failed is shown for the same reason: "the token was refused" and "nothing answered"
+ * send them to different places.
  */
 export function LinkBanner(): ReactNode {
   const link = useTelemetryStore(selectLink);
@@ -38,9 +56,8 @@ export function LinkBanner(): ReactNode {
     return (
       <Note tone="danger" glyph="⊘">
         <span>
-          The field node refused the credential when asking for a WebSocket ticket: {link.message}.
-          Nothing will update until a working token is stored — this is not being retried, because
-          a wrong token stays wrong.
+          The telescope refused this token, so nothing is connected and no reading on this screen
+          is current. Nothing is being retried — a wrong token stays wrong until it is replaced.
         </span>
         <Button className="mt-2" onClick={openSystem}>
           Enter a token
@@ -59,16 +76,21 @@ export function LinkBanner(): ReactNode {
 function describe(link: LinkPhase, now: number): string {
   switch (link.phase) {
     case 'idle':
-      return 'Not connected to the field node.';
+      return 'Not connected to the mount.';
+    // The two connecting phases read the same to an operator on purpose. They differ by which
+    // half of the handshake is in flight, which is a distinction only a developer can act on —
+    // and showing two different sentences a second apart looks like something going wrong.
     case 'authorizing':
-      return `Requesting a WebSocket ticket (attempt ${link.attempt}).`;
     case 'connecting':
-      return `Opening the event socket (attempt ${link.attempt}).`;
+      return `Connecting to the mount (attempt ${link.attempt})…`;
     case 'syncing':
-      return 'Connected; waiting for the state snapshot. Nothing is shown until it arrives.';
+      return 'Connected. Waiting for the mount to report its state — nothing is shown until it does.';
     case 'retrying': {
       const seconds = Math.max(0, Math.ceil((link.retryAt - now) / 1000));
-      return `Link down after ${link.attempt} attempt${link.attempt === 1 ? '' : 's'} — ${failureText(link)}. Retrying in ${seconds}s.`;
+      return (
+        `Not connected to the mount — commands can't be confirmed and nothing on screen is ` +
+        `current. ${failureText(link)} Retrying in ${seconds}s (attempt ${link.attempt}).`
+      );
     }
     case 'live':
     case 'unauthorized':
@@ -76,15 +98,22 @@ function describe(link: LinkPhase, now: number): string {
   }
 }
 
+/**
+ * Why the last attempt failed, in one sentence an operator can act on.
+ *
+ * The three kinds send them to genuinely different places — fix the token, go look at the
+ * machine, or wait — so they are worth distinguishing. What is *not* worth showing is the
+ * underlying text: a close code, a path, or "no frame for 12 s" tells an operator nothing they
+ * can do anything about, and reads as though the app is malfunctioning rather than the link.
+ */
 function failureText(link: Extract<LinkPhase, { phase: 'retrying' }>): string {
-  const { failure } = link;
-  switch (failure.kind) {
+  switch (link.failure.kind) {
     case 'unauthorized':
-      return failure.message;
+      return 'The stored token was refused.';
     case 'api':
-      return `${failure.code}: ${failure.message}`;
+      return 'The telescope answered with an error.';
     case 'transport':
-      return failure.message;
+      return 'Nothing is answering — check power and the network link to the telescope.';
   }
 }
 

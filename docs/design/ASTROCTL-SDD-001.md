@@ -59,6 +59,8 @@
 
 **Change note (1.15.0):** §5.12 gains the worker-side obligations M1-T13 found by implementing it. The load-bearing one: **a worker must answer pings while it computes**. At the documented defaults a single-threaded worker computing for 15 s is SIGKILLed by its own liveness probe, so every real stacking job would crash-loop, and the config validator's `job_timeout > 3 × health_ping` bound reads as though it prevents this but does not. Also recorded: `result` is rejected at the decoder if it claims success and carries an error; frames are bounded at 1 MiB and a trailing partial frame is dropped, so a worker that loses framing cannot stream its heap into the backbone; unknown fields are ignored *because* a strict decoder would defeat §5.12.2's version-mismatch reporting; the retry backoff resets after a worker outlives the ceiling, or one bad night leaves it there permanently; writes to the child are deadline-bounded, since a full pipe would otherwise park the task holding the ping timer and let a wedge disable its own detector; worker stdout is redirected to stderr, because a stray `print` desynchronises the decoder and surfaces hours later as previews stopping; and the JPEG write is atomic. Found by building it, not by review.
 
+**Change note (1.17.0):** the walking skeleton's first vertical slice, and three schema corrections it forced. **§4.3 `mount.position` makes `alt`/`az` nullable.** The mount facade publishes this event and the topocentric transform belongs to the safety monitor (§5.4) that *wraps* it, so between M1-T03 and M1-T05 the honest value is "not computed here" — and the stand-in a non-nullable field would have required is `0.0`, which is the horizon, which is exactly where the altitude limit lives. **§4.3 `mount.status` gains `tracking_mode`.** The payload carried `tracking: bool` and could not say which rate was running, so M1-T04's `TrackingControl` correctly refused to highlight any rate rather than remember the last button pressed — a decision that would have been wrong after every reconnect, every driver that refuses a rate as `Unsupported`, and every goto that suspends tracking and resumes it. The mount is the only thing that knows its rate. `tracking` is kept beside it: it is what most of the UI binds to and removing it would break a shipped client for no gain. **§4.2 gains `ABORTED`** (409, not retryable) and `DeviceError` gains the matching variant; the enum's review-checkpoint count moves 24 → 25. M1-T02 reported that a goto interrupted by an emergency stop had to return `Rejected`, which maps to `DEVICE_REJECTED`/422 — telling the operator their *request* was malformed at the moment their e-stop worked. It is not retryable because re-issuing the goto drives the mount back into whatever stopped it. Also settled, because §5.8.3 leaves them undefined and the PWA already depends on them: **control frames carry `type` where events carry `topic`** (an `Event` is a frozen serialization with no room for an envelope, so the snapshot and the pong cannot be events), **`ping` is an application-level message** (the browser `WebSocket` API can neither send nor observe an RFC 6455 ping, so a protocol-level answer is one no browser could ask for), and **the default subscription is every topic** (`subscribe` narrows; a hub requiring one would deliver nothing to a client that sends none). All three were proposed by M1-T04's mock and adopted unchanged. Landed by M1-T03.
+
 **Change note (1.16.0):** three decisions taken while their cost was still low, all provoked by M1-T12/T13 findings. §4.2 gains the worker vocabulary — `CANCELLED`, `WORKER_UNAVAILABLE`, `WORKER_CRASHED`, `WORKER_TIMEOUT` — because every supervisor failure was about to collapse onto `INTERNAL`, and the PWA that switches on these codes is still one screen, so extending the frozen contract now costs a table edit rather than a migration; the enum's review-checkpoint count moves 20 → 24. `WorkerState` gains `Stopped` (its `Default`): workers spawn on demand, so "no worker running, none needed" is the stack node's normal idle state, and carrying it as `Option::None` collided with `StackStatus`'s use of `null` for "stack unreachable" — two different absences sharing one spelling. §5.11.1 gains the `HEAD /api/ingest/{session_id}/{frame_id}` pre-flight, because M1-T12 proved the POST cannot answer a duplicate cheaply over HTTP, so M1-T11 is built with the pre-flight from the start rather than retrofitted. §5.10.1's queue table keys on `(session_id, frame_id)`, inheriting §5.11.2's dedup correction before M1-T11 implements the schema with the defect in it.
 
 ---
@@ -233,6 +235,7 @@ pub enum DeviceError {
     #[error("transport error: {0}")]          Transport(String),   // serial/USB layer
     #[error("unsupported by this device")]    Unsupported,         // capability mismatch
     #[error("busy: {0}")]                     Busy(&'static str),  // e.g. slew in progress
+    #[error("aborted: {0}")]                  Aborted(String),     // e-stop/limit took the axes
 }
 ```
 
@@ -252,6 +255,7 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | Code | Status | Retryable | Raised by |
 |------|--------|-----------|-----------|
 | `NOT_CONNECTED`, `UNSUPPORTED`, `BUSY` | 409 | no | device state (§5.1), orchestrator FSM (§5.6) |
+| `ABORTED` | 409 | no | `DeviceError::Aborted` — a motion that had *started* was stopped by an e-stop, a safety limit or an operator stop. The 409 twin of `CANCELLED`, and separate from it because `CANCELLED` is a stacking job and this is the telescope; rendering worker copy for an e-stop sends the operator to the wrong place. Never retryable: the request was valid, but re-issuing it drives the mount back into whatever stopped it |
 | `MOUNT_TIMEOUT`, `CAMERA_TIMEOUT`, `DEVICE_TIMEOUT` | 502 | **yes** | `DeviceError::Timeout`, qualified by which device |
 | `DEVICE_TRANSPORT` | 502 | **yes** | `DeviceError::Transport` |
 | `DEVICE_PROTOCOL` | 502 | no | `DeviceError::Protocol` |
@@ -296,8 +300,8 @@ Phase 1 topics and payloads:
 
 | Topic | Payload | Cadence |
 |-------|---------|---------|
-| `mount.position` | `{ra, dec, alt, az, pier_side}` | 1 Hz (MNT-02) |
-| `mount.status` | `{state, tracking, slewing, parked}` | on change |
+| `mount.position` | `{ra, dec, alt, az, pier_side}` — `alt`/`az` are **nullable**: the facade that publishes this does not compute the topocentric transform, the safety monitor wrapping it does (§5.4, M1-T05). `null` rather than `0.0`, which is the horizon and therefore the one value that would corrupt the altitude limit | 1 Hz (MNT-02) |
+| `mount.status` | `{state, tracking, tracking_mode, slewing, parked}` — `tracking_mode` is the rate (`sidereal`\|`lunar`\|`solar`) or `null` when the drive is off, and `tracking` is derived from it so the two cannot contradict. The rate is carried because only the mount knows it: a driver may refuse one as `Unsupported`, and a goto suspends tracking and resumes whatever was running before, so a UI deriving it from the last accepted command guesses wrong exactly when it is checked | on change |
 | `camera.status` | `{connected, battery_pct, charging, storage_free_mb}` | on change + 60s |
 | `capture.progress` | `{frame_id, state: exposing\|downloading\|saved\|preview_ready, elapsed_s}` | on change |
 | `frame.saved` | `{frame_id, path, size_bytes, sha256}` | per frame |
@@ -702,6 +706,23 @@ Registered before the normal middleware stack (auth only, no JSON parsing — em
 #### 5.8.3 WS hub
 
 One task serving two endpoints per client (§8.3 separation): `/ws` for JSON control/status events, `/ws/liveview` for binary image frames. Per-client bounded queues: on `/ws`, 64 events with a latest-only slot for `mount.position` (high-rate telemetry coalesces, discrete events never dropped while under bound); on `/ws/liveview`, a depth-1 replace queue — only the newest frame is ever in flight. Client subscribe/unsubscribe messages filter topics server-side. Reconnect is client-driven (PWA auto-reconnect, REL-10); on `/ws` connect the hub sends a state snapshot (current status of every stateful topic) so the UI never renders from partial state. Every outbound event carries `ts`, and the hub answers `ping` frames immediately — the PWA derives link RTT and telemetry age from these (§8.3).
+
+**Frame shapes (M1-T03).** §4.3 requires the WS frame and the session-log line to be the identical serialization of `Event`, so an event frame is exactly `{v, ts, topic, data}` and has nowhere to put an envelope. The snapshot and the ping answer are therefore **control frames, told apart from events by carrying `type` where an event carries `topic`**. Nothing carries both.
+
+```json
+{"v":1,"type":"snapshot","ts":"…","events":[ <Event>, … ]}
+{"v":1,"type":"pong","ts":"…","id":<echoed>,"server_time":"…"}
+```
+
+Client → server: `{"type":"ping","id":n}`, `{"type":"subscribe","topics":[…]}`, `{"type":"unsubscribe","topics":[…]}`. Unknown `type` values and unknown topic names are **ignored, not fatal** — a client newer than the node is normal after an upgrade, and refusing the connection would turn a forward-compatible client into a reconnect loop.
+
+Three points this pins down that the paragraph above leaves open:
+
+- **`ping` is an application-level message, not RFC 6455.** The browser `WebSocket` API can neither send a protocol ping nor observe a pong, so an answer at the protocol level is one no browser could ever ask for. `pong` echoes the request's `id` so a client can match an answer to its question rather than to "some recent pong".
+- **The default subscription is every topic.** `subscribe` narrows it, `unsubscribe` narrows further. The PWA sends neither message, so a hub that required an explicit subscribe would deliver nothing to the only client there is.
+- **The snapshot carries the latest event for each *stateful* topic** — `mount.position`, `mount.status`, `camera.status`, `capture.progress`, `transfer.status`, `stack.status`, `system.health`. `alert`, `frame.saved` and `transfer.acked` are occurrences rather than values that are true, and replaying them on every reconnect would show the operator a warning they already dealt with. **A topic absent from the snapshot means the node has no value for it**, and the client reduces it back to unknown: disconnect the mount and `mount.position` leaves the snapshot, so a reconnecting client shows no coordinates rather than the ones from before the drop.
+
+Overflow closes the connection rather than dropping an event (§4.3), which is what makes "discrete events are never dropped while under bound" true rather than approximate: the client reconnects and resnapshots, so it sees current state instead of a panel quietly missing a frame.
 
 ### 5.9 PWA (M1 scope)
 

@@ -65,11 +65,11 @@ export function ManualTargetChooser(): ReactNode {
           (result) => {
             setSending(false);
             if (result.ok) {
-              setAccepted(
-                result.value === null
-                  ? 'Accepted. Watch the pointing readout.'
-                  : `Accepted (${result.value.correlation_id.slice(0, 8)}). Watch ${result.value.watch_topic}.`,
-              );
+              // The `correlation_id` and `watch_topic` the node returns are for correlating a
+              // request with a log line, not for an operator: telling someone to "watch
+              // mount.position" names an internal topic and asks them to do something the
+              // pointing readout is already doing for them.
+              setAccepted('Accepted. The mount is slewing — watch the coordinates above.');
             } else {
               setFailure(result.failure);
             }
@@ -100,7 +100,7 @@ export function ManualTargetChooser(): ReactNode {
 
       {!ready && link.phase !== 'live' && (
         <p className="text-sm text-muted">
-          The event link is down, so a goto cannot be confirmed. The app is reconnecting.
+          Not connected to the mount — a goto can&rsquo;t be confirmed. Reconnecting.
         </p>
       )}
       {slewing && <p className="text-sm text-muted">A slew is in flight; wait for it to settle.</p>}

@@ -15,16 +15,21 @@ import { FailureNote } from '../ui/FailureNote';
  *
  * # The selection shown is the mount's, never the button that was pressed
  *
- * `mount.status` carries a single `tracking` boolean, not the rate, so this control can show
- * *whether* the mount is tracking but not which rate it settled on. Rather than remember the last
- * button pressed and present it as the current mode — which would be optimistic UI wearing a
- * different hat, and would be wrong after any reconnect — the panel highlights on/off from the
- * event and leaves the rate buttons unhighlighted.
+ * The highlighted rate comes from `mount.status.tracking_mode`, so it is what the *mount* is
+ * doing. Nothing here remembers which button was pressed: that would be optimistic UI wearing a
+ * different hat, and it would be wrong in exactly the cases an operator checks this panel for —
+ * a driver that refused `lunar` as unsupported, a goto that suspended tracking and resumed it at
+ * the previous rate, or any reconnect at all.
  *
- * This is a real gap in the §4.3 payload and it is worth naming: `mount.status` would need a
- * `tracking_mode` field for the UI to reflect the rate honestly. It is listed in the M1-T04
- * result as something for M1-T03 to consider rather than patched around here, because inventing
- * a field the node does not send is how a frontend ends up with a schema of its own.
+ * M1-T04 shipped this control against a payload that carried only `tracking: boolean` and
+ * therefore left every rate button unhighlighted, with a comment asking M1-T03 for the field
+ * rather than inventing one here. M1-T03 added it (SDD §4.3 change note); this is that comment
+ * being paid off, and the discipline that produced it — a frontend that does not invent a schema
+ * of its own — is the reason it could be.
+ *
+ * `tracking_mode` is `null` on a node too old to send it, which renders exactly like tracking
+ * being off. The `tracking` boolean beside it is what tells the two apart, and the accessory
+ * still reads from that.
  */
 const MODES: readonly { id: TrackingMode; label: string }[] = [
   { id: 'sidereal', label: 'Sidereal' },
@@ -40,6 +45,11 @@ export function TrackingControl(): ReactNode {
   const [failure, setFailure] = useState<RequestFailure | null>(null);
 
   const tracking = status.state === 'observed' && status.value.tracking;
+  // The rate the mount reports, or `null`. `off` is the selected "rate" when the drive is
+  // stopped, so the operator can see that off is a state the mount is in rather than the absence
+  // of one.
+  const rate: TrackingMode | null =
+    status.state === 'observed' ? (status.value.tracking_mode ?? (tracking ? null : 'off')) : null;
   const usable =
     link.phase === 'live' &&
     status.state === 'observed' &&
@@ -58,27 +68,36 @@ export function TrackingControl(): ReactNode {
       }
     >
       <div className="grid grid-cols-2 gap-2">
-        {MODES.map((mode) => (
-          <Button
-            key={mode.id}
-            disabled={!usable}
-            onClick={() => {
-              setFailure(null);
-              void mountTracking(token, mode.id).then((result) => {
-                if (!result.ok) setFailure(result.failure);
-              });
-            }}
-          >
-            {mode.label}
-          </Button>
-        ))}
+        {MODES.map((mode) => {
+          const selected = rate === mode.id;
+          return (
+            <Button
+              key={mode.id}
+              disabled={!usable}
+              // `aria-pressed` rather than colour alone: the token layer collapses hues toward
+              // red in night mode (USB-02), so a highlight that is only a colour is a highlight
+              // two operators see differently. The glyph carries it for everyone else.
+              aria-pressed={selected}
+              className={selected ? 'border-ok text-ok' : undefined}
+              onClick={() => {
+                setFailure(null);
+                void mountTracking(token, mode.id).then((result) => {
+                  if (!result.ok) setFailure(result.failure);
+                });
+              }}
+            >
+              <span aria-hidden="true">{selected ? '● ' : '○ '}</span>
+              {mode.label}
+            </Button>
+          );
+        })}
       </div>
 
       {!usable && (
         <p className="mt-2 text-sm text-muted">
           {link.phase === 'live'
             ? 'The mount is not connected.'
-            : 'The event link is down; a rate change could not be confirmed.'}
+            : "Not connected to the mount — a rate change can't be confirmed."}
         </p>
       )}
 

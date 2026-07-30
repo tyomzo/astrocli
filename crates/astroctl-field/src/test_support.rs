@@ -28,7 +28,7 @@ impl TestNode {
     /// A node bound to `0.0.0.0` with a token — the production posture.
     pub fn authenticated(token: &str) -> Self {
         Self {
-            yaml: EXAMPLE.to_owned(),
+            yaml: simulated_mount(EXAMPLE),
             token: Some(token.to_owned()),
         }
     }
@@ -36,7 +36,7 @@ impl TestNode {
     /// A node with no token, bound to loopback — the SDD §4.5 exception.
     pub fn open_loopback() -> Self {
         Self {
-            yaml: EXAMPLE.replace("host: 0.0.0.0", "host: 127.0.0.1"),
+            yaml: simulated_mount(&EXAMPLE.replace("host: 0.0.0.0", "host: 127.0.0.1")),
             token: None,
         }
     }
@@ -110,6 +110,23 @@ impl TestNode {
     }
 }
 
+/// Point `mount.driver` at the simulator.
+///
+/// The example ships `driver: skywatcher`, which is right for the operator and wrong for a test
+/// suite that has no telescope: the registry would refuse to build it and every route test would
+/// fail at startup rather than at what it was testing. Rewriting the key rather than
+/// special-casing the driver in [`state_with`] means the tests still go through the real
+/// registry lookup, so a driver name that stopped resolving would be caught here.
+fn simulated_mount(yaml: &str) -> String {
+    let simulated = yaml.replace("driver: skywatcher", "driver: simulator");
+    assert_ne!(
+        simulated, yaml,
+        "config/field-node.example.yaml no longer selects the skywatcher mount driver, so the \
+         test fixtures are silently running against whatever it does select"
+    );
+    simulated
+}
+
 /// Append a block to the end of the example, which lands it inside `server`.
 ///
 /// Asserted rather than assumed: a future PRD §8.1 edit that adds a section after `server` would
@@ -144,6 +161,16 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
         .map(|tls| crate::tls::load(tls).expect("the fixture certificate must load"))
         .map(|materials| materials.status());
 
+    // Through the same `build_mount` the binary uses, so a test drives the driver the operator's
+    // `mount.driver` actually selects rather than one the harness picked.
+    let device = crate::build_mount(&config).expect("the fixture must build a mount driver");
+    let bus = EventBus::new();
+    let mount = Arc::new(crate::mount::MountFacade::new(
+        device,
+        bus.clone(),
+        &config.mount,
+    ));
+
     AppState {
         proxy: Arc::new(StackProxy::new(&config.stacking_server)),
         runtime: RuntimeSizing {
@@ -153,7 +180,7 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
         },
         certificate,
         config,
-        bus: EventBus::new(),
+        bus,
         status: Arc::new(StatusCell::starting()),
         uptime: Uptime::started_now(),
         auth: Arc::new(auth),
@@ -162,5 +189,8 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
             dir: None,
             error: None,
         },
+        mount,
+        tickets: Arc::new(crate::ticket::TicketStore::new()),
+        snapshots: Arc::new(crate::ws::SnapshotStore::new()),
     }
 }

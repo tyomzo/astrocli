@@ -33,13 +33,13 @@
 //!   A facade that treats "position changed" as "the mount is moving" will report a parked mount
 //!   as slewing all night. Motion is what [`MountDevice::status`](astroctl_hal::mount::MountDevice::status)
 //!   is for.
-//! * **A `goto` that loses its axes returns [`DeviceError::Rejected`](astroctl_core::error::DeviceError::Rejected)**,
-//!   with a message naming what took them ("goto aborted by an emergency stop").
-//!   `DeviceError` has no `Aborted` variant and none of the existing ones fit: it is not `Busy`
-//!   (nothing refused to start), not `Timeout` (the mount answered), and `Rejected` maps to
-//!   `DEVICE_REJECTED`/422, which tells the operator their *request* was bad when in fact their
-//!   e-stop worked. Treat any error from `goto` as "the slew did not complete" and read
-//!   `status()` for what the mount is doing, rather than switching on the variant.
+//! * **A `goto` that loses its axes returns [`DeviceError::Aborted`](astroctl_core::error::DeviceError::Aborted)**,
+//!   with a message naming what took them ("goto aborted by an emergency stop"). M1-T02 wrote
+//!   this bullet to report that no variant fit — it was `Rejected`, which maps to
+//!   `DEVICE_REJECTED`/422 and tells the operator their *request* was bad when in fact their
+//!   e-stop worked. M1-T03 added `Aborted`, mapping to `ABORTED`/409. Still treat any error
+//!   from `goto` as "the slew did not complete" and read `status()` for what the mount is
+//!   doing, rather than switching on the variant.
 //! * **`goto` resolves after the settle interval**, not on arrival, so its duration includes
 //!   `mount.settle_time_seconds`. That is the HAL's definition of completion — "ready for the
 //!   next command" — and it is what makes `Ok(())` a safe moment to open the shutter.

@@ -176,6 +176,21 @@ where
         self.declare(path, "GET", meta, axum::routing::get(handler))
     }
 
+    /// Declare a `POST` route.
+    ///
+    /// Every state-changing route in SDD §5.8.1 is a POST, so this arrived with M1-T03's mount
+    /// rows. It is the same two lines as [`get`](Self::get) on purpose: the value of this type
+    /// is that there is no way to mount a handler without declaring its tier, and a second
+    /// spelling of "declare a route" would be a second place for that to be forgotten.
+    #[must_use]
+    pub fn post<H, T>(self, path: &'static str, meta: RouteMeta, handler: H) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.declare(path, "POST", meta, axum::routing::post(handler))
+    }
+
     /// Declare a route serving every method — the `/stack/*` proxy (SDD §5.8.1).
     #[must_use]
     pub fn any<H, T>(self, path: &'static str, meta: RouteMeta, handler: H) -> Self

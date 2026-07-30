@@ -43,6 +43,9 @@ ERROR_CODES = frozenset(
         "NOT_CONNECTED",
         "UNSUPPORTED",
         "BUSY",
+        # A motion stopped by an e-stop or a safety limit (M1-T03). Nothing a worker raises, but
+        # the vocabulary is shared and the conformance test compares the whole set.
+        "ABORTED",
         "MOUNT_TIMEOUT",
         "CAMERA_TIMEOUT",
         "DEVICE_TIMEOUT",

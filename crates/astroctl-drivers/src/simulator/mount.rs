@@ -757,13 +757,16 @@ impl SimulatorMount {
 
 /// The error an in-flight goto returns when something else took the axes.
 ///
-/// `Rejected` is the least wrong variant in `DeviceError` and it is not a good fit — see the
-/// crate docs. It is not `Busy` (nothing is refusing to start), not `Timeout` (the mount
-/// answered), and there is no `Aborted`. Callers above the HAL should match on it by message at
-/// their peril; the mount facade (M1-T03) should treat any error from `goto` as "the slew did
-/// not complete" and read `status()` for what the mount is actually doing.
+/// [`DeviceError::Aborted`] exists because of this call site: M1-T02 had to return `Rejected`
+/// here and said so in the crate docs, and `Rejected` maps to `DEVICE_REJECTED`/422 — telling
+/// the operator their *request* was malformed at the moment their emergency stop worked.
+/// M1-T03 added the variant and it maps to `ABORTED`/409 instead.
+///
+/// It remains true that callers should not switch on the variant to decide what the mount is
+/// doing: `Aborted` says the slew did not finish, not where the tube ended up. Read `status()`
+/// for that.
 fn overridden(command: MountCommand, by: &'static str) -> DeviceError {
-    DeviceError::Rejected(format!("{} aborted by {by}", command.as_str()))
+    DeviceError::Aborted(format!("{} aborted by {by}", command.as_str()))
 }
 
 /// Folds a difference in degrees into `[-180, 180)` so the mount takes the short way round.
