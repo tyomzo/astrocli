@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "The shared conformance fixture for T-IPC-1. Both crates/astroctl-ipc/src/protocol.rs and",
+    "workers/astroctl_ipc.py round-trip every message below and must produce identical JSON,",
+    "and both must refuse every frame in `rejected_from_worker`. Two hand-written definitions",
+    "of one wire format drift; this is what makes the drift a failing test instead of a night",
+    "of stacking. Editing a message here without editing both implementations is the point.",
+    "Run the Python half by hand with:",
+    "  python3 workers/astroctl_ipc.py crates/astroctl-ipc/testdata/golden-messages.json"
+  ],
+
+  "proto_version": 1,
+  "max_line_bytes": 1048576,
+
+  "error_codes": [
+    "AUTH",
+    "BUSY",
+    "CAMERA_TIMEOUT",
+    "CHECKSUM_MISMATCH",
+    "COMMAND_STALE",
+    "DEVICE_PROTOCOL",
+    "DEVICE_REJECTED",
+    "DEVICE_TIMEOUT",
+    "DEVICE_TRANSPORT",
+    "DISK_FULL",
+    "FRAME_ID_CONFLICT",
+    "INTERNAL",
+    "LIMIT_ALTITUDE",
+    "LIMIT_MERIDIAN",
+    "MOUNT_TIMEOUT",
+    "NOT_CONNECTED",
+    "NOT_FOUND",
+    "SLEW_TTL_EXPIRED",
+    "UNSUPPORTED",
+    "VALIDATION"
+  ],
+
+  "job_kinds": ["preview"],
+
+  "to_worker": [
+    { "type": "hello", "proto_version": 1 },
+    {
+      "type": "job",
+      "id": 1,
+      "kind": "preview",
+      "params": {
+        "softening": 10.0,
+        "black_point_pct": 0.5,
+        "white_point_pct": 99.5,
+        "max_dimension": 2048
+      },
+      "paths": ["/data/astro/sessions/2026-07-29_ngc7000/frames/light_000001.fits"]
+    },
+    { "type": "cancel", "id": 1 },
+    { "type": "ping", "nonce": 7 },
+    { "type": "shutdown" }
+  ],
+
+  "from_worker": [
+    {
+      "type": "hello",
+      "proto_version": 1,
+      "capabilities": {
+        "gpu": false,
+        "libs": { "numpy": "2.4.3", "pillow": "12.1.1" }
+      }
+    },
+    {
+      "type": "hello",
+      "proto_version": 1,
+      "capabilities": {
+        "gpu": true,
+        "vram_mb": 24576,
+        "libs": { "cupy": "13.3.0", "numpy": "2.4.3" }
+      }
+    },
+    { "type": "progress", "id": 1, "pct": 50 },
+    {
+      "type": "result",
+      "id": 1,
+      "ok": true,
+      "data": {
+        "preview_path": "/data/astro/sessions/2026-07-29_ngc7000/frames/light_000001.jpg",
+        "source_path": "/data/astro/sessions/2026-07-29_ngc7000/frames/light_000001.fits",
+        "width": 1024,
+        "height": 683
+      }
+    },
+    {
+      "type": "result",
+      "id": 2,
+      "ok": false,
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "no such frame: /data/astro/sessions/gone/frames/light_000002.fits"
+      }
+    },
+    { "type": "pong", "nonce": 7 },
+    { "type": "log", "level": "warn", "message": "falling back to the numpy path" }
+  ],
+
+  "rejected_from_worker": [
+    "{\"type\":\"result\",\"id\":3,\"ok\":true,\"error\":{\"code\":\"INTERNAL\",\"message\":\"boom\"}}",
+    "{\"type\":\"result\",\"id\":4,\"ok\":false}",
+    "{\"type\":\"progress\",\"id\":5,\"pct\":101}",
+    "{\"type\":\"result\",\"id\":6,\"ok\":false,\"error\":{\"code\":\"WORKER_EXPLODED\",\"message\":\"x\"}}",
+    "{\"type\":\"pong\"}",
+    "{\"type\":\"teleport\",\"id\":7}",
+    "not json at all"
+  ]
+}

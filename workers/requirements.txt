@@ -1,7 +1,4 @@
-# Python workers for the stacking server (ADD §5.6, ADR-13).
-#
-# Placeholder — M0-T01 creates the directory and this file; the actual pins land with the
-# workers themselves (compute_worker.py in M1-T13 and beyond, ml_worker.py in Phase 3).
+# Python workers for the stacking server (ADD §5.6, ADR-13). See workers/README.md.
 #
 # Constraints already fixed by the design, recorded here so they are not rediscovered:
 #   - CuPy (CUDA) with a numpy fallback path — CMP-06 requires the CPU path to work
@@ -11,3 +8,19 @@
 #     open no sockets of their own (ADD §5.6 rule 4). Nothing here may imply otherwise.
 #   - These packages are installed on the stacking server only. The field node is packaged
 #     without workers/ entirely (ADD §5.6 rule 6).
+#
+# M1-T13 adds the two the preview job actually uses. Both are imported *late*, inside the job,
+# so a stacking server whose venv is not yet populated still handshakes, still answers health
+# pings and still refuses a protocol mismatch correctly — and reports the missing dependency as
+# a structured error naming this file. The M0-T08 stack image ships a bare python3 for exactly
+# that reason, and the supervision half of T-IPC-1 runs against it unchanged.
+
+# Array maths for the asinh stretch. Floor is the first release supporting the Python versions
+# this deployment targets; the ceiling is a major-version wall, because numpy 3 has not happened
+# yet and inheriting it silently is not something to discover at 2 a.m.
+numpy>=1.26,<3
+
+# JPEG encoding. The standard library has no encoder, and hand-rolling baseline JPEG would put
+# 250 lines of DCT and Huffman tables in front of the IPC machinery this milestone is actually
+# about. Floor is the release that fixed CVE-2023-4863 in the bundled libwebp.
+Pillow>=10.0.1,<13
