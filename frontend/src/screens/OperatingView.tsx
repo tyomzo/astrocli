@@ -1,8 +1,11 @@
 import type { ReactNode } from 'react';
 
 import { AlertStrip } from '../panels/AlertStrip';
+import { CameraVitals } from '../panels/CameraVitals';
+import { CaptureStrip } from '../panels/CaptureStrip';
 import { ImageSurface } from '../panels/ImageSurface';
 import { LinkBanner } from '../panels/LinkBanner';
+import { SessionFrames } from '../panels/SessionFrames';
 import { StackPanel } from '../panels/StackPanel';
 import { TargetRegion } from '../panels/TargetRegion';
 import { TrackingControl } from '../panels/TrackingControl';
@@ -42,11 +45,25 @@ export function OperatingView(): ReactNode {
           </Region>
           <Region destination="stack" current={destination}>
             <StackPanel />
+            {/*
+              The frame list lives with STACK rather than with FRAME, and that follows §5.9's own
+              decomposition: FRAME is where an exposure is *taken* and STACK is where the operator
+              asks "is this working". A count of stored frames answers the second question, and
+              putting it under the image would push the capture controls off a phone.
+            */}
+            <SessionFrames />
           </Region>
         </div>
 
         <Region destination="frame" current={destination}>
           <ImageSurface />
+          {/*
+            Under the image, not beside it — §5.9's `ISO 1600  30s  RAW  [CAPTURE]` row. Settings
+            and framing are one decision, so the control and the thing it affects stay in one field
+            of view, which is the same argument that puts the D-pad on top of the image.
+          */}
+          <CaptureStrip />
+          <CameraVitals />
         </Region>
       </PanelGrid>
     </>

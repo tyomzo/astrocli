@@ -115,7 +115,11 @@ describe('events', () => {
     expect(state.alerts[0]?.seq).toBe(40);
   });
 
-  it('ignores per-frame topics until the tasks that own them land', () => {
+  it('records a saved frame as something to re-read, not as something to render', () => {
+    // M1-T08. `frame.saved` is an occurrence rather than a value that is true, so it is not a slot
+    // a panel displays — the frame *list* comes from `/api/session/current`. What the store keeps
+    // is the fact that the list changed, which is what makes the panel ask the node again instead
+    // of assembling a list from the captures it happened to issue.
     const before = apply(EMPTY, { type: 'link/snapshot', at, events: [POSITION] });
     const after = apply(before, {
       type: 'link/event',
@@ -128,7 +132,73 @@ describe('events', () => {
       }),
     });
 
+    expect(after.framesSavedCount).toBe(1);
+    expect(after.lastFrameSaved).toEqual({
+      state: 'observed',
+      at: at + 1,
+      ts: '2026-07-30T21:04:05.123Z',
+      value: { frame_id: 'light_00001', path: '/srv/f.cr3', size_bytes: 1, sha256: 'ab' },
+    });
+    // Nothing else moved: a frame landing is not a change to what the mount or the camera is doing.
+    expect(after.mountPosition).toEqual(before.mountPosition);
+    expect(after.captureProgress).toEqual(before.captureProgress);
+
+    // The counter must distinguish two frames, or a panel keyed on it would skip a refresh.
+    const second = apply(after, {
+      type: 'link/event',
+      at: at + 2,
+      event: event('frame.saved', {
+        frame_id: 'light_00002',
+        path: '/srv/g.cr3',
+        size_bytes: 2,
+        sha256: 'cd',
+      }),
+    });
+    expect(second.framesSavedCount).toBe(2);
+  });
+
+  it('ignores per-frame topics the task that owns them has not landed yet', () => {
+    // `transfer.acked` is M1-T11's. Asserted rather than left implicit so that adding a §4.3 topic
+    // still has to be a decision somebody made.
+    const before = apply(EMPTY, { type: 'link/snapshot', at, events: [POSITION] });
+    const after = apply(before, {
+      type: 'link/event',
+      at: at + 1,
+      event: event('transfer.acked', {
+        frame_id: 'light_00001',
+        sha256: 'ab',
+        acked_at: '2026-07-30T21:04:05.123Z',
+        queue_depth: 0,
+      }),
+    });
+
     expect(after).toEqual(before);
+  });
+
+  it('rebuilds telemetry from a snapshot but keeps what it has already been told happened', () => {
+    // Rule 2 of the store's docs: a snapshot replaces telemetry rather than merging into it. It
+    // must not, though, erase the *occurrences* — `frame.saved` and `alert` are deliberately not in
+    // the snapshot (SDD §5.8.3), so rebuilding them from it would mean a reconnect silently
+    // resetting the frame counter to zero and making the panel believe the night had produced
+    // nothing.
+    const withFrame = apply(EMPTY, {
+      type: 'link/event',
+      at,
+      event: event('frame.saved', {
+        frame_id: 'light_00001',
+        path: '/srv/f.cr3',
+        size_bytes: 1,
+        sha256: 'ab',
+      }),
+    });
+    const resnapshotted = apply(withFrame, {
+      type: 'link/snapshot',
+      at: at + 1,
+      events: [POSITION],
+    });
+
+    expect(resnapshotted.framesSavedCount).toBe(1);
+    expect(resnapshotted.captureProgress).toEqual({ state: 'unknown' });
   });
 });
 

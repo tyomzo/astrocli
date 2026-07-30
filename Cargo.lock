@@ -90,6 +90,7 @@ dependencies = [
  "astroctl-drivers",
  "astroctl-hal",
  "astroctl-safety",
+ "astroctl-session",
  "axum",
  "chrono",
  "futures-util",

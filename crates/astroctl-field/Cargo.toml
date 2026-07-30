@@ -19,6 +19,10 @@ astroctl-drivers = { workspace = true }
 # M1-T05: the facade the API sees *is* `SafeMount` (ADR-11). This is the only crate that builds
 # one, because it is the only one that has both the driver and the operator's configuration.
 astroctl-safety = { workspace = true }
+# M1-T08: the capture flow writes through the frame store rather than to the filesystem — the
+# id reservation, the disk gate and the sha256 all live there (SDD §5.5), and this binary is
+# where the camera driver and the session layout meet.
+astroctl-session = { workspace = true }
 
 # M0-T05 (binary bootstrap). Features are chosen here, not in the workspace manifest (see the
 # comment on `[workspace.dependencies]`).

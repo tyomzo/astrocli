@@ -1,9 +1,9 @@
 import type { RequestResult } from './api';
-import { postJson } from './api';
-import type { MountStatus } from './link/protocol';
+import { getJson, postJson, putJson } from './api';
+import type { CameraStatus, MountStatus } from './link/protocol';
 
 /*
- * Mount commands — SDD §5.8.1's mount rows.
+ * Mount and camera commands — SDD §5.8.1's mount and camera rows.
  *
  * # This module cannot change what the UI shows
  *
@@ -152,4 +152,168 @@ export function mountSlewStop(
     axis === undefined ? {} : { axis },
     { keepalive: true },
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Camera — SDD §5.8.1's camera rows, §5.3.2's flow (M1-T08)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The capture format tokens, exactly as the node spells them.
+ *
+ * `RAW+JPEG` has a `+` in it and that is the wire value, not a display string: `astroctl-core`'s
+ * `ImageFormat` renames the variant to it. Prettifying it here would produce a body the node
+ * rejects.
+ */
+export const IMAGE_FORMATS = ['RAW', 'JPEG', 'RAW+JPEG'] as const;
+export type ImageFormat = (typeof IMAGE_FORMATS)[number];
+
+/**
+ * `GET /api/camera/settings` — the settings in force plus every value the body will accept.
+ *
+ * The settings are flattened into the top level and the lists are nested under `available`,
+ * which is how SDD §5.8.1 writes the row. ISO, shutter and aperture are **the camera's own
+ * tokens** rather than numbers (`"1600"`, `"1/250"`, `"30"`, `"bulb"`, `"5.6"`): parsing them into
+ * numbers here would mean rendering them back to speak to the camera, and the round trip is where
+ * `"1/250"` becomes `0.004` and then `4e-3`.
+ */
+export interface CameraSettings {
+  v: number;
+  iso: string;
+  shutter: string;
+  /** `null` on a body that reports none — a manual lens. */
+  aperture: string | null;
+  format: ImageFormat;
+  available: {
+    isos: string[];
+    shutters: string[];
+    /** Empty when the lens has no electronic aperture. */
+    apertures: string[];
+    formats: ImageFormat[];
+  };
+}
+
+/** What `POST /api/camera/capture` answers — §5.8.1's `202 + WS progress`. */
+export interface CaptureAccepted {
+  correlation_id: string;
+  /** The id this exposure will be stored under. */
+  frame_id: string;
+  /** What the node resolved the exposure to, in seconds. The countdown is measured against it. */
+  exposure_s: number;
+  watch_topic: string;
+}
+
+/** One frame in `GET /api/session/current` — the store's `FrameEntry`. */
+export interface SessionFrame {
+  frame_id: string;
+  file_name: string;
+  size_bytes: number;
+  /**
+   * `null` for a frame whose metadata write was interrupted.
+   *
+   * Not an error and not a reason to hide the frame: SDD §5.5 note 3 makes the frame durable
+   * *before* its metadata, so a crash between the two leaves exactly this, and REL-05 says the
+   * frame is still a frame.
+   */
+  quality: {
+    exposure_s: number;
+    sha256: string;
+    size_bytes: number;
+    settings: { iso: string; shutter: string; aperture: string | null; format: ImageFormat };
+  } | null;
+}
+
+/** `GET /api/session/current` — SDD §5.8.1's "session.json view + frame list". */
+export interface SessionView {
+  session_id: string;
+  created_ts: string;
+  target: unknown;
+  equipment: { telescope: string; camera: string; filter: string };
+  /** Ids granted, which can exceed `frame_count`: a granted id is never reused (REL-04). */
+  frames_reserved: number;
+  frame_count: number;
+  frames: SessionFrame[];
+}
+
+export function cameraConnect(token: string | null): Promise<RequestResult<CameraStatus | null>> {
+  return postJson<CameraStatus>('/api/camera/connect', token);
+}
+
+export function cameraDisconnect(
+  token: string | null,
+): Promise<RequestResult<CameraStatus | null>> {
+  return postJson<CameraStatus>('/api/camera/disconnect', token);
+}
+
+export function cameraSettings(token: string | null): Promise<RequestResult<CameraSettings>> {
+  return getJson<CameraSettings>('/api/camera/settings', token);
+}
+
+/**
+ * Change one or more settings. Absent fields are left alone.
+ *
+ * A partial update rather than a whole-object replace, because the panel changes one selector at a
+ * time and a replace would make changing the ISO re-send a shutter the client read a moment ago —
+ * which over a tunnel is how one operator's change silently reverts another's.
+ */
+export function cameraSetSettings(
+  token: string | null,
+  update: Partial<{ iso: string; shutter: string; aperture: string; format: ImageFormat }>,
+): Promise<RequestResult<CameraSettings | null>> {
+  return putJson<CameraSettings>('/api/camera/settings', token, update);
+}
+
+/**
+ * Start one exposure. Answers `202` and a frame id; the exposure itself arrives as events.
+ *
+ * `bulbSeconds` is for CAM-04's timed bulb. Omitting it uses the shutter setting — and if that
+ * setting is `bulb`, the node refuses with `DEVICE_REJECTED` *before* the 202 rather than
+ * accepting a capture that cannot run.
+ */
+export function cameraCapture(
+  token: string | null,
+  bulbSeconds?: number,
+): Promise<RequestResult<CaptureAccepted | null>> {
+  return postJson<CaptureAccepted>(
+    '/api/camera/capture',
+    token,
+    bulbSeconds === undefined ? {} : { bulb_seconds: bulbSeconds },
+  );
+}
+
+/**
+ * Abandon the exposure in flight.
+ *
+ * `keepalive` for the reason the mount's stop path uses it: the most common way an operator stops
+ * something is not a deliberate tap on a live screen, and a request issued as the document goes
+ * away is cancelled with it. A stopping command is never refused for state — aborting when nothing
+ * is running is a success.
+ */
+export function cameraAbort(token: string | null): Promise<RequestResult<unknown>> {
+  return postJson('/api/camera/capture/abort', token, undefined, { keepalive: true });
+}
+
+/**
+ * Clear the fault that is holding capture — SDD §5.6's "operator ack → Idle".
+ *
+ * The only thing that clears it. A retry gets the same refusal, which is the point: the state is
+ * raised when the node can no longer be trusted to take the next frame, and a retry loop must not
+ * be able to paper over a disk that is failing.
+ */
+export function cameraAcknowledgeFault(
+  token: string | null,
+): Promise<RequestResult<{ cleared: boolean; code: string | null; message: string | null } | null>> {
+  return postJson('/api/camera/fault/ack', token);
+}
+
+/**
+ * The session and its frames.
+ *
+ * A document, not telemetry — which is why it is a request rather than a slot in the event store.
+ * SDD §5.9's "no REST polling" rule is about the values that say what the observatory is *doing*;
+ * a frame list is a directory listing, it has no cadence, and `frame.saved` is the event that says
+ * when to read it again. Nothing here is on a timer.
+ */
+export function sessionCurrent(token: string | null): Promise<RequestResult<SessionView>> {
+  return getJson<SessionView>('/api/session/current', token);
 }
