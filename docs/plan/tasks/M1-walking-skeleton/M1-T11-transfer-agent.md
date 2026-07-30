@@ -40,7 +40,7 @@ rule had been overtaken by §5.11.2. Details in the change note.
 | frame → acked | ack in ~700 ms, echoed sha verified, `reclaimable=1` |
 | stack killed | 3 captures completed while down, depth 1→2→3, `state: offline`, **one** `STACK_UNREACHABLE` alert across a 49 s outage and 5 attempts, one `STACK_ONLINE` on recovery |
 | stack restarted | drained `light_00002,3,4` in order, 4 `transfer.acked` events, one per frame, all checksums equal end to end |
-| field `kill -9` mid-upload | row was `uploading`, `PRAGMA integrity_check` = `ok` before and after, restart logged `resumed=1`, frame re-uploaded and acked |
+| field `kill -9` mid-upload | row was `uploading`, `PRAGMA integrity_check` = `ok` before and after, restart logged `resumed=1`, frame re-uploaded and acked. Also automated: `testdata/crash_harness.rs` + `tests/durability.rs`, T07's T-DUR-1 pattern |
 | dedup | re-offered two already-stored frames → `duplicate: true` for both; the stack's ingest journal kept its original five rows and their original timestamps |
 
 The `HEAD` pre-flight is implemented and asked before every upload. **The stack node answers `404`

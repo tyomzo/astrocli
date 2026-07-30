@@ -55,5 +55,14 @@ axum = { workspace = true, features = ["multipart"] }
 # on the bytes rather than on a byte count the sender supplied.
 sha2 = { workspace = true }
 
+# The T-XFER-1 fixture: a process that can actually be SIGKILLed with a row in `uploading`. It
+# lives in `testdata/` because that is what it is — a fixture, the twin of
+# `astroctl-session/testdata/crash_harness.rs` — and it is declared as a `[[bin]]` only because
+# `CARGO_BIN_EXE_*` is the one mechanism that hands an integration test the path to an executable
+# cargo has built. Neither deployment image copies it: `deploy/Dockerfile.*` name what they install.
+[[bin]]
+name = "transfer-queue-crash-harness"
+path = "testdata/crash_harness.rs"
+
 [lints]
 workspace = true
