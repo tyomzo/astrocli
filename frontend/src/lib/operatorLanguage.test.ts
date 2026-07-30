@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 // rather than `node:fs` so this test needs no `@types/node` and no path arithmetic — the module
 // graph resolves the files, which also means a rename cannot leave the guard silently pointing at
 // nothing.
+import estopButton from '../app/EStopButton.tsx?raw';
 import failureNote from '../ui/FailureNote.tsx?raw';
 import linkBanner from '../panels/LinkBanner.tsx?raw';
 import manualTargetChooser from '../panels/ManualTargetChooser.tsx?raw';
@@ -50,6 +51,9 @@ const IMPLEMENTATION_VOCABULARY = [
 ];
 
 const OPERATOR_FACING: readonly [string, string][] = [
+  // The e-stop's copy is the most consequential in the app: it is read at the moment something is
+  // going wrong, by someone who is not going to parse a sentence about topics and payloads.
+  ['app/EStopButton.tsx', estopButton],
   ['panels/LinkBanner.tsx', linkBanner],
   ['panels/ManualTargetChooser.tsx', manualTargetChooser],
   ['panels/TrackingControl.tsx', trackingControl],

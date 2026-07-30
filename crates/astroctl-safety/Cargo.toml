@@ -9,7 +9,25 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+# ADD §5.6: hal + core, and nothing else internal. In particular **not** astroctl-drivers —
+# `SafeMount` wraps `Arc<dyn MountDevice>`, so the safety layer has never seen a concrete driver
+# and cannot grow a special case for one. `scripts/check-deps.sh` enforces it.
 astroctl-core = { workspace = true }
+astroctl-hal = { workspace = true }
+
+# `SafeMount` implements `MountDevice`, which is an `async-trait`.
+async-trait = { workspace = true }
+# The transform's input is a UTC instant (SDD §5.2.3: LST from system clock + site longitude).
+chrono = { workspace = true }
+# `time` for the dead-man's-switch deadline and the 2 Hz limit watch; `rt` to spawn that watch;
+# `sync` for the lease table. No runtime is started here — the watch runs on the caller's.
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# `test-util` is what makes `tokio::time::pause` available, and T-SLW-1 is a timing test: a TTL
+# asserted against a real clock is a test that fails on a loaded CI box and passes on a fast one.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
 
 [lints]
 workspace = true

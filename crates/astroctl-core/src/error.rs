@@ -12,6 +12,7 @@
 //! so a new code cannot be added without deciding its status, and the UI's contract cannot
 //! drift from the server's behaviour without a compile error here.
 
+use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -101,6 +102,60 @@ pub enum DeviceError {
     /// from a meridian limit without correlating timestamps.
     #[error("aborted: {0}")]
     Aborted(String),
+    /// A configured safety limit refused the motion **before it reached the device** (SDD §5.4,
+    /// MNT-15/MNT-16).
+    ///
+    /// Added by M1-T05 for the same reason M1-T03 added [`Aborted`](Self::Aborted): the nearest
+    /// existing variant was `Rejected`, which maps to `DEVICE_REJECTED`/422 and would tell the
+    /// operator "the mount refused your command" when the mount was never asked — and, worse,
+    /// would hide the one fact they need, which is *which limit* and therefore what to change.
+    /// [`ErrorCode::LimitAltitude`] and [`ErrorCode::LimitMeridian`] already existed in this
+    /// file with a 403 mapping and no producer; this is the producer.
+    ///
+    /// **No driver may return this.** Drivers do no limit checking (see the `astroctl-hal`
+    /// mount docs) — mechanical limits the device itself enforces are `Rejected`. The only
+    /// producer is `astroctl-safety`'s `SafeMount`, which implements the same trait and wraps
+    /// the driver (ADR-11).
+    #[error("{limit} limit: {detail}")]
+    LimitViolation {
+        /// Which limit refused it.
+        limit: Limit,
+        /// What was compared against what, in the operator's units.
+        detail: String,
+    },
+}
+
+/// A configured motion limit (SDD §5.4).
+///
+/// Two variants because they are two different operator actions: an altitude refusal means
+/// "point somewhere higher", a meridian stop means "the mount is about to hit the pier". One
+/// shared code would make the alert and the 403 say the same undifferentiated thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    /// Below `mount.limits.min_altitude_degrees` (MNT-15).
+    Altitude,
+    /// Past `mount.limits.meridian_limit_minutes` (MNT-16).
+    Meridian,
+}
+
+impl Limit {
+    /// The wire code this limit is reported as — a 403 in both cases (SDD §4.2).
+    #[must_use]
+    pub const fn code(self) -> ErrorCode {
+        match self {
+            Self::Altitude => ErrorCode::LimitAltitude,
+            Self::Meridian => ErrorCode::LimitMeridian,
+        }
+    }
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Altitude => "altitude",
+            Self::Meridian => "meridian",
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -357,6 +412,7 @@ impl ErrorCode {
             DeviceError::Rejected(_) => Self::DeviceRejected,
             DeviceError::Transport(_) => Self::DeviceTransport,
             DeviceError::Unsupported => Self::Unsupported,
+            DeviceError::LimitViolation { limit, .. } => limit.code(),
             DeviceError::Busy(_) => Self::Busy,
             DeviceError::Aborted(_) => Self::Aborted,
         }
@@ -484,6 +540,13 @@ mod tests {
                 DeviceError::Aborted("goto aborted by an emergency stop".to_owned()),
                 "aborted: goto aborted by an emergency stop",
             ),
+            (
+                DeviceError::LimitViolation {
+                    limit: Limit::Altitude,
+                    detail: "target altitude -12.0° is below the configured 15.0°".to_owned(),
+                },
+                "altitude limit: target altitude -12.0° is below the configured 15.0°",
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(err.to_string(), expected);
@@ -520,10 +583,40 @@ mod tests {
             // here rather than only in `every_code_has_a_plausible_status` because the *status*
             // is the whole point of the code existing — 422 was the defect.
             (ErrorCode::Aborted, 409, false),
+            // M1-T05: the meridian limit's row, so both safety codes are pinned rather than
+            // only the one §4.2 spells out.
+            (ErrorCode::LimitMeridian, 403, false),
+            (ErrorCode::SlewTtlExpired, 403, false),
         ];
         for &(code, status, retryable) in table {
             assert_eq!(code.http_status(), status, "status for {code}");
             assert_eq!(code.retryable(), retryable, "retryable for {code}");
+        }
+    }
+
+    /// M1-T05. The safety wrapper's refusal must not arrive as a 422 blaming the request: the
+    /// request was well formed, and the answer the operator needs is *which limit*.
+    #[test]
+    fn a_limit_violation_reaches_the_wire_as_its_own_403() {
+        for (limit, expected) in [
+            (Limit::Altitude, ErrorCode::LimitAltitude),
+            (Limit::Meridian, ErrorCode::LimitMeridian),
+        ] {
+            let error = DeviceError::LimitViolation {
+                limit,
+                detail: "…".to_owned(),
+            };
+            let code = ErrorCode::from_device_error(DeviceKind::Mount, &error);
+            assert_eq!(code, expected);
+            assert_eq!(code.http_status(), 403, "for {limit}");
+            assert!(
+                !code.retryable(),
+                "re-issuing the same motion drives the mount back into the limit"
+            );
+            // The envelope carries the detail, not a generic string: "below 15°" is the whole
+            // actionable content.
+            let envelope = ApiError::from_device_error(DeviceKind::Mount, &error);
+            assert!(envelope.message.contains('…'), "{}", envelope.message);
         }
     }
 

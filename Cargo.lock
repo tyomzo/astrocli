@@ -79,6 +79,7 @@ dependencies = [
  "astroctl-core",
  "astroctl-drivers",
  "astroctl-hal",
+ "astroctl-safety",
  "axum",
  "chrono",
  "futures-util",
@@ -159,6 +160,11 @@ name = "astroctl-safety"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "astroctl-hal",
+ "async-trait",
+ "chrono",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

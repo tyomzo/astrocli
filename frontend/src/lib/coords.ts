@@ -54,7 +54,7 @@ export function formatDecDegrees(degrees: number): string {
   );
 }
 
-/** `47.3°`, or an explicit unknown — alt/az are `null` until M1-T05 fills them in. */
+/** `47.3°`, or an explicit unknown — a `null` altitude must never render as `0.0°`. */
 export function formatDegrees(degrees: number | null, digits = 1): string {
   return degrees === null ? '—' : `${degrees.toFixed(digits)}°`;
 }

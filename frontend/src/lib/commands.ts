@@ -115,6 +115,25 @@ export function mountSlew(
 }
 
 /**
+ * Stop everything, now — SDD §5.8.2, MNT-08, REL-01, PRF-12.
+ *
+ * `keepalive` for the same reason `mountSlewStop` uses it, only more so: the request must survive
+ * the document going away. An operator who hits stop and then puts the phone in their pocket, or
+ * whose browser tab is killed by Android the moment after the tap, has still hit stop.
+ *
+ * No body. The route accepts an empty one deliberately (§5.8.2: "auth only, no JSON parsing"), and
+ * sending nothing means there is no serialisation step between the operator's finger and the
+ * socket, and nothing that can make the request malformed.
+ *
+ * The reply is **not** evidence that the mount stopped — only that the node accepted the request.
+ * What the telescope did arrives on the event stream, like everything else (§5.9). The header
+ * button is written against that distinction; see `app/EStopButton.tsx`.
+ */
+export function mountEstop(token: string | null): Promise<RequestResult<unknown>> {
+  return postJson('/api/mount/estop', token, undefined, { keepalive: true });
+}
+
+/**
  * Stop one axis, or every axis when `axis` is omitted.
  *
  * `keepalive` because the most common release is not a finger lifting: it is the screen locking,

@@ -96,9 +96,13 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 /**
  * `mount.position`.
  *
- * `alt`/`az` are nullable and that is not defensive typing: M1-T03 emits `null` for both until
- * M1-T05's topocentric transform lands (T03's scope note). Rendering a missing altitude as 0°
- * would put the target on the horizon, which is exactly where the altitude limit lives.
+ * `alt`/`az` are populated as of M1-T05, by the same topocentric transform the node's altitude
+ * limit uses — so the number on this screen and the number a slew is refused on cannot disagree.
+ *
+ * They stay nullable, and that is not defensive typing left over from before. SDD §4.3 declares
+ * them nullable, and the reason survives: rendering a missing altitude as 0° would put the target
+ * exactly on the horizon, which is exactly where the altitude limit lives. An absent number must
+ * look absent.
  */
 export interface MountPosition {
   ra: number;

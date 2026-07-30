@@ -242,6 +242,23 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
         .post("/api/mount/slew/stop", RouteMeta::new(Tier::Low, true), mount::slew_stop)
         .post("/api/mount/park", RouteMeta::new(Tier::High, true), mount::park)
         .post("/api/mount/unpark", RouteMeta::new(Tier::High, true), mount::unpark)
+        // --- SDD §5.8.2: the e-stop (REL-01, PRF-12, MNT-08) -----------------------------
+        //
+        // `BlockedForLlm` is §5.8.1's own tier for this row: an emergency stop is the operator's
+        // act and nothing else's. Audited, obviously — this is the line of the night's log an
+        // incident review starts from.
+        //
+        // Registered here, in the same table as everything else, and that is §5.8.2 satisfied
+        // rather than sidestepped: "before the normal middleware stack (auth only, no JSON
+        // parsing)" describes a *stack of two* — auth, then routing — which is what this router
+        // already is (see the module docs). The "no JSON parsing" half is a property of the
+        // handler's signature: `mount::estop` declares no body extractor, so there is nothing
+        // between the bearer check and the driver call that could refuse the request.
+        .post(
+            "/api/mount/estop",
+            RouteMeta::new(Tier::BlockedForLlm, true),
+            mount::estop,
+        )
         // ADR-07. Audited: a call that changes state on the other node is exactly as consequential
         // as one that changes state here, and this node cannot tell which is which — so it records
         // every one of them.
@@ -796,12 +813,30 @@ mod tests {
         );
         assert_eq!(goto["method"], "POST");
 
+        // The e-stop is declared like everything else, and on §5.8.1's own tier: the LLM control
+        // layer must never be able to call it, and `llm_callable` is derived from this row.
+        let estop = routes
+            .iter()
+            .find(|r| r["path"] == "/api/mount/estop")
+            .expect("the e-stop is declared");
+        assert_eq!(estop["tier"], "blocked_for_llm");
+        assert_eq!(estop["audit"], true);
+        assert_eq!(estop["method"], "POST");
+        let blocked = body["tiers"]
+            .as_array()
+            .expect("tiers")
+            .iter()
+            .find(|t| t["tier"] == "blocked_for_llm")
+            .expect("the tier is published");
+        assert_eq!(blocked["llm_callable"], false);
+
         // Every route the router serves is declared — that is the §8.2 invariant, and the
         // declaration list is the only place a route can come from. The count is the review
-        // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1. `/ws`
-        // is *not* among them because it is declared by `ws_router()`, which is authenticated
-        // by ticket rather than by the bearer layer this test drives.
-        assert_eq!(routes.len(), 15);
+        // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1, and
+        // 15 → 16 is M1-T05's e-stop. `/ws` is *not* among them because it is declared by
+        // `ws_router()`, which is authenticated by ticket rather than by the bearer layer this
+        // test drives.
+        assert_eq!(routes.len(), 16);
     }
 
     /// `/ws` is declared, published and outside the bearer layer — all three, because any two of

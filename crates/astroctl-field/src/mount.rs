@@ -6,18 +6,21 @@
 //!
 //! # What the facade owns, and what it deliberately does not
 //!
-//! It owns the device handle, the poll task, and the in-flight goto. It does **not** own safety:
-//! M1-T05's `SafeMount` wraps this facade's device handle, so the altitude limit, the meridian
-//! limit, the slew TTL watcher and the e-stop route all arrive by wrapping rather than by
-//! editing this file. That is why nothing here validates a target against `mount.limits`, and
-//! why `POST /api/mount/estop` is absent — a route answering it today would make the PWA's
-//! unarmed e-stop button a lie.
+//! It owns the poll task and the in-flight goto. It does **not** own safety, and after M1-T05 it
+//! does not own the device either: the handle it holds is an
+//! [`Arc<SafeMount>`](astroctl_safety::SafeMount), and per ADR-11 that *is* the mount as far as
+//! everything above the HAL is concerned. So nothing in this file validates a target against
+//! `mount.limits` — by the time a request reaches a handler here, the object it is about to call
+//! is the thing that enforces them, for this route and for every future caller equally.
 //!
-//! `alt`/`az` are `null` for the same reason and only until then. The topocentric transform
-//! belongs to the safety monitor because the altitude *limit* needs it, and one transform shared
-//! between the display and the limit is what keeps a display bug and a limit bug from
-//! disagreeing about whether the target is up. This is not a Phase 2a gap: MNT-03 is a Phase 1
-//! Must and is met at M1 exit.
+//! Two things the routes below do reach for by name rather than through the trait, because the
+//! [`MountDevice`] signatures have no room for them:
+//!
+//! * `alt`/`az` in `mount.position` (MNT-03), from the same topocentric transform the altitude
+//!   limit uses. One transform shared between the display and the limit is what keeps a display
+//!   bug and a limit bug from disagreeing about whether a target is up.
+//! * the manual-slew TTL, which is a parameter of `/api/mount/slew` and not of
+//!   [`MountDevice::slew`] — the dead-man's switch lives above the HAL (SDD §5.8.1).
 //!
 //! # Reading motion out of a mount that never stops moving
 //!
@@ -44,6 +47,7 @@ use astroctl_core::types::{
     Axis, DeviceKind, Direction, MountState, MountStatus, RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
+use astroctl_safety::SafeMount;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -67,7 +71,13 @@ const DEFAULT_POLL_HZ: u32 = 1;
 /// Everything the mount routes and the poll task share.
 #[derive(Debug)]
 pub struct MountFacade {
-    device: Arc<dyn MountDevice>,
+    /// The safety wrapper (ADR-11) — a concrete type, not `Arc<dyn MountDevice>`.
+    ///
+    /// The trait object would be enough for every command below, and was until M1-T05. It is not
+    /// enough for the two things the trait has no signature for: the topocentric transform behind
+    /// `alt`/`az`, and the manual-slew TTL. Downcasting to reach them would be the same coupling
+    /// with a runtime failure mode, so the type is named.
+    device: Arc<SafeMount>,
     bus: EventBus,
     /// The in-flight goto, or `None`.
     ///
@@ -98,9 +108,9 @@ struct GotoRun {
 }
 
 impl MountFacade {
-    /// Wrap a device.
+    /// Wrap the safety wrapper.
     #[must_use]
-    pub fn new(device: Arc<dyn MountDevice>, bus: EventBus, config: &MountConfig) -> Self {
+    pub fn new(device: Arc<SafeMount>, bus: EventBus, config: &MountConfig) -> Self {
         Self {
             device,
             bus,
@@ -110,16 +120,6 @@ impl MountFacade {
             // means a zero here is a slow poll rather than a division by zero.
             poll_hz: config.serial.poll_hz.max(DEFAULT_POLL_HZ),
         }
-    }
-
-    /// The device handle, for M1-T05's `SafeMount` to wrap and for tests.
-    ///
-    /// Nothing in this build calls it yet — the wrapping happens in T05 — but the accessor is
-    /// what makes the seam explicit rather than something T05 has to open up.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn device(&self) -> &Arc<dyn MountDevice> {
-        &self.device
     }
 
     /// How long the poll task sleeps between reads.
@@ -143,6 +143,11 @@ impl MountFacade {
     /// `MountDevice::goto`, and HAL rule 3 says dropping that future never stops hardware — the
     /// tube keeps slewing, which is precisely what SDD §7 wants from a service restart. What
     /// stops is the node's *waiting*, and with it the `EventBus` handle the task was holding.
+    ///
+    /// The safety wrapper's own background watch holds a second such handle and is **not** this
+    /// method's business: `SafeMount` stops it in `Drop`, so the invariant holds for anything
+    /// that drops the facade, including a test and a future caller that never learns this method
+    /// exists. Adding a third thing to remember here is how the first two were forgotten.
     pub fn abort_inflight(&self) {
         if let Some(handle) = self
             .inflight
@@ -152,6 +157,41 @@ impl MountFacade {
         {
             handle.abort();
         }
+    }
+
+    /// Release the in-flight record, but only if it is still the one `correlation_id` names.
+    ///
+    /// The guard is what makes a *late* motion task harmless. A task clears the slot when its
+    /// device future resolves, and that can be long after the motion itself ended: an e-stop
+    /// aborts the slew immediately, but a driver is entitled to resolve the future whenever it
+    /// notices (the HAL only promises that dropping it does not stop the mount). If a slow task
+    /// took the slot unconditionally it would remove the record of a *newer* goto that had since
+    /// been accepted — and the node would then answer `202` to a third one, believing nothing was
+    /// running, while two were.
+    async fn release_goto(&self, correlation_id: &str) {
+        let mut slot = self.goto.lock().await;
+        if slot
+            .as_ref()
+            .is_some_and(|run| run.correlation_id == correlation_id)
+        {
+            slot.take();
+        }
+    }
+
+    /// Forget any in-flight motion — the e-stop path.
+    ///
+    /// An emergency stop ends every motion the node was tracking, by definition, so the record of
+    /// one is void the moment it lands. Clearing it is what lets the operator issue the next goto
+    /// straight away.
+    ///
+    /// Without this the node stays `BUSY` until the aborted goto's *future* resolves, which is a
+    /// driver's business and can be much later: measured against the simulator, an e-stop 1 s into
+    /// a 57 s slew left `/api/mount/goto` answering `409 BUSY` for the remaining 56 seconds while
+    /// `/api/mount/status` said `idle`. Two parts of the same API disagreeing about whether the
+    /// telescope is moving is bad on its own; doing it for a minute after an emergency stop, when
+    /// the operator is trying to recover, is worse.
+    async fn forget_inflight_motion(&self) {
+        self.goto.lock().await.take();
     }
 
     /// Read the current status and translate it for the wire.
@@ -199,11 +239,21 @@ fn to_wire_status(status: MountStatus) -> event::MountStatus {
 /// be guessed at as east.
 const UNKNOWN_PIER: PierSide = PierSide::Unknown;
 
-/// Build the `mount.position` payload from a coordinate pair.
+/// Build the `mount.position` payload from a coordinate pair (MNT-02, MNT-03).
 ///
-/// `alt`/`az` are `None` until M1-T05 — see the module docs.
-fn to_wire_position(pos: RaDec) -> event::MountPosition {
-    event::MountPosition::new(pos.ra.hours(), pos.dec.degrees(), None, None, UNKNOWN_PIER)
+/// `alt`/`az` come from the safety wrapper's transform, which is the same call the altitude limit
+/// makes (SDD §5.4). That is the point of routing a display concern through the safety layer: the
+/// number the operator reads and the number a slew is refused on are produced by one function, so
+/// "it says 20° but it will not slew" cannot happen.
+fn to_wire_position(safety: &SafeMount, pos: RaDec) -> event::MountPosition {
+    let horizontal = safety.horizontal(pos);
+    event::MountPosition::new(
+        pos.ra.hours(),
+        pos.dec.degrees(),
+        Some(horizontal.alt.degrees()),
+        Some(horizontal.az.degrees()),
+        UNKNOWN_PIER,
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -258,7 +308,7 @@ pub async fn poll(facade: Arc<MountFacade>) {
                 if status.state != MountState::Disconnected {
                     match facade.device.position().await {
                         Ok(pos) => {
-                            facade.bus.publish(to_wire_position(pos));
+                            facade.bus.publish(to_wire_position(&facade.device, pos));
                         }
                         Err(error) => {
                             tracing::debug!(%error, "mount position poll failed");
@@ -517,7 +567,7 @@ pub async fn position(
         .position()
         .await
         .map_err(|e| device_failure(&e))?;
-    Ok(Json(to_wire_position(pos)))
+    Ok(Json(to_wire_position(&state.mount.device, pos)))
 }
 
 /// `GET /api/mount/status` — SDD §5.8.1.
@@ -563,6 +613,20 @@ pub async fn goto(
     // which is the opposite of what 202 means. See [`preflight`].
     preflight(&state).await?;
 
+    // The same reasoning, for the safety limit — and it is the reason `SafeMount::check_goto`
+    // exists. The wrapper refuses a below-horizon target inside `goto`, which is what makes the
+    // limit hold for every caller (ADR-11); but this route spawns that call and answers `202`
+    // before it runs, so without asking first the operator would get "accepted" followed by an
+    // alert, instead of MNT-15's 403 `LIMIT_ALTITUDE` as the answer to what they asked.
+    //
+    // Asking is not enforcing: if this line were deleted the mount would still refuse the slew.
+    // What would break is the answer.
+    state
+        .mount
+        .device
+        .check_goto(target)
+        .map_err(|e| device_failure(&e))?;
+
     let correlation_id = correlation_id().map_err(|e| {
         ApiFailure(ApiError::new(
             ErrorCode::Internal,
@@ -605,8 +669,9 @@ pub async fn goto(
         let outcome = facade.device.goto(target).await;
 
         // Cleared before anything is published, so a client that reacts to the completion event
-        // by sending the next goto cannot race the slot.
-        facade.goto.lock().await.take();
+        // by sending the next goto cannot race the slot — and cleared *by id*, so a task that
+        // resolves late cannot evict a newer goto's record. See [`release_goto`].
+        facade.release_goto(&id_for_task).await;
 
         match outcome {
             Ok(()) => {
@@ -668,41 +733,83 @@ pub async fn tracking(
 
 /// `POST /api/mount/slew` — SDD §5.8.1's dead-man's switch.
 ///
-/// # What this does and does not do in M1
-///
-/// It authorises and starts the motion, clamps the TTL, and reports the clamped value. The TTL
-/// *watcher* — the thing that stops the axis when no renewal arrives — is M1-T05's, because it
-/// lives in `SafeMount` alongside the limits (§5.8.1 names SafeMount for exactly this). Until
-/// then `expires_in_ms` is an honest statement of what the server clamped the request to, and
-/// `slew/stop` on release is the stop path. Release is the primary stop in the design anyway;
-/// TTL expiry is the backstop.
+/// The lease is granted by `SafeMount`, which is also what stops the axis when no renewal
+/// arrives. The clamp of §5.8.1 ("default 500 ms, max 2000 ms, clamped server-side") lives there
+/// too, in one function: this route reports what the wrapper resolved, so the window the operator's
+/// app renews against and the window the node is enforcing are the same number rather than two
+/// computations of the same rule.
 pub async fn slew(
     State(state): State<AppState>,
     Json(request): Json<SlewRequest>,
 ) -> Result<Json<SlewAccepted>, ApiFailure> {
     let speed = to_slew_speed(request.speed).map_err(ApiFailure)?;
-    let limits = &state.config.mount.limits;
-    let requested = request.ttl_ms.unwrap_or(limits.slew_ttl_default_ms);
     // Clamped, never refused: a client asking for a longer lease than the node allows is asking
-    // for something reasonable in a way the node disagrees with, and a 422 would leave the
-    // D-pad dead rather than merely renewing more often than the client planned.
-    let ttl_ms = requested.min(limits.slew_ttl_max_ms);
+    // for something reasonable in a way the node disagrees with, and a 422 would leave the D-pad
+    // dead rather than merely renewing more often than the client planned.
+    let ttl = state.mount.device.resolve_ttl(request.ttl_ms);
 
     state
         .mount
         .device
-        .slew(
+        .slew_for(
             request.axis.into(),
             request.direction.on(request.axis),
             speed,
+            ttl,
         )
         .await
         .map_err(|e| device_failure(&e))?;
 
     Ok(Json(SlewAccepted {
         axis: request.axis,
-        expires_in_ms: ttl_ms,
+        // `u64` rather than `u128`: the clamp is at most `slew_ttl_max_ms`, which the config
+        // validator bounds to 10 000.
+        expires_in_ms: u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX),
     }))
+}
+
+/// `POST /api/mount/estop` — SDD §5.8.2, REL-01, PRF-12, MNT-08.
+///
+/// # Everything unusual about this handler is the point
+///
+/// **No body extractor.** §5.8.2 says "auth only, no JSON parsing — empty body accepted", and the
+/// way to get that in axum is to declare no body argument at all: nothing can then reject the
+/// request before the handler runs. `curl -X POST` with no body, the PWA's `keepalive` fetch with
+/// no body, and a client that sends a stray JSON object all reach the same line of code. A
+/// `Json<T>` extractor here would turn a malformed body into a 422 *instead of stopping the
+/// telescope*, which is the failure this shape exists to make impossible.
+///
+/// **It takes no lock and reads no state first.** The call to `emergency_stop` is the first thing
+/// that happens. §5.8.2 budgets 20 ms from handler to bytes on the wire and §5.2.4 gives the stop
+/// its own lane to the serial task; a handler that read `status()` first — to answer more
+/// helpfully, say — would put the operator's stop behind a position poll on a line that is busy
+/// precisely when they are reaching for this button.
+///
+/// **A transport failure is still reported, and is still a 502.** The wrapper has already tried
+/// every axis by then (the HAL contract), and an operator who gets an error from the e-stop needs
+/// to know to cut power rather than to press it again.
+pub async fn estop(State(state): State<AppState>) -> Result<Json<EmergencyStopped>, ApiFailure> {
+    let stopped = state.mount.device.emergency_stop().await;
+
+    // After the stop, never before it — this takes a lock, and nothing may sit between the
+    // operator's request and the driver call. See [`MountFacade::forget_inflight_motion`] for the
+    // minute-long `BUSY` this prevents.
+    state.mount.forget_inflight_motion().await;
+
+    stopped.map_err(|e| device_failure(&e))?;
+    Ok(Json(EmergencyStopped { stopped: true }))
+}
+
+/// What `/api/mount/estop` answers.
+///
+/// A body rather than a `204`, and one field rather than a status snapshot: the operator's app
+/// must not render "the mount stopped" from its own request (SDD §5.9's no-optimistic-mutation
+/// rule) — it renders that from the `alert` and the `mount.status` the node publishes. What this
+/// body says is only that the node received the request and the driver accepted it, which is the
+/// one thing the reply is entitled to claim.
+#[derive(Debug, Serialize)]
+pub struct EmergencyStopped {
+    stopped: bool,
 }
 
 /// `POST /api/mount/slew/stop` — SDD §5.8.1.
@@ -816,7 +923,7 @@ async fn long_running(state: AppState, motion: Motion) -> Result<Response, ApiFa
             Motion::Park => facade.device.park().await,
             Motion::Unpark => facade.device.unpark().await,
         };
-        facade.goto.lock().await.take();
+        facade.release_goto(&id_for_task).await;
 
         if let Err(error) = outcome {
             tracing::warn!(correlation_id = %id_for_task, %error, ?motion, "park operation failed");
@@ -1062,6 +1169,53 @@ mod tests {
         crate::test_support::state_with(&node, declarations)
     }
 
+    /// Wait until the tube is actually moving, not merely until the node says `slewing`.
+    ///
+    /// Load-bearing for the e-stop tests, and the reason is a trap worth naming twice.
+    ///
+    /// The driver reserves both axes *before* its opening exchange and reports `slewing: true`
+    /// from that moment, so `status` says the mount is moving during the ~48 ms in which it is
+    /// still talking to the controller. A stop issued in that window is caught by the driver's
+    /// own post-exchange abort check, which makes `goto` return **early** and release the
+    /// in-flight slot on its way out — the tidy path, not the one the operator meets. Both e-stop
+    /// regression tests below passed against a deliberately broken fix while they waited on
+    /// `status`, and only started failing once they waited on the *position*, which cannot change
+    /// until the axis plans are installed and running.
+    async fn until_moving(state: &AppState) {
+        let start = state
+            .mount
+            .device
+            .position()
+            .await
+            .expect("a starting position");
+        for _ in 0..400 {
+            if let Ok(now) = state.mount.device.position().await {
+                let moved = (now.ra.hours() - start.ra.hours()).abs() * 15.0
+                    + (now.dec.degrees() - start.dec.degrees()).abs();
+                if moved > 0.5 {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the simulator never moved");
+    }
+
+    /// A target that is above the example config's altitude limit at **every** hour of the day.
+    ///
+    /// Circumpolar from the example site (Oslo, latitude 59.9°): at declination +70° the lowest
+    /// the target ever gets is 39.9°, well clear of the configured 15°. Every test below that
+    /// needs a goto to actually *start* uses it.
+    ///
+    /// This is not fussiness. Two of M1-T03's goto fixtures were chosen before there was an
+    /// altitude limit and are latitude-blind — `dec −30°` never rises above 0.1° from Oslo, and
+    /// `dec +22°` is above the limit for part of the day and below it for the rest. The first
+    /// failed the moment this task landed; the second would have passed in the afternoon and
+    /// failed at two in the morning, which is the worst way for a test to be wrong.
+    fn circumpolar_target() -> serde_json::Value {
+        serde_json::json!({"ra_hours": 12.0, "dec_degrees": 70.0})
+    }
+
     #[tokio::test]
     async fn a_second_goto_is_refused_with_a_busy_envelope() {
         // The §5.8.1 acceptance criterion. Two concurrent gotos: the second must be told the
@@ -1076,7 +1230,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "the simulator must connect");
 
-        let target = serde_json::json!({"ra_hours": 5.5, "dec_degrees": 22.0});
+        let target = circumpolar_target();
         let (first, body) = call(
             &state,
             axum::http::Method::POST,
@@ -1280,7 +1434,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_position_route_reports_null_alt_az_over_http_too() {
+    async fn the_position_route_carries_alt_az_for_the_configured_site() {
+        // MNT-03, and the half of the M1-T05 acceptance criterion that is about the wire: the
+        // fields M1-T03 left `null` are populated, and by the same transform the limit uses (the
+        // agreement with an independent reference is asserted in `astroctl-safety`, against
+        // astropy, where the transform lives).
         let state = node();
         call(
             &state,
@@ -1292,10 +1450,380 @@ mod tests {
         let (status, body) =
             call(&state, axum::http::Method::GET, "/api/mount/position", None).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["alt"], serde_json::Value::Null);
-        assert_eq!(body["az"], serde_json::Value::Null);
+
+        let alt = body["alt"].as_f64().expect("an altitude: {body}");
+        let az = body["az"].as_f64().expect("an azimuth: {body}");
+        assert!(
+            (-90.0..=90.0).contains(&alt),
+            "altitude out of range: {alt}"
+        );
+        assert!((0.0..360.0).contains(&az), "azimuth out of range: {az}");
         assert!(body["ra"].is_number());
+        // Still `unknown`: SDD §5.2.3 derives pier side from the declination counters *in the
+        // driver*, and no Phase 1 driver reports it. Guessing "east" would be worse than saying
+        // so, because the meridian limit is documented as consuming this value.
         assert_eq!(body["pier_side"], "unknown");
+
+        // The number on the wire is the number the safety layer computed, not a second opinion.
+        let position = state.mount.device.position().await.expect("a position");
+        let horizontal = state.mount.device.horizontal(position);
+        assert!(
+            (alt - horizontal.alt.degrees()).abs() < 1.0,
+            "the wire says {alt}° and the safety layer says {}°",
+            horizontal.alt.degrees()
+        );
+    }
+
+    /// A target that is below the example config's horizon limit at this instant.
+    ///
+    /// Computed rather than written down: "below the horizon" is a fact about the clock, and a
+    /// fixture pair picked in July is above the horizon in January. A test that started failing
+    /// six months after it was written would be blamed on anything but the sky.
+    fn below_the_limit(state: &AppState) -> RaDec {
+        let site = astroctl_safety::Site::from_config(&state.config.site);
+        let now = chrono::Utc::now();
+        let lst_hours = astroctl_safety::local_sidereal_degrees(site, now) / 15.0;
+        // Twelve hours from the local sidereal time puts the target on the far side of the
+        // meridian, and a declination as far south as the site's latitude allows puts it well
+        // under the horizon from Oslo.
+        let target = RaDec::from_parts((lst_hours + 12.0).rem_euclid(24.0), -45.0)
+            .expect("a valid coordinate");
+        let altitude = astroctl_safety::horizontal(target, site, now).alt.degrees();
+        assert!(
+            altitude < state.config.mount.limits.min_altitude_degrees,
+            "the fixture target is at {altitude}°, not below the configured limit"
+        );
+        target
+    }
+
+    #[tokio::test]
+    async fn a_goto_below_the_altitude_limit_is_403_and_the_mount_is_never_commanded() {
+        // MNT-15's acceptance criterion, through the whole stack: the envelope, the status, and —
+        // the part that matters — that the telescope was not asked to move. A wrapper that
+        // refused *after* forwarding would pass the first two assertions while slewing into the
+        // ground.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let before = state.mount.device.position().await.expect("a position");
+
+        let target = below_the_limit(&state);
+        let (status, envelope) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(serde_json::json!({
+                "ra_hours": target.ra.hours(),
+                "dec_degrees": target.dec.degrees(),
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(envelope["code"], "LIMIT_ALTITUDE");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["v"], 1);
+        assert!(
+            envelope["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("min_altitude_degrees")),
+            "the refusal must name the setting that caused it: {envelope}"
+        );
+
+        // The simulator has no command log, so "never commanded" is asserted against what a
+        // command would have changed: the mount is not slewing and has not moved. A goto that
+        // reached the driver would have set both.
+        let after = state.mount.device.status().await.expect("a status");
+        assert!(!after.slewing, "a refused goto started a slew");
+        assert_eq!(after.state, MountState::Idle);
+        let position = state.mount.device.position().await.expect("a position");
+        assert!(
+            (position.dec.degrees() - before.dec.degrees()).abs() < 0.5,
+            "the mount moved: {before:?} → {position:?}"
+        );
+    }
+
+    // --- the e-stop route (SDD §5.8.2, REL-01, MNT-08) ----------------------------------------
+
+    #[tokio::test]
+    async fn the_estop_route_accepts_a_request_with_no_body_at_all() {
+        // §5.8.2: "auth only, no JSON parsing — empty body accepted". `curl -X POST` sends no
+        // body and no content type, and the PWA's `keepalive` fetch sends none either. A 415 or a
+        // 422 here would be the e-stop failing on the most ordinary way to call it.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+
+        let (status, body) = call(&state, axum::http::Method::POST, "/api/mount/estop", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["stopped"], true);
+    }
+
+    #[tokio::test]
+    async fn the_estop_route_ignores_a_body_it_was_sent_anyway() {
+        // The other half of "no JSON parsing": a client that sends something must not be refused
+        // for it. There is no request shape that turns this route into a 4xx.
+        let state = node();
+        let (status, _) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/estop",
+            Some(serde_json::json!({"anything": "at all"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn the_estop_route_answers_while_a_goto_is_mid_flight_and_stops_it() {
+        // The load-bearing one. A goto is a two-minute motion the node has already answered `202`
+        // to; the operator then reaches for the button. Two things must hold, and only the second
+        // is obvious: the route has to *answer* (it is not queued behind the slew), and the slew
+        // has to *stop*.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let mut events = state.bus.subscribe();
+
+        let (accepted, _) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        assert_eq!(accepted, StatusCode::ACCEPTED, "a goto must be in flight");
+        assert!(
+            state.mount.device.status().await.expect("status").slewing,
+            "the simulator should be slewing before the stop"
+        );
+
+        let issued = std::time::Instant::now();
+        let (status, body) = call(&state, axum::http::Method::POST, "/api/mount/estop", None).await;
+        let latency = issued.elapsed();
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !state.mount.device.status().await.expect("status").slewing,
+            "the mount was still slewing after the e-stop"
+        );
+        // A ceiling, not the budget. SDD §5.8.2 allows 20 ms from handler to wire and the
+        // simulator spends 16 ms of that modelling the round trip, which leaves too little margin
+        // to assert against on a shared CI box that may be compiling something else. The 20 ms
+        // figure is measured on the running binary (see the M1-T05 result notes); what this
+        // asserts is the property CI can hold: the stop did not wait for the slew.
+        assert!(
+            latency < std::time::Duration::from_millis(500),
+            "the e-stop took {latency:?}, which means it queued behind something"
+        );
+
+        // The operator's app renders the stop from the event stream, never from its own request
+        // (SDD §5.9). So the alert has to be on the bus, or the button has nothing to confirm
+        // against.
+        let alerted = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let astroctl_core::bus::Recv::Event(event) = events.recv().await {
+                    if event.topic == astroctl_core::event::Topic::Alert
+                        && event.data["code"] == "EMERGENCY_STOP"
+                    {
+                        return event;
+                    }
+                } else {
+                    panic!("the bus closed before the e-stop alert arrived");
+                }
+            }
+        })
+        .await
+        .expect("an EMERGENCY_STOP alert");
+        assert_eq!(alerted.data["severity"], "critical");
+    }
+
+    #[tokio::test]
+    async fn a_goto_is_accepted_again_immediately_after_an_emergency_stop() {
+        // Found on the running node, not in review. An e-stop one second into a 57-second slew
+        // left `/api/mount/goto` answering `409 BUSY` for the remaining 56 seconds — while
+        // `/api/mount/status` reported `idle`, because the mount really had stopped. The node was
+        // holding an in-flight record whose task would not resolve until the *originally planned*
+        // finish, and the operator recovering from an emergency stop is the last person who
+        // should be told to wait for a slew that is not happening.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let (accepted, _) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        assert_eq!(accepted, StatusCode::ACCEPTED);
+        until_moving(&state).await;
+
+        call(&state, axum::http::Method::POST, "/api/mount/estop", None).await;
+
+        let (again, body) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        assert_eq!(
+            again,
+            StatusCode::ACCEPTED,
+            "a goto after an emergency stop was refused: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_motion_task_does_not_evict_a_newer_gotos_record() {
+        // The hazard the fix above introduces if it is done carelessly. The aborted goto's task is
+        // still running and will clear the in-flight slot when its future finally resolves; if it
+        // cleared the slot unconditionally it would remove the *second* goto's record, and the
+        // node would then answer `202` to a third while two were in flight — the exact confusion
+        // the in-flight slot exists to prevent (§5.8.1).
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        until_moving(&state).await;
+        call(&state, axum::http::Method::POST, "/api/mount/estop", None).await;
+        let (_, second) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        let second_id = second["correlation_id"].as_str().expect("an id").to_owned();
+
+        // Give the first task every chance to resolve and clear the slot it no longer owns.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let (third, envelope) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        assert_eq!(third, StatusCode::CONFLICT, "{envelope}");
+        assert_eq!(
+            envelope["detail"]["correlation_id"], second_id,
+            "the surviving record must be the second goto's, not the aborted one's"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_goto_reports_aborted_rather_than_a_rejected_request() {
+        // M1-T02's handoff defect, end to end through the e-stop route: `ABORTED`/409 says
+        // something stopped the mount, `DEVICE_REJECTED`/422 would say the operator's goto was
+        // malformed at the exact moment their emergency stop worked.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let mut events = state.bus.subscribe();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        call(&state, axum::http::Method::POST, "/api/mount/estop", None).await;
+
+        let aborted = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let astroctl_core::bus::Recv::Event(event) = events.recv().await {
+                    if event.topic == astroctl_core::event::Topic::Alert
+                        && event.data["code"] == "ABORTED"
+                    {
+                        return true;
+                    }
+                } else {
+                    return false;
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            aborted,
+            Ok(true),
+            "the interrupted goto should alert ABORTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_slew_route_grants_a_lease_the_safety_layer_is_enforcing() {
+        // The route and the wrapper must agree about the window, because the app renews against
+        // what the route reported and the wrapper stops the axis by what it recorded. One
+        // resolution, in `SafeMount::resolve_ttl`, is what makes them the same number.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let (status, body) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/slew",
+            Some(serde_json::json!({"axis": "ra", "direction": "positive", "speed": 2})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["expires_in_ms"].as_u64(),
+            Some(
+                state
+                    .mount
+                    .device
+                    .resolve_ttl(None)
+                    .as_millis()
+                    .try_into()
+                    .expect("the configured TTL fits")
+            ),
+        );
     }
 
     #[tokio::test]
@@ -1320,7 +1848,7 @@ mod tests {
             &state,
             axum::http::Method::POST,
             "/api/mount/goto",
-            Some(serde_json::json!({"ra_hours": 18.0, "dec_degrees": -30.0})),
+            Some(circumpolar_target()),
         )
         .await;
         assert_eq!(accepted, StatusCode::ACCEPTED, "a goto must be in flight");
@@ -1362,14 +1890,19 @@ mod tests {
         assert_eq!(body["ticket"].as_str().expect("a ticket").len(), 32);
     }
 
-    #[test]
-    fn a_position_reports_null_altitude_rather_than_the_horizon() {
-        // Until M1-T05. A `0.0` stand-in would put the target exactly where the altitude limit
-        // lives, so the one field a placeholder could corrupt is the one that refuses slews.
+    #[tokio::test]
+    async fn the_wire_position_carries_the_safety_layers_own_altitude() {
+        // Not a tolerance — an identity. The `mount.position` payload and the altitude limit read
+        // the same function, so the assertion is that the two numbers are bit-for-bit the same
+        // rather than close: anything looser would let a second transform creep in later and
+        // still pass.
+        let state = node();
         let pos = RaDec::from_parts(5.5, 22.0).expect("valid");
-        let wire = to_wire_position(pos);
-        assert_eq!(wire.alt_degrees(), None);
-        assert_eq!(wire.az_degrees(), None);
+        let wire = to_wire_position(&state.mount.device, pos);
+        let horizontal = state.mount.device.horizontal(pos);
+
+        assert_eq!(wire.alt_degrees(), Some(horizontal.alt.degrees()));
+        assert_eq!(wire.az_degrees(), Some(horizontal.az.degrees()));
         assert!((wire.ra_hours() - 5.5).abs() < f64::EPSILON);
     }
 }

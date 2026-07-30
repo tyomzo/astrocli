@@ -33,12 +33,13 @@ import { FailureNote } from '../ui/FailureNote';
  * the displayed RA between updates. This is the honest floor under that: nothing here is
  * extrapolated, so nothing here can be wrong in a way the operator cannot see.
  *
- * # alt/az may be null and are not zero
+ * # alt/az are real as of M1-T05, and still may be null
  *
- * M1-T03 emits `null` for both until M1-T05's topocentric transform lands. A missing altitude
- * rendered as `0.0°` would put the target on the horizon, which is exactly where the altitude
- * limit lives — so the formatter prints an em dash and the operator knows the number is absent
- * rather than alarming.
+ * The node computes them for the configured site with the same transform its altitude limit uses,
+ * so this readout and the refusal of a slew cannot disagree about whether a target is up. The
+ * fields remain nullable because SDD §4.3 declares them so, and because a missing altitude
+ * rendered as `0.0°` would put the target on the horizon — exactly where the altitude limit lives.
+ * The formatter prints an em dash instead, so an absent number looks absent rather than alarming.
  */
 export function PointingReadout(): ReactNode {
   const position = useTelemetryStore(selectMountPosition);
