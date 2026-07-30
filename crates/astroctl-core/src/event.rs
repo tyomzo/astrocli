@@ -366,9 +366,20 @@ pub enum TransferState {
 }
 
 /// Compute-worker state as reported by the stack node (§5.12.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerState {
+    /// No worker is running and none has been needed — they spawn on demand (§5.12.3), so this
+    /// is the stack node's normal idle state, not a fault — and the `Default`, since a
+    /// supervisor that has done nothing yet is exactly this.
+    ///
+    /// Distinct from `StackStatus.worker_state = null`, which means the stack node is
+    /// *unreachable* and the state is unknown. Collapsing "idle by design" into that null — or
+    /// worse, reporting `Ready` for a process that does not exist — would make the health
+    /// surface lie in one direction or the other. Added 2026-07-30 for exactly this reason,
+    /// when M1-T13's on-demand supervisor met `StackStatus::online()`'s non-optional state.
+    #[default]
+    Stopped,
     /// Spawned, handshake not yet complete.
     Starting,
     /// Handshake done, idle, accepting jobs.

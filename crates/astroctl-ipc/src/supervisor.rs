@@ -105,10 +105,12 @@ type Frames = mpsc::Receiver<Result<FromWorker, ProtocolError>>;
 /// is the failure mode most likely to go unnoticed".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorkerStatus {
-    /// `None` until the first job brings a worker up — see the module docs on on-demand start.
-    /// `astroctl_core::event::WorkerState` has no variant for "not started yet", and inventing
-    /// one would change a frozen event schema, so the absence is carried in the `Option`.
-    pub state: Option<WorkerState>,
+    /// [`WorkerState::Stopped`] until the first job brings a worker up — see the module docs on
+    /// on-demand start. The variant was added to the event schema for exactly this field
+    /// (2026-07-30): the earlier `Option<WorkerState>` carried "not started yet" as `None`,
+    /// which collided with `StackStatus`'s use of `null` for "stack unreachable, unknown" —
+    /// two different absences sharing one spelling.
+    pub state: WorkerState,
     /// Worker restarts since this supervisor began.
     pub restarts: u32,
     /// Jobs that returned a successful result.
@@ -150,18 +152,20 @@ pub enum JobFailure {
 impl JobFailure {
     /// The closed §4.2 code this failure reaches the API as.
     ///
-    /// Everything the *supervisor* produces maps to `INTERNAL`: §4.2's vocabulary has no code
-    /// shaped like "a supervised child process misbehaved", and adding one would change a
-    /// contract the PWA switches on. Only [`JobFailure::Worker`] carries a specific code,
-    /// because only the worker knows whether it was handed a missing file or a full disk.
+    /// §4.2 gained the worker vocabulary for exactly this mapping (change note 2026-07-30):
+    /// before that, everything the supervisor produced collapsed onto `INTERNAL`, and "the
+    /// stacking software has a bug" and "the Python worker crashed and is restarting" send the
+    /// operator to entirely different places. [`JobFailure::Worker`] still carries the worker's
+    /// own code, because only the worker knows whether it was handed a missing file or a full
+    /// disk. `Stopped` is a cancellation, not a failure: the job was surrendered to shutdown.
     #[must_use]
     pub fn code(&self) -> ErrorCode {
         match self {
             JobFailure::Worker(error) => error.code,
-            JobFailure::Unavailable(_)
-            | JobFailure::TimedOut(_)
-            | JobFailure::Crashed { .. }
-            | JobFailure::Stopped => ErrorCode::Internal,
+            JobFailure::Unavailable(_) => ErrorCode::WorkerUnavailable,
+            JobFailure::TimedOut(_) => ErrorCode::WorkerTimeout,
+            JobFailure::Crashed { .. } => ErrorCode::WorkerCrashed,
+            JobFailure::Stopped => ErrorCode::Cancelled,
         }
     }
 }
@@ -336,7 +340,7 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn set_state(&mut self, state: WorkerState) {
-        self.stats.state = Some(state);
+        self.stats.state = state;
         // `send` fails only when nobody is listening, which is normal.
         let _ = self.status.send(*self.stats);
     }
@@ -1107,7 +1111,9 @@ mod tests {
     }
 
     #[test]
-    fn only_a_worker_diagnosed_failure_carries_a_specific_error_code() {
+    fn every_failure_shape_carries_its_own_error_code() {
+        // The worker's own diagnosis passes through untouched — only it knows whether the
+        // problem was a missing file or a full disk.
         assert_eq!(
             JobFailure::Worker(WorkerError {
                 code: ErrorCode::NotFound,
@@ -1116,9 +1122,27 @@ mod tests {
             .code(),
             ErrorCode::NotFound
         );
+        // Supervisor-produced failures each name themselves (§4.2 worker vocabulary,
+        // 2026-07-30). Before that they collapsed onto INTERNAL, which told the operator
+        // "the stacking software has a bug" when the truth was "the worker crashed and is
+        // being restarted".
         assert_eq!(
             JobFailure::TimedOut(Duration::from_secs(1)).code(),
-            ErrorCode::Internal
+            ErrorCode::WorkerTimeout
         );
+        assert_eq!(
+            JobFailure::Crashed {
+                attempts: 1,
+                reason: "boom".to_owned(),
+            }
+            .code(),
+            ErrorCode::WorkerCrashed
+        );
+        assert_eq!(
+            JobFailure::Unavailable("spawn failed".to_owned()).code(),
+            ErrorCode::WorkerUnavailable
+        );
+        // Stopped is a cancellation, not a failure: the job was surrendered to shutdown.
+        assert_eq!(JobFailure::Stopped.code(), ErrorCode::Cancelled);
     }
 }

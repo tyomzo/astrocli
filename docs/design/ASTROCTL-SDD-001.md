@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.15.0
+**Version:** 1.16.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -58,6 +58,8 @@
 **Change note (1.14.1):** §5.11.2's first ordering property described the wrong failure. A bare `frame_id` dedup key does not produce a false `duplicate: true` — the two frames' hashes differ, so the sha comparison separates them. It fires the **conflict** branch, `409 FRAME_ID_CONFLICT`, which is terminal: the sender stops retrying and the frame is lost. The fix (key on `(session_id, frame_id)`) was right; the justification was not, and a justification that names the wrong mechanism invites someone to "fix" it by comparing hashes more carefully instead of keying on the session.
 
 **Change note (1.15.0):** §5.12 gains the worker-side obligations M1-T13 found by implementing it. The load-bearing one: **a worker must answer pings while it computes**. At the documented defaults a single-threaded worker computing for 15 s is SIGKILLed by its own liveness probe, so every real stacking job would crash-loop, and the config validator's `job_timeout > 3 × health_ping` bound reads as though it prevents this but does not. Also recorded: `result` is rejected at the decoder if it claims success and carries an error; frames are bounded at 1 MiB and a trailing partial frame is dropped, so a worker that loses framing cannot stream its heap into the backbone; unknown fields are ignored *because* a strict decoder would defeat §5.12.2's version-mismatch reporting; the retry backoff resets after a worker outlives the ceiling, or one bad night leaves it there permanently; writes to the child are deadline-bounded, since a full pipe would otherwise park the task holding the ping timer and let a wedge disable its own detector; worker stdout is redirected to stderr, because a stray `print` desynchronises the decoder and surfaces hours later as previews stopping; and the JPEG write is atomic. Found by building it, not by review.
+
+**Change note (1.16.0):** three decisions taken while their cost was still low, all provoked by M1-T12/T13 findings. §4.2 gains the worker vocabulary — `CANCELLED`, `WORKER_UNAVAILABLE`, `WORKER_CRASHED`, `WORKER_TIMEOUT` — because every supervisor failure was about to collapse onto `INTERNAL`, and the PWA that switches on these codes is still one screen, so extending the frozen contract now costs a table edit rather than a migration; the enum's review-checkpoint count moves 20 → 24. `WorkerState` gains `Stopped` (its `Default`): workers spawn on demand, so "no worker running, none needed" is the stack node's normal idle state, and carrying it as `Option::None` collided with `StackStatus`'s use of `null` for "stack unreachable" — two different absences sharing one spelling. §5.11.1 gains the `HEAD /api/ingest/{session_id}/{frame_id}` pre-flight, because M1-T12 proved the POST cannot answer a duplicate cheaply over HTTP, so M1-T11 is built with the pre-flight from the start rather than retrofitted. §5.10.1's queue table keys on `(session_id, frame_id)`, inheriting §5.11.2's dedup correction before M1-T11 implements the schema with the defect in it.
 
 ---
 
@@ -266,6 +268,10 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | `NODE_UNREACHABLE` | 502 | yes | the *other node* is not answering — the `/stack/*` proxy (ADR-07) and the transfer agent (§5.10). Distinct from `DEVICE_TRANSPORT`, which means serial or USB to a **device**; conflating them tells the operator to check a cable when the problem is a tunnel |
 | `NOT_IMPLEMENTED` | 501 | no | a route that exists in the design but not yet in this build — e.g. WS proxying before M1-T14. Better than borrowing `UNSUPPORTED`, which means the *device* cannot do it |
 | `NOT_FOUND` | 404 | no | unknown session/frame |
+| `CANCELLED` | 409 | no | the job was cancelled — by the operator or by shutdown — before it produced a result. Not a failure: the request was fine, the state moved under it |
+| `WORKER_UNAVAILABLE` | 502 | yes | no worker can take the job — spawn failed or restarts are backing off (§5.12.3). Retryable because the supervisor is already fixing it |
+| `WORKER_CRASHED` | 502 | yes | the worker died mid-job; the supervisor is restarting it. Distinct from `INTERNAL` because "the Python worker crashed and is being restarted" and "the stacking software has a bug" send the operator to different places |
+| `WORKER_TIMEOUT` | 502 | no | the job exceeded `workers.job_timeout_seconds`. Not retryable: the same job hits the same ceiling deterministically, like `DEVICE_PROTOCOL` |
 | `INTERNAL` | 500 | no | anything unhandled |
 
 One code, one status: `DISK_FULL` is 507 wherever it is raised. The M1-T08 task file currently says a *field-node* capture refused below the critical threshold answers 409 — that must move to 507, or the two refusals need different codes. A UI that maps codes to messages cannot also be asked to interpret the same code differently per route.
@@ -934,7 +940,11 @@ One SQLite database, `<queue_dir>/transfer.db`, WAL mode, single writer:
 
 ```sql
 CREATE TABLE queue (
-  frame_id     TEXT PRIMARY KEY,      -- light_00042
+  session_id   TEXT NOT NULL,         -- 2026-07-29_ngc7000
+  frame_id     TEXT NOT NULL,         -- light_00042 — per-session counter (§5.5), so the
+                                      -- id alone recurs in every session; §5.11.2's dedup
+                                      -- correction applies to this table identically
+  PRIMARY KEY (session_id, frame_id),
   session_id   TEXT NOT NULL,
   path         TEXT NOT NULL,         -- absolute; frame lives in the session dir, not copied
   sha256       TEXT NOT NULL,
@@ -1005,6 +1015,7 @@ on the stack node's disk, fsynced, and their checksum matched.**
 | `/api/system/health` | GET | → `{status, disk_free_gb, versions, worker: {state, restarts}}` |
 | `/api/system/info` | GET | → config summary, **resolved runtime worker threads (§7)**, route table. §7 requires this on *both* binaries; it was listed only for the field node |
 | `/api/ingest` | POST | multipart, `meta` **then** `frame` — see the schema below → `{v, session_id, frame_id, sha256, stored: true, duplicate: bool}` |
+| `/api/ingest/{session_id}/{frame_id}` | HEAD | pre-flight, asked **before** committing to an upload: 204 with `X-Astroctl-Sha256` if the frame is stored, 404 if not. M1-T12 proved the POST cannot answer a duplicate cheaply — HTTP forbids acking before the body drains (an early response is lost to a client still writing), so without this a duplicate still costs its full ~200 s at 1 Mbit. The sender treats any HEAD failure as "not stored" and uploads; the pre-flight is an optimisation, never a gate |
 | `/api/stacking/stats` | GET | → `{v, session_id, frame_count, last_ingest_ts, last_preview_ts}` (real statistics arrive in 2b) |
 | `/ws` | GET | WS — JSON status events |
 | `/ws/preview` | GET | WS — binary JPEG previews only (mirrors the field node's `/ws/liveview` split, §8.3(5)) |

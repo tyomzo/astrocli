@@ -59,6 +59,10 @@ ERROR_CODES = frozenset(
         "FRAME_ID_CONFLICT",
         "DISK_FULL",
         "NOT_FOUND",
+        "CANCELLED",
+        "WORKER_UNAVAILABLE",
+        "WORKER_CRASHED",
+        "WORKER_TIMEOUT",
         "INTERNAL",
     }
 )

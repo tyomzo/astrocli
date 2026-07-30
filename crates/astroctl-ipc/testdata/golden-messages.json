@@ -8,14 +8,13 @@
     "Run the Python half by hand with:",
     "  python3 workers/astroctl_ipc.py crates/astroctl-ipc/testdata/golden-messages.json"
   ],
-
   "proto_version": 1,
   "max_line_bytes": 1048576,
-
   "error_codes": [
     "AUTH",
     "BUSY",
     "CAMERA_TIMEOUT",
+    "CANCELLED",
     "CHECKSUM_MISMATCH",
     "COMMAND_STALE",
     "DEVICE_PROTOCOL",
@@ -32,13 +31,19 @@
     "NOT_FOUND",
     "SLEW_TTL_EXPIRED",
     "UNSUPPORTED",
-    "VALIDATION"
+    "VALIDATION",
+    "WORKER_CRASHED",
+    "WORKER_TIMEOUT",
+    "WORKER_UNAVAILABLE"
   ],
-
-  "job_kinds": ["preview"],
-
+  "job_kinds": [
+    "preview"
+  ],
   "to_worker": [
-    { "type": "hello", "proto_version": 1 },
+    {
+      "type": "hello",
+      "proto_version": 1
+    },
     {
       "type": "job",
       "id": 1,
@@ -49,20 +54,32 @@
         "white_point_pct": 99.5,
         "max_dimension": 2048
       },
-      "paths": ["/data/astro/sessions/2026-07-29_ngc7000/frames/light_000001.fits"]
+      "paths": [
+        "/data/astro/sessions/2026-07-29_ngc7000/frames/light_000001.fits"
+      ]
     },
-    { "type": "cancel", "id": 1 },
-    { "type": "ping", "nonce": 7 },
-    { "type": "shutdown" }
+    {
+      "type": "cancel",
+      "id": 1
+    },
+    {
+      "type": "ping",
+      "nonce": 7
+    },
+    {
+      "type": "shutdown"
+    }
   ],
-
   "from_worker": [
     {
       "type": "hello",
       "proto_version": 1,
       "capabilities": {
         "gpu": false,
-        "libs": { "numpy": "2.4.3", "pillow": "12.1.1" }
+        "libs": {
+          "numpy": "2.4.3",
+          "pillow": "12.1.1"
+        }
       }
     },
     {
@@ -71,10 +88,17 @@
       "capabilities": {
         "gpu": true,
         "vram_mb": 24576,
-        "libs": { "cupy": "13.3.0", "numpy": "2.4.3" }
+        "libs": {
+          "cupy": "13.3.0",
+          "numpy": "2.4.3"
+        }
       }
     },
-    { "type": "progress", "id": 1, "pct": 50 },
+    {
+      "type": "progress",
+      "id": 1,
+      "pct": 50
+    },
     {
       "type": "result",
       "id": 1,
@@ -95,10 +119,16 @@
         "message": "no such frame: /data/astro/sessions/gone/frames/light_000002.fits"
       }
     },
-    { "type": "pong", "nonce": 7 },
-    { "type": "log", "level": "warn", "message": "falling back to the numpy path" }
+    {
+      "type": "pong",
+      "nonce": 7
+    },
+    {
+      "type": "log",
+      "level": "warn",
+      "message": "falling back to the numpy path"
+    }
   ],
-
   "rejected_from_worker": [
     "{\"type\":\"result\",\"id\":3,\"ok\":true,\"error\":{\"code\":\"INTERNAL\",\"message\":\"boom\"}}",
     "{\"type\":\"result\",\"id\":4,\"ok\":false}",

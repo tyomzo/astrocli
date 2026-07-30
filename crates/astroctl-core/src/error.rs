@@ -148,6 +148,20 @@ pub enum ErrorCode {
     DiskFull,
     /// The addressed resource does not exist.
     NotFound,
+    // --- worker supervision (M1-T13; SDD §5.12) ---
+    //
+    // Added while the PWA was still one screen, because these were about to collapse onto
+    // `Internal` — and "the stacking software has a bug" and "the Python worker crashed and is
+    // being restarted" send the operator to entirely different places. The supervisor is the
+    // only producer; the codes exist so its failures survive the trip through the API envelope.
+    /// The job was cancelled — by the operator or by shutdown — before it produced a result.
+    Cancelled,
+    /// No worker is available to take the job (spawn failed, or restarts are backing off).
+    WorkerUnavailable,
+    /// The worker died mid-job; the supervisor is handling the restart.
+    WorkerCrashed,
+    /// The job exceeded `workers.job_timeout_seconds` and the worker was told to stop.
+    WorkerTimeout,
     /// An unexpected internal failure.
     Internal,
 }
@@ -175,6 +189,10 @@ impl ErrorCode {
         ErrorCode::FrameIdConflict,
         ErrorCode::DiskFull,
         ErrorCode::NotFound,
+        ErrorCode::Cancelled,
+        ErrorCode::WorkerUnavailable,
+        ErrorCode::WorkerCrashed,
+        ErrorCode::WorkerTimeout,
         ErrorCode::Internal,
     ];
 
@@ -201,6 +219,10 @@ impl ErrorCode {
             Self::FrameIdConflict => "FRAME_ID_CONFLICT",
             Self::DiskFull => "DISK_FULL",
             Self::NotFound => "NOT_FOUND",
+            Self::Cancelled => "CANCELLED",
+            Self::WorkerUnavailable => "WORKER_UNAVAILABLE",
+            Self::WorkerCrashed => "WORKER_CRASHED",
+            Self::WorkerTimeout => "WORKER_TIMEOUT",
             Self::Internal => "INTERNAL",
         }
     }
@@ -236,6 +258,12 @@ impl ErrorCode {
             // SDD §5.11.2: ingest refuses below the critical threshold with 507.
             Self::DiskFull => 507,
             Self::NotFound => 404,
+            // Cancellation is the operator's own act arriving back; nothing failed. 409 rather
+            // than a 4xx blame code: the request was fine, the state moved under it.
+            Self::Cancelled => 409,
+            // Worker failures are upstream-of-the-API failures, like the device 502s: the
+            // caller's request was valid and the thing behind the API could not serve it.
+            Self::WorkerUnavailable | Self::WorkerCrashed | Self::WorkerTimeout => 502,
             Self::Internal => 500,
         }
     }
@@ -251,6 +279,11 @@ impl ErrorCode {
             | Self::CameraTimeout
             | Self::DeviceTimeout
             | Self::DeviceTransport => true,
+            // The supervisor restarts a crashed or unavailable worker on its own (§5.12.3), so
+            // the same request later is expected to succeed. A worker *timeout* is not retried:
+            // the same job hitting the same ceiling repeats deterministically, like Protocol.
+            Self::WorkerUnavailable | Self::WorkerCrashed => true,
+            Self::Cancelled | Self::WorkerTimeout => false,
             // A protocol error repeats deterministically until the driver or firmware
             // changes; retrying it just burns the operator's link budget.
             Self::DeviceProtocol
@@ -474,8 +507,10 @@ mod tests {
         seen.dedup();
         assert_eq!(seen.len(), before, "ErrorCode::ALL contains a duplicate");
         // Adding a variant without adding it to ALL leaves this count stale on purpose:
-        // the number is the review checkpoint for a frozen contract.
-        assert_eq!(before, 20);
+        // the number is the review checkpoint for a frozen contract. 20 → 24 was the worker
+        // vocabulary (SDD §4.2 change note, 2026-07-30) — approved before M1-T04 builds the
+        // PWA switch, i.e. while extending was still cheap.
+        assert_eq!(before, 24);
     }
 
     #[test]

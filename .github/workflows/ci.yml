@@ -73,6 +73,10 @@ jobs:
           fi
           pipx install ruff
           ruff check workers/
+          # format is gated as well as lint: the workers are the repo's first Python and set
+          # the pattern, and a formatter that is "applied but not enforced" drifts by the
+          # third contributor (M1-T13 left this as a documented gap).
+          ruff format --check workers/
           python3 -m compileall -q workers/
 
   # T-E2E-1 lands in M1-T16 against the M0-T08 container harness. The placeholder is deliberate:

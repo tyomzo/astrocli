@@ -54,12 +54,12 @@ async fn spawn_starts_no_process_until_a_job_needs_one() {
 
     // SDD §5.12.3 supervises workers as on-demand children, and astroctl-stack's startup
     // sequence says so explicitly. `None` is "no worker has ever been needed".
-    assert_eq!(workers.status().state, None);
+    assert_eq!(workers.status().state, WorkerState::Stopped);
     assert_eq!(workers.status().restarts, 0);
 
     // Nothing should change just because time passed.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(workers.status().state, None);
+    assert_eq!(workers.status().state, WorkerState::Stopped);
 }
 
 #[tokio::test]
@@ -79,7 +79,7 @@ async fn the_job_machinery_round_trips_without_the_compute_dependencies() {
 
     assert_eq!(data["echo"]["marker"], 41);
     let status = workers.status();
-    assert_eq!(status.state, Some(WorkerState::Ready));
+    assert_eq!(status.state, WorkerState::Ready);
     assert_eq!(status.restarts, 0);
     assert_eq!(status.jobs_completed, 1);
     assert_eq!(status.jobs_failed, 0);
@@ -166,7 +166,7 @@ async fn a_protocol_version_mismatch_is_refused_without_a_retry() {
     })
     .await;
     support::eventually("the failed state", || {
-        workers.status().state == Some(WorkerState::Failed)
+        workers.status().state == WorkerState::Failed
     })
     .await;
     assert_eq!(
@@ -413,7 +413,7 @@ async fn a_missing_interpreter_is_refused_once_and_never_retried() {
     })
     .await;
     support::eventually("the failed state", || {
-        workers.status().state == Some(WorkerState::Failed)
+        workers.status().state == WorkerState::Failed
     })
     .await;
     // A path that does not exist will not start existing on a backoff. Retrying it forever
@@ -458,7 +458,7 @@ async fn a_worker_exception_becomes_a_structured_error_result() {
 
     // Reporting a failure is not crashing: the same worker takes the next job.
     support::eventually("the worker to go idle", || {
-        workers.status().state == Some(WorkerState::Ready)
+        workers.status().state == WorkerState::Ready
     })
     .await;
     assert_eq!(workers.status().restarts, 0);
