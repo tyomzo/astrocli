@@ -61,6 +61,23 @@ pub const FRAMES_DIR: &str = "frames";
 /// Where the per-frame control metadata lives (SDD §5.5).
 pub const CONTROL_DIR: &str = "control";
 
+/// Where derived, regenerable artifacts live — the live-view pipeline's cached previews
+/// (SDD §5.7, §6; M1-T09).
+///
+/// A third directory rather than a corner of `control/`, because the two hold different *kinds*
+/// of thing and §6's data table already separates them. `control/` is metadata: a sidecar carries
+/// exposure parameters that exist nowhere else, which is why SDD §5.5 note 6 makes a failed
+/// sidecar write a returned error. A preview is a JPEG re-derived from the frame in a second —
+/// §6 calls it "ephemeral, regenerable" — so losing one costs a redecode and losing a sidecar
+/// costs information. Mixing them would mean a future retention pass could not tell "delete
+/// freely" from "never delete" by looking at the path.
+///
+/// Deliberately **not** added to `testdata/session-layout.txt`. That fixture is the layout
+/// `astroctl-stack` mirrors (SDD §5.11.3), and a regenerable cache is not part of the archive:
+/// putting it there would oblige the stack node to reproduce a directory it has no reason to
+/// carry, and it renders its own previews anyway.
+pub const PREVIEW_DIR: &str = "preview";
+
 /// The per-session manifest (SDD §5.5).
 pub const SESSION_JSON: &str = "session.json";
 
@@ -314,7 +331,11 @@ impl FrameStore {
         dir: PathBuf,
         spec: Option<NewSession>,
     ) -> Result<Arc<Session>, StoreError> {
-        for sub in [dir.join(FRAMES_DIR), dir.join(CONTROL_DIR)] {
+        for sub in [
+            dir.join(FRAMES_DIR),
+            dir.join(CONTROL_DIR),
+            dir.join(PREVIEW_DIR),
+        ] {
             durable::create_dir_durable(&sub)
                 .await
                 .map_err(|e| StoreError::io("create the session directory", &sub, e))?;
@@ -409,6 +430,11 @@ impl FrameStore {
                 session.clone(),
                 session.join(FRAMES_DIR),
                 session.join(CONTROL_DIR),
+                // The preview writer renames through a temporary like every other writer here, so
+                // a node killed mid-render leaves one behind. Omitting this line would leak a
+                // `.tmp_` JPEG per interrupted capture, forever, in the one directory nothing
+                // else ever cleans.
+                session.join(PREVIEW_DIR),
             ] {
                 removed += durable::sweep_temporaries_in(&dir).await;
             }
@@ -456,6 +482,31 @@ impl Session {
     #[must_use]
     pub fn control_dir(&self) -> PathBuf {
         self.dir.join(CONTROL_DIR)
+    }
+
+    /// `<session>/preview`.
+    #[must_use]
+    pub fn preview_dir(&self) -> PathBuf {
+        self.dir.join(PREVIEW_DIR)
+    }
+
+    /// Where frame `id`'s cached preview lives — `<session>/preview/light_00042.jpg`
+    /// (SDD §5.7, §5.8.1's `/api/session/frames/{id}/preview.jpg`).
+    ///
+    /// A pure path computation, and the reason it is a method rather than string concatenation at
+    /// the call site: it takes a parsed [`FrameId`], so `../../etc/passwd` cannot reach it. The
+    /// route's `{id}` segment is attacker-controlled in the sense that matters — it arrives over
+    /// HTTP — and [`FrameId::parse`] is the only way to make one. Returning a path for a frame
+    /// that does not exist is correct: the caller is about to write it, or is about to fail to
+    /// open it, and both need the path first.
+    ///
+    /// Unlike [`Self::frames_dir`], the file name keeps the frame's kind prefix. The sidecar
+    /// drops it (`quality_00042.json`) because the counter is per session and the kind is in the
+    /// sidecar's own body; a preview has no body to carry it, and SDD §5.7 names the file
+    /// `light_<id>.jpg` explicitly.
+    #[must_use]
+    pub fn preview_path(&self, id: &FrameId) -> PathBuf {
+        self.preview_dir().join(id.file_name("jpg"))
     }
 
     /// A copy of the manifest as last persisted.
@@ -1057,6 +1108,51 @@ mod tests {
                 "the layout fixture requires {relative}, which the frame store did not produce"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_session_has_a_preview_directory_and_names_previews_after_their_frame() {
+        // SDD §5.7 names the cache `<session>/preview/light_<id>.jpg`. It exists from `attach`
+        // rather than being created on first write, so the preview task never has to decide
+        // whether a missing directory is a fresh session or a broken one.
+        let dir = TempDir::new();
+        let store = store(&dir).await;
+        let session = session(&store).await;
+
+        assert!(
+            tokio::fs::try_exists(session.preview_dir())
+                .await
+                .unwrap_or(false),
+            "the preview directory must exist as soon as the session does"
+        );
+
+        let saved = capture(&session, b"raw bytes").await;
+        assert_eq!(
+            session.preview_path(&saved.frame_id),
+            session.dir().join("preview").join("light_00001.jpg"),
+            "the preview keeps the frame's kind prefix — the sidecar drops it, this does not"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_reaches_the_preview_directory() {
+        // A node killed mid-render leaves a `.tmp_` JPEG behind. If the sweep did not walk this
+        // directory the leak would be one file per interrupted capture, forever, in the one place
+        // nothing else ever cleans.
+        let dir = TempDir::new();
+        let store = store(&dir).await;
+        let session = session(&store).await;
+
+        let leftover = session.preview_dir().join(".tmp_light_00007.jpg");
+        tokio::fs::write(&leftover, b"half a preview")
+            .await
+            .expect("the temporary is written");
+
+        assert!(store.sweep_temporaries().await >= 1);
+        assert!(
+            !tokio::fs::try_exists(&leftover).await.unwrap_or(true),
+            "the sweep left a preview temporary behind"
+        );
     }
 
     /// REL-04, the in-process half: the counter is on disk before the caller has the id.

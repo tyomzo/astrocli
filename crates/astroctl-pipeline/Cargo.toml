@@ -9,7 +9,24 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+# ADD §5.6 places no rule on this crate's internal edges, so the restraint is deliberate rather
+# than enforced: the decode path takes bytes and returns bytes (SDD §5.7), which is what lets it
+# be tested without a session, a store or a camera. `astroctl-core` is here for `ErrorCode` alone
+# — a pipeline failure reaches the operator through the same §4.2 envelope as every other
+# failure, and inventing a second error vocabulary for one crate is how two of them start.
 astroctl-core = { workspace = true }
+# The only encoder in the tree, already carrying the simulator's live-view frames (M1-T06). It
+# has no dependencies at all, which is the property that matters for something running in the
+# capture path on a Pi. Nothing here *decodes* JPEG: live-view frames are forwarded untouched.
+jpeg-encoder = { workspace = true }
+
+[dev-dependencies]
+# A *different* implementation from the one under test, for the reason M1-T06 took these on:
+# reading back with the writer's own logic proves only self-consistency. `fitsrs` is CDS's parser
+# (the group behind Aladin and SIMBAD) and `zune-jpeg` decodes what `jpeg-encoder` wrote, so "the
+# preview is a readable JPEG of the expected size" is a claim with someone else's parser behind it.
+fitsrs = { workspace = true }
+zune-jpeg = { workspace = true }
 
 [lints]
 workspace = true

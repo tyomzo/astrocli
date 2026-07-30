@@ -89,6 +89,7 @@ dependencies = [
  "astroctl-core",
  "astroctl-drivers",
  "astroctl-hal",
+ "astroctl-pipeline",
  "astroctl-safety",
  "astroctl-session",
  "axum",
@@ -157,6 +158,9 @@ name = "astroctl-pipeline"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "fitsrs",
+ "jpeg-encoder",
+ "zune-jpeg",
 ]
 
 [[package]]

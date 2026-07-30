@@ -84,5 +84,5 @@ pub use frame::{FrameId, FrameKind};
 pub use manifest::{CaptureParams, Equipment, Quality, SessionManifest, SCHEMA_VERSION};
 pub use store::{
     FrameEntry, FrameStore, NewSession, SavedFrame, Session, SessionView, StagedFrame, StoreError,
-    CONTROL_DIR, CURRENT_LINK, FRAMES_DIR, SESSION_JSON,
+    CONTROL_DIR, CURRENT_LINK, FRAMES_DIR, PREVIEW_DIR, SESSION_JSON,
 };
