@@ -318,5 +318,9 @@ pub async fn state_with_camera(
         camera,
         tickets: Arc::new(crate::ticket::TicketStore::new()),
         snapshots: Arc::new(crate::ws::SnapshotStore::new()),
+        // Idle, exactly as the binary's is until something starts the camera stream. A fixture
+        // that pre-started it would make every test that touches `/ws/liveview` depend on a
+        // sensor loop none of them asked for.
+        liveview: Arc::new(crate::liveview::LiveViewHub::new()),
     }
 }

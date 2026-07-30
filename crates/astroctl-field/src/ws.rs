@@ -411,10 +411,22 @@ fn topic_by_name(name: &str) -> Option<Topic> {
 // ---------------------------------------------------------------------------------------------
 
 /// The `?ticket=` query parameter of SDD §4.5.
+///
+/// Shared with `/ws/liveview` (`crate::liveview::upgrade`) rather than declared twice: §4.5 makes
+/// the ticket the only way a browser authenticates *either* socket, and two extractors would be
+/// two places for one of them to grow a second accepted spelling.
 #[derive(Debug, Deserialize)]
 pub struct UpgradeParams {
     #[serde(default)]
     ticket: Option<String>,
+}
+
+impl UpgradeParams {
+    /// The presented ticket, if the caller sent one.
+    #[must_use]
+    pub fn ticket(&self) -> Option<&str> {
+        self.ticket.as_deref()
+    }
 }
 
 /// `GET /ws` — SDD §5.8.1, authenticated by ticket (§4.5), **not** by a bearer header.

@@ -37,6 +37,7 @@ mod api;
 mod auth;
 mod camera;
 mod cli;
+mod liveview;
 mod mount;
 mod orchestrator;
 mod proxy;
@@ -269,6 +270,11 @@ async fn serve(
         bus.clone(),
     ));
     let snapshots = Arc::new(ws::SnapshotStore::new());
+    // Built before the API because a handler may be serving `/ws/liveview` the instant the
+    // listener binds, and an `Option` filled in later would be a `None` the upgrade would have to
+    // have an answer for. The hub is idle until something starts the camera stream, which is what
+    // makes constructing it this early free.
+    let liveview = Arc::new(liveview::LiveViewHub::new());
 
     let (router, declarations) = api::router();
     let (ws_router, ws_declarations) = api::ws_router();
@@ -288,6 +294,7 @@ async fn serve(
         camera: Arc::clone(&camera),
         tickets: Arc::new(ticket::TicketStore::new()),
         snapshots: Arc::clone(&snapshots),
+        liveview: Arc::clone(&liveview),
     };
     let app = assemble(router, ws_router, state);
 
@@ -366,6 +373,16 @@ async fn serve(
         Arc::clone(&snapshots),
         bus.subscribe(),
     ));
+    // The preview pipeline (SDD §5.7): `frame.saved` → decode on the blocking pool → cache →
+    // push on `/ws/liveview` → `capture.progress: preview_ready`. Its worker publishes, so it
+    // holds a bus clone and is stopped before `drop(bus)` like the two polls.
+    let previews = liveview::spawn_previews(
+        Arc::clone(&liveview),
+        Arc::clone(&camera),
+        bus.clone(),
+        bus.subscribe(),
+        astroctl_pipeline::PreviewParams::default(),
+    );
 
     // --- 8. health `ok` ----------------------------------------------------------------------
     status.set(NodeStatus::Ok);
@@ -379,7 +396,18 @@ async fn serve(
 
     // --- shutdown, in the SDD §7 order -------------------------------------------------------
     // 1. stop accepting — done: `with_graceful_shutdown` returned, in-flight requests finished.
-    // 2. abort live view — M1-T09; the watchdogs are what this milestone has to stop.
+    // 2. abort live view (SDD §7). The camera stream first, then the preview pipeline.
+    //
+    // `abort` and not `stop`: shutdown must not wait on the *camera* answering. A wedged body
+    // that never returns from `stop_live_view` would hold this sequence, and every step after it
+    // — including flushing the night's event log — would be behind a device that has already
+    // stopped talking. The driver's own `disconnect`/drop ends the sensor loop; what this node
+    // owes is that no task of *its* outlives the process.
+    liveview.abort().await;
+    // The preview worker publishes `capture.progress: preview_ready`, so it holds a bus sender
+    // and must be gone before step 5 drops the rest — the same accounting as the two polls
+    // below, and the same one the facade and the capture task needed.
+    previews.abort().await;
     watchdog.abort();
     let _ = watchdog.await;
     // The poll task publishes, so it holds a bus sender and must stop before step 5 drops the

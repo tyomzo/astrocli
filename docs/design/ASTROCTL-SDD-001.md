@@ -690,6 +690,37 @@ is busy* (fine, driven by `capture.progress`) versus *stream idle because the ca
 responding* (a wedge, §5.3.1). Conflating them produces either spurious alerts during every capture
 or a missed wedge — both worse than the pause itself.
 
+**Five things M1-T09 had to settle that the paragraphs above leave open.**
+
+1. **Live view needs a control surface, and §5.8.1's table has no row for it.** The table describes
+   the socket frames *arrive* on, not the tap that opens it, so `POST /api/camera/liveview/start`
+   and `/stop` are declared alongside the other camera routes on the `low` tier, audited. Stopping
+   must abort the forwarding task **and** call the driver's `stop_live_view`: aborting alone leaves
+   the driver generating frames nobody reads, which on a real body is a USB transfer per frame for
+   the rest of the night.
+2. **"Pushed once on the bus" is pushed once on the *socket*.** `liveview.frame` is deliberately
+   not a `Topic` (§4.3), so there is no bus to push it on; the preview goes to the `/ws/liveview`
+   fan-out and the *announcement* — `capture.progress: preview_ready` — goes on the bus. Ordering
+   is load-bearing: cache, then push, then announce, because the announcement is what sends a
+   client to `/api/session/frames/{id}/preview.jpg` and announcing first races it to the file.
+3. **The gap is only explained while the explanation is fresh.** `capture.progress` ticks once a
+   second during an exposure, so a *recent* tick is evidence the camera is alive and busy. A
+   client that trusted one `exposing` event without bound would show "capturing" until morning
+   after a camera wedged mid-exposure — the missed wedge, reached from the other side. Freshness
+   rather than "elapsed versus expected" is also the only bound that works for a **bulb** frame,
+   whose length nothing on the wire knows.
+4. **`capture.progress.elapsed_s` is per-state, not one clock.** It is already seconds of open
+   shutter on `exposing` and the exposure's *length* on `saved`; on `preview_ready` it is how long
+   the render took. The preview pipeline could not report the exposure even if the field meant
+   that uniformly — `frame.saved` carries `{frame_id, path, size_bytes, sha256}` and no duration.
+   A consequence worth stating: **the event stream cannot produce a countdown**, only a stopwatch,
+   so a UI that wants one reads the exposure from the shutter setting (§5.9).
+5. **Previews are a third session directory, `preview/`, and not part of the mirrored archive.**
+   §6 calls them "ephemeral, regenerable", so they sit beside `frames/` and `control/` rather than
+   inside `control/` — a retention pass must be able to tell "delete freely" from "never delete"
+   by the path alone. They are deliberately absent from `testdata/session-layout.txt`, the fixture
+   `astroctl-stack` mirrors (§5.11.3): the stack node renders its own.
+
 ### 5.8 API gateway (field binary)
 
 #### 5.8.1 Route table (Phase 1)
@@ -759,6 +790,10 @@ Three points this pins down that the paragraph above leaves open:
 - **The snapshot carries the latest event for each *stateful* topic** — `mount.position`, `mount.status`, `camera.status`, `capture.progress`, `transfer.status`, `stack.status`, `system.health`. `alert`, `frame.saved` and `transfer.acked` are occurrences rather than values that are true, and replaying them on every reconnect would show the operator a warning they already dealt with. **A topic absent from the snapshot means the node has no value for it**, and the client reduces it back to unknown: disconnect the mount and `mount.position` leaves the snapshot, so a reconnecting client shows no coordinates rather than the ones from before the drop.
 
 Overflow closes the connection rather than dropping an event (§4.3), which is what makes "discrete events are never dropped while under bound" true rather than approximate: the client reconnects and resnapshots, so it sees current state instead of a panel quietly missing a frame.
+
+**`/ws/liveview` frames carry an envelope (M1-T09).** "Binary JPEG frames only" names the payload and leaves the framing open, and the socket carries *two kinds* of image — live view and capture previews (§5.7). A client that cannot tell them apart cannot use either: a preview the operator is studying would be overwritten by the next live-view frame 200 ms later, and correlating with `preview_ready` on `/ws` cannot fix it, because the two sockets have no ordering between them — which is the entire point of separating them. Each frame is therefore `"ACLV" | version:u8 | kind:u8 | meta_len:u16be | meta JSON | JPEG`, where `kind` is `0` for live view and `1` for a preview, and the metadata carries `ts` always and `frame_id` on a preview. This is the same class of decision as the `type`-vs-`topic` split above: a convention the document does not state, recorded here so there is one.
+
+**The depth-1 replace queue is the channel, not a policy over one.** A `watch` channel gives every client an independent cursor over a single slot, so a client stalled on a write misses the frames replaced while it was away and wakes to the newest — which is exactly the specified behaviour, with no eviction logic to get wrong. Unlike `/ws`, nothing on this socket must *not* be dropped: every frame is self-superseding, which is what makes it the socket that may drop things. It follows that a slow live-view client falls behind in **time**, never in queue depth, so it costs the node no memory and no other client anything.
 
 ### 5.9 PWA (M1 scope)
 
