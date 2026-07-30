@@ -76,6 +76,16 @@ pub struct MountFacade {
     /// `clippy::await_holding_lock` denies workspace-wide, and for a good reason on a node with
     /// one or two runtime workers.
     goto: Mutex<Option<GotoRun>>,
+    /// The task waiting on the in-flight motion, so shutdown can stop *waiting* for it.
+    ///
+    /// Tracked for one reason: that task holds an [`EventBus`] handle, which is a broadcast
+    /// sender, and `main`'s shutdown drops every sender so the session log's subscriber closes
+    /// and flushes. A goto in flight would otherwise keep one alive and cost the tail of the
+    /// night's event log — a two-minute slew is exactly when a service restart is most likely to
+    /// land.
+    ///
+    /// A `std` mutex because nothing is awaited under it.
+    inflight: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// `mount.serial.poll_hz`, clamped to at least 1.
     poll_hz: u32,
 }
@@ -95,6 +105,7 @@ impl MountFacade {
             device,
             bus,
             goto: Mutex::new(None),
+            inflight: std::sync::Mutex::new(None),
             // The config validator already floors this at 1; clamping again costs nothing and
             // means a zero here is a slow poll rather than a division by zero.
             poll_hz: config.serial.poll_hz.max(DEFAULT_POLL_HZ),
@@ -115,6 +126,32 @@ impl MountFacade {
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         Duration::from_micros(1_000_000 / u64::from(self.poll_hz))
+    }
+
+    /// Remember the task waiting on a motion, replacing any finished one.
+    fn track_inflight(&self, handle: tokio::task::JoinHandle<()>) {
+        let mut slot = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *slot = Some(handle);
+    }
+
+    /// Stop waiting on an in-flight motion, at shutdown.
+    ///
+    /// **Does not stop the mount.** Aborting this task drops a future that is awaiting
+    /// `MountDevice::goto`, and HAL rule 3 says dropping that future never stops hardware — the
+    /// tube keeps slewing, which is precisely what SDD §7 wants from a service restart. What
+    /// stops is the node's *waiting*, and with it the `EventBus` handle the task was holding.
+    pub fn abort_inflight(&self) {
+        if let Some(handle) = self
+            .inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            handle.abort();
+        }
     }
 
     /// Read the current status and translate it for the wire.
@@ -564,7 +601,7 @@ pub async fn goto(
     let facade = Arc::clone(&state.mount);
     let bus = state.bus.clone();
     let id_for_task = correlation_id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let outcome = facade.device.goto(target).await;
 
         // Cleared before anything is published, so a client that reacts to the completion event
@@ -591,6 +628,10 @@ pub async fn goto(
             bus.publish(status);
         }
     });
+
+    // Tracked so shutdown can stop waiting on it and release its bus handle; see
+    // `MountFacade::abort_inflight`.
+    state.mount.track_inflight(task);
 
     Ok((
         StatusCode::ACCEPTED,
@@ -770,7 +811,7 @@ async fn long_running(state: AppState, motion: Motion) -> Result<Response, ApiFa
     let facade = Arc::clone(&state.mount);
     let bus = state.bus.clone();
     let id_for_task = correlation_id.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let outcome = match motion {
             Motion::Park => facade.device.park().await,
             Motion::Unpark => facade.device.unpark().await,
@@ -786,6 +827,8 @@ async fn long_running(state: AppState, motion: Motion) -> Result<Response, ApiFa
             bus.publish(status);
         }
     });
+
+    state.mount.track_inflight(task);
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1253,6 +1296,55 @@ mod tests {
         assert_eq!(body["az"], serde_json::Value::Null);
         assert!(body["ra"].is_number());
         assert_eq!(body["pier_side"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases_the_bus_handle_that_an_in_flight_goto_holds() {
+        // A regression test for a hang that reached a running node: the task awaiting a goto
+        // holds an `EventBus` handle, which is a broadcast *sender*, so `main`'s shutdown could
+        // not close the session log's subscriber while a slew was in flight. It cost a full
+        // flush timeout and the tail of the night's event log — and a two-minute slew is exactly
+        // when a service restart lands.
+        //
+        // The property under test is the one `main` depends on: once the facade and the state
+        // are gone, a subscriber sees `Closed`. If it does not, some sender survived.
+        let state = node();
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        let (accepted, _) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(serde_json::json!({"ra_hours": 18.0, "dec_degrees": -30.0})),
+        )
+        .await;
+        assert_eq!(accepted, StatusCode::ACCEPTED, "a goto must be in flight");
+
+        let mut events = state.bus.subscribe();
+        let mount = Arc::clone(&state.mount);
+        mount.abort_inflight();
+        drop(state);
+        drop(mount);
+
+        // The aborted task is dropped by the runtime, not synchronously by `abort`, so the
+        // sender it held goes a scheduling turn later.
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if matches!(events.recv().await, astroctl_core::bus::Recv::Closed) {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "an EventBus handle outlived the facade, so the session log could not flush"
+        );
     }
 
     #[tokio::test]

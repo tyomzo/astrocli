@@ -349,14 +349,28 @@ async fn serve(
     // hardware, so a mount that was slewing keeps slewing — which is exactly what step 4 wants.
     poll.abort();
     let _ = poll.await;
+    // Aborted rather than awaited. It holds only a receiver and the snapshot store is in-memory
+    // state with nothing to flush, so there is no reason to wait for it — and waiting for it was
+    // a hang: `await`ing a task that ends on `Recv::Closed` makes shutdown depend on every
+    // *sender* having been dropped first, which is a much stronger claim than it looks.
+    snapshot_task.abort();
+    let _ = snapshot_task.await;
     // 3. finish an in-flight download — M1-T08; nothing owns a camera yet.
     // 4. tracking is deliberately NOT stopped (see the module docs).
     // 5. flush the session log: dropping every `EventBus` handle closes the sink's subscriber,
     //    which is what makes the flush complete rather than merely likely.
+    //
+    // The invariant this protects is "no `EventBus` handle outlives this point", because a
+    // handle is a broadcast *sender* and the sink's subscriber only closes when the last one
+    // goes. Two of them are easy to miss, and both were: the facade holds one, and so does the
+    // task waiting on an in-flight goto — the case that matters, since a two-minute slew is
+    // exactly when a service restart lands. Missing either costs a full `FLUSH_TIMEOUT` and the
+    // tail of the night's event log.
+    //
+    // Aborting the motion task does not stop the mount (HAL rule 3), which is what step 4 wants.
+    mount.abort_inflight();
+    drop(mount);
     drop(bus);
-    // Holds only a receiver, so it ends by itself once the senders are gone — but awaiting it is
-    // what makes that a fact rather than a hope.
-    let _ = snapshot_task.await;
     if let Some(sink) = sink {
         match tokio::time::timeout(FLUSH_TIMEOUT, sink).await {
             Ok(Ok(Ok(stats))) => tracing::info!(
