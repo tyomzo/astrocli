@@ -5,7 +5,7 @@
 > Depends on T05 and T08 deliberately: the envelope must be applied to the *complete* mutation
 > surface in one pass. Landing it while camera or slew routes are still arriving guarantees a
 > partially-covered API, which is worse than no envelope — it looks enforced and isn't.
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §5.8.1 (staleness paragraph), §8.3(4)
 **Tests gated:** T-STALE-1
 
@@ -24,6 +24,6 @@ from SDD §5.8.1 applied uniformly.
 
 ## Acceptance criteria
 
-- [ ] T-STALE-1: 5 s-old goto → `COMMAND_STALE`, simulator got no command; equally old slew/stop → executed; duplicate `command_id` → original outcome, single execution (assert via simulator command log)
-- [ ] E-stop route exempt from *all* envelope requirements (empty body still valid)
-- [ ] Skew injection test: client clock +60 s → UI warning, commands still work via offset
+- [x] T-STALE-1: 5 s-old goto → `COMMAND_STALE`, simulator got no command; equally old slew/stop → executed; duplicate `command_id` → original outcome, single execution (assert via simulator command log)
+- [x] E-stop route exempt from *all* envelope requirements (empty body still valid)
+- [x] Skew injection test: client clock +60 s → UI warning, commands still work via offset
