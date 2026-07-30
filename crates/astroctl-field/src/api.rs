@@ -451,7 +451,22 @@ pub fn ws_router() -> (Router<AppState>, Vec<RouteDecl>) {
         // layer. A liveview route added to `router()` instead would demand a bearer header the
         // browser cannot attach to a WebSocket upgrade, and would look like a working route on
         // every non-browser client.
-        .get("/ws/liveview", RouteMeta::read(), crate::liveview::upgrade);
+        .get("/ws/liveview", RouteMeta::read(), crate::liveview::upgrade)
+        // The stacking server's sockets, proxied (ADR-07, §5.8.1 "WS upgrades proxied too, so the
+        // operator keeps a single origin"). Here rather than beside `/stack/{*rest}` for exactly
+        // the reason given above: this is a browser upgrade, the browser cannot attach a bearer
+        // header, and a route inside `with_auth` would answer 401 before the ticket was ever
+        // looked at. It is the *same* handler — `proxy::handler` branches on the upgrade headers
+        // — so the split is about which authentication the request passes through, not about two
+        // implementations.
+        //
+        // More specific than `/stack/{*rest}`, so axum routes `/stack/ws/preview` here and
+        // everything else under `/stack/` to the bearer-authenticated proxy.
+        .any(
+            "/stack/ws/{*rest}",
+            RouteMeta::new(Tier::PassThrough, true, CommandClass::PassThrough),
+            proxy::handler,
+        );
     let declarations = ws.declarations();
     (ws.into_router(), declarations)
 }
@@ -1274,13 +1289,29 @@ mod tests {
             );
         }
 
+        // The proxied stack socket belongs here for the same reason (M1-T14): the browser opens
+        // it with a ticket because it cannot attach a header, so a declaration under `router()`
+        // would answer 401 to every upgrade while looking like a working route to `curl`.
+        assert!(
+            !bearer.iter().any(|r| r.path.starts_with(crate::proxy::WS_PREFIX)),
+            "the stacking server's sockets must not be behind the bearer layer either"
+        );
+
         let (_, ws) = ws_router();
         assert_eq!(
             ws.iter().map(|r| r.path).collect::<Vec<_>>(),
-            vec!["/ws", "/ws/liveview"],
-            "§8.3(5)'s two sockets, both ticket-authenticated"
+            vec!["/ws", "/ws/liveview", "/stack/ws/{*rest}"],
+            "§8.3(5)'s two sockets and the proxied stack socket, all ticket-authenticated"
         );
         for route in &ws {
+            if route.path.starts_with(crate::proxy::WS_PREFIX) {
+                // The proxied one is `ANY`/`pass_through`: the serving node classifies (ADR-07),
+                // and this node declaring `read` would be it deciding a tier for a route it
+                // cannot see.
+                assert_eq!(route.method, "ANY");
+                assert_eq!(route.meta.tier, Tier::PassThrough);
+                continue;
+            }
             assert_eq!(route.method, "GET");
             assert_eq!(route.meta.tier, Tier::Read);
             assert!(

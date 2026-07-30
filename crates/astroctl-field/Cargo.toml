@@ -54,6 +54,10 @@ tokio = { workspace = true, features = [
     "time",
 ] }
 hyper-util = { workspace = true }
+# M1-T14: the WS proxy dials its own connection with `hyper::client::conn::http1` rather than the
+# pooled client — an upgraded connection is single-use, and `with_upgrades` is what lets the 101
+# escape the HTTP state machine with the socket attached.
+hyper = { workspace = true }
 # M0-T06: the PWA bundle, embedded when `frontend/dist` exists (see build.rs).
 include_dir = { workspace = true }
 serde = { workspace = true }

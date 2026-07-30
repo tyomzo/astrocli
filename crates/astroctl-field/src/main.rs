@@ -44,6 +44,7 @@ mod orchestrator;
 mod proxy;
 mod pwa;
 mod route_meta;
+mod stack_status;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
@@ -291,11 +292,26 @@ async fn serve(
     // makes constructing it this early free.
     let liveview = Arc::new(liveview::LiveViewHub::new());
 
+    // One proxy, shared by the `/stack/*` routes and the `stack.status` republisher, so a
+    // deployment cannot end up with the routes pointing at one upstream and the poller at another.
+    //
+    // The token is handed to it for one purpose: the outbound half of a WebSocket upgrade, where
+    // the browser could not attach a credential and there is therefore nothing to forward (SDD
+    // §4.5, §5.8.1). Plain proxied requests still relay the operator's own header (ADR-07).
+    let stack_proxy = Arc::new(StackProxy::new(
+        &config.stacking_server,
+        config
+            .auth_token()
+            .ok()
+            .as_ref()
+            .map(astroctl_core::config::Secret::expose),
+    ));
+
     let (router, declarations) = api::router();
     let (ws_router, ws_declarations) = api::ws_router();
     let routes: Vec<_> = declarations.into_iter().chain(ws_declarations).collect();
     let state = AppState {
-        proxy: Arc::new(StackProxy::new(&config.stacking_server)),
+        proxy: Arc::clone(&stack_proxy),
         bus: bus.clone(),
         status: Arc::clone(&status),
         uptime,
@@ -404,6 +420,12 @@ async fn serve(
         bus.subscribe(),
         astroctl_pipeline::PreviewParams::default(),
     );
+    // `stack.status` (§4.3, USB-06): the field node polls the stacking server's health and stats
+    // and republishes them, so the PWA has one event source and never talks to the stack node
+    // directly (ADR-07). `None` when no stacking server is configured — see the module docs on
+    // why that publishes nothing rather than `offline`. It publishes, so it holds a bus clone and
+    // is aborted before `drop(bus)` like the polls.
+    let stack_status = stack_status::spawn(Arc::clone(&stack_proxy), bus.clone());
 
     // --- 8. health `ok` ----------------------------------------------------------------------
     status.set(NodeStatus::Ok);
@@ -453,6 +475,13 @@ async fn serve(
     // The camera status poll publishes too, so it stops here with the others.
     camera_poll.abort();
     let _ = camera_poll.await;
+    // The stack.status republisher, same accounting again: it publishes, so it must not outlive
+    // the bus. Aborting mid-poll is safe — the poll is a GET, and abandoning one loses nothing
+    // but a health reading the node is about to stop caring about.
+    if let Some(task) = stack_status {
+        task.abort();
+        let _ = task.await;
+    }
     // 3. finish an in-flight download (bounded). The one step of this sequence that deliberately
     //    *waits*: the exposure has already been spent and a half-downloaded frame is a lost frame,
     //    so the node pays up to `CAPTURE_DRAIN_TIMEOUT` to keep it. Past that it gives up, for the

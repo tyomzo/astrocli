@@ -359,7 +359,12 @@ pub async fn state_with_camera(
     };
 
     AppState {
-        proxy: Arc::new(StackProxy::new(&config.stacking_server)),
+        // The fixture's token, not the environment's: the proxy needs it for the outbound half of
+        // a WebSocket upgrade, and a test node's credential is whatever `TestNode` was built with.
+        proxy: Arc::new(StackProxy::new(
+            &config.stacking_server,
+            node.token.as_deref(),
+        )),
         runtime: RuntimeSizing {
             worker_threads: config.server.resolved_worker_threads(cores),
             configured: config.server.runtime_worker_threads,
