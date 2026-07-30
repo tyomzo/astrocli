@@ -220,7 +220,9 @@ async function readFailure(
       presented: token !== null,
       message:
         envelope?.message ??
-        (token !== null ? 'the node rejected the bearer token' : 'the node requires a bearer token'),
+        (token !== null
+          ? 'the stored token was rejected'
+          : 'this telescope needs a token and none has been entered'),
     };
   }
   if (envelope !== null) {

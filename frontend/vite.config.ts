@@ -7,11 +7,38 @@ import { defineConfig } from 'vitest/config';
 /**
  * Where `npm run dev` forwards `/api`, `/stack` and `/ws`.
  *
- * `server.port` of `config/field-node.example.yaml` — and deliberately also the port
- * `npm run mock` listens on, so switching between the mock and a real field node is starting or
- * stopping a process rather than editing anything.
+ * Defaults to `server.host`/`server.port` of `config/field-node.example.yaml`, so a field node
+ * started from the example config is reachable with nothing else configured. (Until M1-T03 this
+ * was also the port `npm run mock` listened on; the mock is gone and the real binary is what runs
+ * here now.)
+ *
+ * Overridable because a node with `server.tls` configured serves **https on the same port**, and
+ * the example ships that block commented out — so the default is right for the common case and
+ * silently wrong for the deployment one, which is the worst combination. A developer pointing at
+ * a TLS node sets:
+ *
+ * ```sh
+ * ASTROCTL_DEV_NODE=https://127.0.0.1:8470 npm run dev
+ * ```
  */
-const FIELD_NODE = 'http://127.0.0.1:8470';
+// This file runs in Node, but the app it configures does not, so `types` in tsconfig.json is
+// `["vite/client"]` and there is no `process`. Declaring the one member used here is a smaller
+// and more honest change than adding `@types/node` to the whole project for a single env read —
+// and it keeps the app's own code unable to reach `process`, which is the reason `vite/client`
+// was the only entry in the first place.
+declare const process: { env: Record<string, string | undefined> };
+
+const FIELD_NODE = process.env['ASTROCTL_DEV_NODE'] ?? 'http://127.0.0.1:8470';
+
+/**
+ * Certificate verification is off for the dev proxy, and only for it.
+ *
+ * The field node's certificate is issued for its public name (`field.diirc.online`), so reaching
+ * it at `127.0.0.1` fails hostname verification no matter how valid the certificate is. This
+ * affects the Vite dev server on a developer's machine and nothing that ships — the PWA in
+ * production is served *by* the node, over the same TLS the browser validates itself.
+ */
+const proxyTarget = { target: FIELD_NODE, secure: false, changeOrigin: true };
 
 export default defineConfig({
   plugins: [tailwindcss(), react()],
@@ -35,11 +62,11 @@ export default defineConfig({
     // and a dev setup that reaches the stack node directly would let a violation of that pass
     // review by working on the developer's machine.
     proxy: {
-      '/api': FIELD_NODE,
-      '/stack': FIELD_NODE,
+      '/api': proxyTarget,
+      '/stack': proxyTarget,
       // `ws: true` is what makes the upgrade cross the proxy; without it the socket 404s and the
       // app looks like it cannot reach a node that is answering every REST call it makes.
-      '/ws': { target: FIELD_NODE, ws: true },
+      '/ws': { ...proxyTarget, ws: true },
     },
   },
 

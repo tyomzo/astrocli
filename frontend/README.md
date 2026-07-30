@@ -25,19 +25,36 @@ npm run typecheck  # tsc --noEmit; Vite itself never type-checks
 npm run icons      # regenerate the PWA icon set after changing the artwork
 ```
 
-## Running it without a field node
+## Running it against a node
 
-`mock/` is a dev-only Node process that impersonates the field node's Phase 1 surface — the
-ws-ticket exchange, `/ws` with snapshot-on-connect, and the mount routes — closely enough to drive
-every state the mount panel can be in, including a goto ramp and an expiring slew lease.
+The field binary is the node. It serves the same origin Vite proxies to, so the two-terminal loop
+is the real thing rather than an impersonation of it:
 
 ```sh
-npm run mock       # terminal 1: 127.0.0.1:8470, the port vite already proxies to
-npm run dev        # terminal 2: http://localhost:5173/
+cargo run -p astroctl-field -- --config config/field-node.example.yaml   # terminal 1: :8470
+npm run dev                                                             # terminal 2: :5173
 ```
 
-**[`mock/README.md`](mock/README.md) is the written contract** — every route, every frame, and the
-two frame shapes SDD §5.8.3 leaves undefined. M1-T03 implements that and deletes `mock/`.
+Set `mount.driver: simulator` in that config and there is no telescope in the loop: the simulator
+is a permanent, first-class driver (HAL-11, SDD §9), it ramps a goto over several seconds, it lets
+right ascension climb at the sidereal rate when tracking is off, and its faults are constructor
+parameters. Every state this UI can be in is reachable from it.
+
+### `mock/` is gone (M1-T03)
+
+Until M1-T03 there was a `mock/` directory: a Node process impersonating the field node, written by
+M1-T04 because the PWA was built before the routes it consumes. Its README was the wire contract,
+and M1-T03 implemented that contract and deleted it — which is what both files said would happen.
+
+It was deleted rather than kept as an offline convenience, and the reason is the one ADR-13 gives
+for versioning the worker protocol: **two implementations of one wire format drift.** Nothing
+would have tested the mock against the real node, so the first divergence would have been found by
+an operator, on the version that was not the mock. The convenience it offered is also gone: the
+real node needs no Node toolchain, builds offline, and starting it is one command.
+
+The one thing it had that the node does not is `POST /api/mock/drop-clients`, for exercising the
+reconnect path. Restarting the binary does the same thing and is closer to what REL-10 actually
+promises.
 
 ## Tests
 

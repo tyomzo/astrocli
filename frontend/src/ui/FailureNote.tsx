@@ -34,15 +34,24 @@ export function FailureNote({
   );
 }
 
+/**
+ * What went wrong with *this command*, in the operator's words.
+ *
+ * The `api` case still shows the node's own message, and that is deliberate rather than an
+ * oversight: it is the telescope's answer to the thing they just asked for ("target is below the
+ * minimum altitude"), written for them, and paraphrasing it here would put this file in the
+ * business of restating messages it does not own. What is dropped is the machine `code` beside
+ * it, which is for a bug report and not for a decision.
+ */
 function describe(failure: RequestFailure, action: string): string {
   switch (failure.kind) {
     case 'unauthorized':
       return failure.presented
-        ? `${action} was refused: the node rejected the stored token. Enter the right one from the header status strip.`
-        : `${action} was refused: this node requires a bearer token and none is stored.`;
+        ? `${action} was refused: the telescope rejected the stored token. Enter a working one from the status strip at the top.`
+        : `${action} was refused: this telescope needs a token and none has been entered.`;
     case 'api':
-      return `${action} was refused — ${failure.code}: ${failure.message}`;
+      return `${action} was refused: ${failure.message}`;
     case 'transport':
-      return `${action} did not reach the node: ${failure.message}`;
+      return `${action} did not reach the telescope — it may not have happened. Check that you are still connected.`;
   }
 }

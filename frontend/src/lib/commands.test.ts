@@ -47,7 +47,7 @@ function mount(state: MountStatus['state'], slewing = false): Slot<MountStatus> 
     state: 'observed',
     at: 0,
     ts: '2026-07-30T21:04:05.000Z',
-    value: { state, tracking: false, slewing, parked: state === 'parked' },
+    value: { state, tracking: false, tracking_mode: null, slewing, parked: state === 'parked' },
   };
 }
 

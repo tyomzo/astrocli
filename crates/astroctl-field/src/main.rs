@@ -35,15 +35,18 @@
 mod api;
 mod auth;
 mod cli;
+mod mount;
 mod proxy;
 mod pwa;
 mod route_meta;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod ticket;
 mod tls;
 mod vitals;
 mod watchdog;
+mod ws;
 
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -223,7 +226,19 @@ async fn serve(
         );
     }
     let status = Arc::new(StatusCell::starting());
+
+    // --- 5b. drivers built, nothing connected (SDD §8.1) --------------------------------------
+    //
+    // "The registry builds drivers, no connect": switching the field node on must not produce
+    // motion, so connecting stays an operator action and a failure here is a configuration
+    // error rather than a hardware one.
+    let device = build_mount(&config)?;
+    let mount = Arc::new(mount::MountFacade::new(device, bus.clone(), &config.mount));
+    let snapshots = Arc::new(ws::SnapshotStore::new());
+
     let (router, declarations) = api::router();
+    let (ws_router, ws_declarations) = api::ws_router();
+    let routes: Vec<_> = declarations.into_iter().chain(ws_declarations).collect();
     let state = AppState {
         proxy: Arc::new(StackProxy::new(&config.stacking_server)),
         bus: bus.clone(),
@@ -231,12 +246,15 @@ async fn serve(
         uptime,
         runtime: sizing,
         auth: Arc::clone(&auth),
-        routes: declarations.into(),
+        routes: routes.into(),
         logging,
         config: Arc::clone(&config),
         certificate: tls.as_ref().map(tls::Materials::status),
+        mount: Arc::clone(&mount),
+        tickets: Arc::new(ticket::TicketStore::new()),
+        snapshots: Arc::clone(&snapshots),
     };
-    let app = assemble(router, state);
+    let app = assemble(router, ws_router, state);
 
     // --- 6. API up, health `starting` (SDD §8.1) ---------------------------------------------
     let addr = SocketAddr::new(
@@ -298,6 +316,18 @@ async fn serve(
 
     // --- 7. watchdogs on (SDD §8.1) ----------------------------------------------------------
     let watchdog = tokio::spawn(watchdog::run(bus.clone(), config.storage.clone(), uptime));
+    // The 1 Hz position poll (MNT-02) and the snapshot store that feeds every `/ws` connect.
+    //
+    // Both hold an `EventSubscriber` rather than an `EventBus` clone. That is load-bearing at
+    // shutdown: step 5 below closes the sink by dropping every *sender*, and a task holding one
+    // would keep the channel open and stall the flush for its whole timeout. The poll task is
+    // the exception that proves it — it publishes, so it does hold a bus clone, and it is
+    // therefore aborted before `drop(bus)` like the watchdog.
+    let poll = tokio::spawn(mount::poll(Arc::clone(&mount)));
+    let snapshot_task = tokio::spawn(ws::maintain_snapshot(
+        Arc::clone(&snapshots),
+        bus.subscribe(),
+    ));
 
     // --- 8. health `ok` ----------------------------------------------------------------------
     status.set(NodeStatus::Ok);
@@ -314,11 +344,19 @@ async fn serve(
     // 2. abort live view — M1-T09; the watchdogs are what this milestone has to stop.
     watchdog.abort();
     let _ = watchdog.await;
+    // The poll task publishes, so it holds a bus sender and must stop before step 5 drops the
+    // rest. Aborting it mid-poll is safe: HAL rule 3 says dropping a device future never stops
+    // hardware, so a mount that was slewing keeps slewing — which is exactly what step 4 wants.
+    poll.abort();
+    let _ = poll.await;
     // 3. finish an in-flight download — M1-T08; nothing owns a camera yet.
     // 4. tracking is deliberately NOT stopped (see the module docs).
     // 5. flush the session log: dropping every `EventBus` handle closes the sink's subscriber,
     //    which is what makes the flush complete rather than merely likely.
     drop(bus);
+    // Holds only a receiver, so it ends by itself once the senders are gone — but awaiting it is
+    // what makes that a fact rather than a hope.
+    let _ = snapshot_task.await;
     if let Some(sink) = sink {
         match tokio::time::timeout(FLUSH_TIMEOUT, sink).await {
             Ok(Ok(Ok(stats))) => tracing::info!(
@@ -355,10 +393,57 @@ async fn serve(
 /// It is a function rather than four lines inside [`serve`] so that the tests drive exactly what
 /// the binary binds. A test that assembles its own approximation of the app is a test that keeps
 /// passing after the real assembly changes.
-fn assemble(router: axum::Router<AppState>, state: AppState) -> axum::Router {
+/// The three subtrees, and the reason there are three.
+///
+/// * `router` — the bearer-authenticated API (SDD §4.5).
+/// * `ws_router` — `/ws`, authenticated by a single-use ticket instead, because a browser cannot
+///   put an `Authorization` header on a WebSocket handshake. It is merged *after* `with_auth`
+///   has been applied, so the bearer layer never sees it. That is the whole mechanism: there is
+///   no exemption inside the middleware to extend by accident, only a router it was never given.
+/// * `pwa::router` — the unauthenticated app shell, for the same reason, one layer up: a browser
+///   cannot put a header on the navigation request that loads the shell either.
+fn assemble(
+    router: axum::Router<AppState>,
+    ws_router: axum::Router<AppState>,
+    state: AppState,
+) -> axum::Router {
     let auth = Arc::clone(&state.auth);
     let deployment = state.config.server.deployment_label.clone();
-    api::with_auth(router.with_state(state), Arc::clone(&auth)).merge(pwa::router(auth, deployment))
+    api::with_auth(router.with_state(state.clone()), Arc::clone(&auth))
+        .merge(ws_router.with_state(state))
+        .merge(pwa::router(auth, deployment))
+}
+
+/// Build the configured mount driver through the HAL registry (SDD §5.1, §8.1; HAL-07).
+///
+/// This function is the one place in the workspace that names a concrete driver — ADD §5.6 rule
+/// 1 puts that job on a binary, because the registry type lives in `astroctl-hal` and hal cannot
+/// depend on drivers without a cycle. Everything above the HAL, this file included from the next
+/// line onwards, holds `Arc<dyn MountDevice>`.
+///
+/// The registry is built and consulted rather than matched on directly so that
+/// `mount.driver: skywatcher` fails with the registry's own "no such driver, available: …"
+/// message naming what this build actually has, instead of a match arm nobody updated.
+fn build_mount(
+    config: &FieldConfig,
+) -> Result<Arc<dyn astroctl_hal::mount::MountDevice>, Box<dyn std::error::Error>> {
+    let mut registry = astroctl_hal::registry::DriverRegistry::new();
+    // Fault and profile knobs live on the factory rather than in config (SDD §9): a failure
+    // scenario is a value a test writes down, not something an operator can switch on in
+    // production YAML.
+    registry
+        .register_mount(astroctl_drivers::simulator::SimulatorMountFactory::new())
+        .map_err(|e| format!("cannot register the simulator mount driver: {e}"))?;
+
+    registry
+        .create_mount(config.mount.driver.as_str(), &config.mount)
+        .map_err(|e| {
+            format!(
+                "cannot build the mount driver named by `mount.driver` ({}): {e}",
+                config.mount.driver.as_str()
+            )
+            .into()
+        })
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

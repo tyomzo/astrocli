@@ -32,8 +32,8 @@ export function nudgeAvailability(
     return {
       available: false,
       reason:
-        'The event link to the field node is down, so nothing here can be commanded and nothing ' +
-        'on screen is current. The app is reconnecting on its own.',
+        "Not connected to the mount — commands can't be confirmed and nothing on screen is " +
+        'current. Reconnecting on its own.',
     };
   }
 
@@ -41,8 +41,8 @@ export function nudgeAvailability(
     return {
       available: false,
       reason:
-        'The mount has not reported its state yet. This clears within a second of the link ' +
-        'coming up; if it does not, the field node has no mount driver configured.',
+        'The mount has not reported its state yet. This clears within a second of connecting; ' +
+        'if it does not, this telescope has no mount configured.',
     };
   }
 

@@ -43,6 +43,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::auth::{require_bearer, AuthPolicy};
+use crate::mount;
 use crate::proxy::{self, StackProxy};
 use crate::route_meta::{ApiRouter, RouteDecl, RouteMeta, Tier};
 use crate::vitals::{self, Uptime};
@@ -175,6 +176,12 @@ pub struct AppState {
     pub routes: Arc<[RouteDecl]>,
     /// The `/stack/*` client (ADR-07).
     pub proxy: Arc<StackProxy>,
+    /// The mount facade (SDD §5.8, M1-T03) — the routes and the 1 Hz poll share this.
+    pub mount: Arc<crate::mount::MountFacade>,
+    /// Outstanding WebSocket tickets (SDD §4.5).
+    pub tickets: Arc<crate::ticket::TicketStore>,
+    /// The latest event per stateful topic, for the connect snapshot (SDD §5.8.3).
+    pub snapshots: Arc<crate::ws::SnapshotStore>,
     /// Logging destination, for support questions.
     pub logging: LoggingInfo,
     /// The served certificate's expiry (SEC-07), or `None` on a plain-HTTP node.
@@ -214,6 +221,27 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
     let api = ApiRouter::<AppState>::new()
         .get("/api/system/health", RouteMeta::read(), health)
         .get("/api/system/info", RouteMeta::read(), info)
+        // --- SDD §4.5: the only way a browser authenticates `/ws` ------------------------------
+        // `read` tier: issuing a ticket changes nothing an operator would want to confirm, and
+        // it is the exchange that keeps the long-lived token out of URLs. Audited, because a
+        // burst of ticket requests is what a reconnect storm looks like from the node's side.
+        .post("/api/auth/ws-ticket", RouteMeta::new(Tier::Read, true), mount::ws_ticket)
+        // --- SDD §5.8.1: the mount rows ---------------------------------------------------
+        //
+        // Tiers are §5.8.1's verbatim. Everything that moves the telescope is audited: the
+        // audit record is what lets an operator reconstruct what the node was asked to do on a
+        // night something went wrong, and a motion command missing from it is the one you would
+        // want.
+        .post("/api/mount/connect", RouteMeta::new(Tier::Low, true), mount::connect)
+        .post("/api/mount/disconnect", RouteMeta::new(Tier::Low, true), mount::disconnect)
+        .get("/api/mount/position", RouteMeta::read(), mount::position)
+        .get("/api/mount/status", RouteMeta::read(), mount::status)
+        .post("/api/mount/goto", RouteMeta::new(Tier::Medium, true), mount::goto)
+        .post("/api/mount/tracking", RouteMeta::new(Tier::Low, true), mount::tracking)
+        .post("/api/mount/slew", RouteMeta::new(Tier::Low, true), mount::slew)
+        .post("/api/mount/slew/stop", RouteMeta::new(Tier::Low, true), mount::slew_stop)
+        .post("/api/mount/park", RouteMeta::new(Tier::High, true), mount::park)
+        .post("/api/mount/unpark", RouteMeta::new(Tier::High, true), mount::unpark)
         // ADR-07. Audited: a call that changes state on the other node is exactly as consequential
         // as one that changes state here, and this node cannot tell which is which — so it records
         // every one of them.
@@ -230,6 +258,24 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
 
     let declarations = api.declarations();
     (api.into_router(), declarations)
+}
+
+/// The ticket-authenticated surface: `/ws`, and nothing else (SDD §4.5, §5.8.3).
+///
+/// Separate from [`router`] because it is authenticated differently, and separate at the
+/// *router* level rather than by a path exemption inside [`require_bearer`]. The distinction
+/// matters: an exemption list is one line away from covering a second path by accident, whereas
+/// a router that is never handed to `with_auth` cannot leak its policy to anything but its own
+/// members. `crate::assemble` is where the three subtrees meet.
+///
+/// It still goes through [`ApiRouter`], so `/ws` appears in the table `/api/system/info`
+/// publishes (§8.2) and gets the same per-route metadata layer as everything else. `audit:
+/// false` — the record would fire on the *handshake*, reporting a 101 and a latency that is the
+/// upgrade rather than the session, which is a log line that looks like information and is not.
+pub fn ws_router() -> (Router<AppState>, Vec<RouteDecl>) {
+    let ws = ApiRouter::<AppState>::new().get("/ws", RouteMeta::read(), crate::ws::upgrade);
+    let declarations = ws.declarations();
+    (ws.into_router(), declarations)
 }
 
 /// Apply the bearer-auth layer to a router (SDD §4.5).
@@ -737,9 +783,48 @@ mod tests {
         assert_eq!(proxy["audit"], true);
         assert_eq!(proxy["method"], "ANY");
 
+        // A motion route, so the table's *content* is checked and not only its size: §5.8.1
+        // gives goto the `medium` tier, which is what Phase 2c will make the LLM ask about.
+        let goto = routes
+            .iter()
+            .find(|r| r["path"] == "/api/mount/goto")
+            .expect("goto is declared");
+        assert_eq!(goto["tier"], "medium");
+        assert_eq!(
+            goto["audit"], true,
+            "a command that moves the telescope is audited"
+        );
+        assert_eq!(goto["method"], "POST");
+
         // Every route the router serves is declared — that is the §8.2 invariant, and the
-        // declaration list is the only place a route can come from.
-        assert_eq!(routes.len(), 4);
+        // declaration list is the only place a route can come from. The count is the review
+        // checkpoint: 4 → 15 is M1-T03's ws-ticket row plus the ten mount rows of §5.8.1. `/ws`
+        // is *not* among them because it is declared by `ws_router()`, which is authenticated
+        // by ticket rather than by the bearer layer this test drives.
+        assert_eq!(routes.len(), 15);
+    }
+
+    /// `/ws` is declared, published and outside the bearer layer — all three, because any two of
+    /// them without the third is a bug: undeclared means §8.2's table lies, unpublished means the
+    /// PWA cannot discover it, and inside the layer means a browser can never connect.
+    #[test]
+    fn the_ws_route_is_declared_separately_from_the_bearer_authenticated_surface() {
+        let (_, bearer) = router();
+        assert!(
+            !bearer.iter().any(|r| r.path == "/ws"),
+            "/ws must not be in the bearer-authenticated table (SDD §4.5: ticket, not header)"
+        );
+
+        let (_, ws) = ws_router();
+        assert_eq!(ws.len(), 1);
+        assert_eq!(ws[0].path, "/ws");
+        assert_eq!(ws[0].method, "GET");
+        assert_eq!(ws[0].meta.tier, Tier::Read);
+        assert!(
+            !ws[0].meta.audit,
+            "the audit record would fire on the handshake and report the upgrade's latency as \
+             the session's, which looks like information and is not"
+        );
     }
 
     #[tokio::test]
@@ -752,7 +837,11 @@ mod tests {
             body["config"]["stacking_server"]["upstream"],
             "http://192.168.1.100:8471"
         );
-        assert_eq!(body["config"]["mount_driver"], "skywatcher");
+        // The fixture rewrites `mount.driver` to `simulator` (see `test_support`): the example
+        // config selects skywatcher, which is right for the operator and unbuildable on a
+        // machine with no telescope. What matters here is that `info` reports the driver the
+        // config actually named, whichever that is.
+        assert_eq!(body["config"]["mount_driver"], "simulator");
         assert_eq!(body["config"]["camera_driver"], "gphoto2");
         assert!(body["drivers"].as_array().expect("list").is_empty());
     }

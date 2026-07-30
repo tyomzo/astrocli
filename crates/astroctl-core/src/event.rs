@@ -28,6 +28,11 @@
 use chrono::{DateTime, SecondsFormat, SubsecRound, Utc};
 use serde::{Deserialize, Serialize};
 
+// The rate a mount is tracking at, reused rather than re-declared: `mount.status`'s
+// `tracking_mode` must be the same closed set the HAL's `start_tracking` accepts, or the event
+// could report a rate no driver can be asked for.
+use crate::types::TrackingMode;
+
 /// Event schema version carried in every event's `v` field (SDD §4.3).
 pub const EVENT_SCHEMA_VERSION: u16 = 1;
 
@@ -255,6 +260,32 @@ impl Topic {
     pub const fn is_coalescable(self) -> bool {
         matches!(self, Topic::MountPosition)
     }
+
+    /// Whether the latest event on this topic belongs in the connect snapshot (§5.8.3).
+    ///
+    /// A stateful topic reports a value that *is currently true* — where the mount is, whether
+    /// the camera is attached, how deep the upload queue is — so a client that just connected
+    /// needs the most recent one to render anything at all. The rest are occurrences: an
+    /// `alert` fired, a `frame.saved` happened, a `transfer.acked` arrived. Replaying those on
+    /// every reconnect would show the operator a warning that has already been dealt with and a
+    /// frame notification for a frame saved an hour ago, which on a link that reconnects as
+    /// often as this one does (REL-10) is a stream of stale news.
+    ///
+    /// Lives here beside [`is_coalescable`](Self::is_coalescable) so both classifications sit
+    /// next to the topic definitions rather than being re-derived in the hub.
+    #[must_use]
+    pub const fn is_stateful(self) -> bool {
+        match self {
+            Topic::MountPosition
+            | Topic::MountStatus
+            | Topic::CameraStatus
+            | Topic::CaptureProgress
+            | Topic::TransferStatus
+            | Topic::StackStatus
+            | Topic::SystemHealth => true,
+            Topic::FrameSaved | Topic::TransferAcked | Topic::Alert => false,
+        }
+    }
 }
 
 impl std::fmt::Display for Topic {
@@ -422,10 +453,20 @@ pub struct MountPosition {
     ra_hours: f64,
     #[serde(rename = "dec")]
     dec_degrees: f64,
+    /// Altitude, or `null` when nothing has computed the topocentric transform yet.
+    ///
+    /// Nullable because the mount facade (SDD §5.8) publishes this event and the transform
+    /// belongs to the safety monitor (§5.4, M1-T05), which wraps the facade rather than living
+    /// inside it. Until it does, the honest value is "not known here" — and a `0.0` would put
+    /// the target on the horizon, which is exactly where the altitude limit lives, so the one
+    /// field a stand-in value could corrupt is the one that decides whether to refuse a slew.
     #[serde(rename = "alt")]
-    alt_degrees: f64,
+    alt_degrees: Option<f64>,
+    /// Azimuth, or `null`. Nullable for the same reason as `alt_degrees`, and always together
+    /// with it: they come from one transform, so one being known and the other not is a state
+    /// that cannot arise.
     #[serde(rename = "az")]
-    az_degrees: f64,
+    az_degrees: Option<f64>,
     pier_side: PierSide,
 }
 
@@ -435,8 +476,8 @@ impl MountPosition {
     pub fn new(
         ra_hours: f64,
         dec_degrees: f64,
-        alt_degrees: f64,
-        az_degrees: f64,
+        alt_degrees: Option<f64>,
+        az_degrees: Option<f64>,
         pier_side: PierSide,
     ) -> Self {
         Self {
@@ -460,15 +501,15 @@ impl MountPosition {
         self.dec_degrees
     }
 
-    /// Altitude, degrees.
+    /// Altitude in degrees, or `None` until the topocentric transform lands (M1-T05).
     #[must_use]
-    pub fn alt_degrees(&self) -> f64 {
+    pub fn alt_degrees(&self) -> Option<f64> {
         self.alt_degrees
     }
 
-    /// Azimuth, degrees.
+    /// Azimuth in degrees, or `None` until the topocentric transform lands (M1-T05).
     #[must_use]
-    pub fn az_degrees(&self) -> f64 {
+    pub fn az_degrees(&self) -> Option<f64> {
         self.az_degrees
     }
 
@@ -483,27 +524,55 @@ impl EventPayload for MountPosition {
     const TOPIC: Topic = Topic::MountPosition;
 }
 
-/// `mount.status` — `{state, tracking, slewing, parked}`, on change.
+/// `mount.status` — `{state, tracking, tracking_mode, slewing, parked}`, on change.
 ///
 /// `slewing` and `parked` are derived from `state` by the constructors, so the payload cannot
 /// report `state: "parked"` alongside `parked: false`. §4.3 carries both the state and the flags
 /// (the flags are what the PWA binds to); making one the source of the others is what keeps the
-/// redundancy from becoming a contradiction.
+/// redundancy from becoming a contradiction. `tracking` is derived from `tracking_mode` for the
+/// same reason.
+///
+/// # Why `tracking_mode` exists (M1-T03; SDD §4.3 change note)
+///
+/// The payload carried `tracking: bool` and nothing else, so a UI could show *whether* the
+/// mount was tracking but not *which rate it settled on*. M1-T04's `TrackingControl` handled
+/// that correctly and at a cost: rather than highlight the last button pressed — optimistic UI
+/// wearing a different hat, and wrong after any reconnect — it left every rate button
+/// unhighlighted and said so in a comment asking for this field.
+///
+/// The mount is the only thing that knows its rate: a driver may refuse `Lunar` as
+/// `Unsupported`, or a goto may suspend tracking and resume it at whatever was running before.
+/// Deriving the rate from the last accepted command is therefore guessing, and it guesses wrong
+/// in exactly the cases an operator would want to check.
+///
+/// `tracking` is kept alongside it rather than replaced. It is what most of the UI binds to, a
+/// `null`-vs-string check is a worse thing to ask of every consumer than a boolean, and the
+/// field is part of the frozen §4.3 payload — removing it would break the PWA that M1-T04
+/// already shipped against it, for no gain.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MountStatus {
     state: MountState,
     tracking: bool,
+    /// The rate being driven, or `null` when tracking is off.
+    ///
+    /// A separate field rather than an enum-with-`off` variant because `tracking: false` and
+    /// `tracking_mode: null` must agree by construction; see [`MountStatus::new`].
+    tracking_mode: Option<TrackingMode>,
     slewing: bool,
     parked: bool,
 }
 
 impl MountStatus {
-    /// Build a status report from the authoritative state plus the tracking flag.
+    /// Build a status report from the authoritative state plus the rate being driven.
+    ///
+    /// `tracking` is derived from `tracking_mode`, so the two cannot contradict each other —
+    /// the same discipline `slewing`/`parked` get from `state`.
     #[must_use]
-    pub fn new(state: MountState, tracking: bool) -> Self {
+    pub fn new(state: MountState, tracking_mode: Option<TrackingMode>) -> Self {
         Self {
             state,
-            tracking,
+            tracking: tracking_mode.is_some(),
+            tracking_mode,
             slewing: matches!(state, MountState::Slewing),
             parked: matches!(state, MountState::Parked),
         }
@@ -512,7 +581,7 @@ impl MountStatus {
     /// No driver connection.
     #[must_use]
     pub fn disconnected() -> Self {
-        Self::new(MountState::Disconnected, false)
+        Self::new(MountState::Disconnected, None)
     }
 
     /// Lifecycle state.
@@ -525,6 +594,12 @@ impl MountStatus {
     #[must_use]
     pub fn tracking(&self) -> bool {
         self.tracking
+    }
+
+    /// Which rate is being driven, or `None` when tracking is off.
+    #[must_use]
+    pub fn tracking_mode(&self) -> Option<TrackingMode> {
+        self.tracking_mode
     }
 
     /// Whether an axis is slewing.
@@ -1056,12 +1131,28 @@ mod tests {
     /// ordering is part of the golden precisely so a switch to `preserve_order` shows up here.
     #[test]
     fn golden_mount_position_event() {
-        let event = MountPosition::new(5.5675, -5.3897, 41.25, 132.75, PierSide::West)
+        let event = MountPosition::new(5.5675, -5.3897, Some(41.25), Some(132.75), PierSide::West)
             .into_event_at(fixed_ts());
 
         assert_eq!(
             serde_json::to_string(&event).expect("event serializes"),
             r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":41.25,"az":132.75,"dec":-5.3897,"pier_side":"west","ra":5.5675}}"#
+        );
+    }
+
+    /// The shape the mount facade emits until M1-T05's topocentric transform wraps it.
+    ///
+    /// Pinned as a golden because `null` here is a contract, not an accident: the PWA renders
+    /// "—" for an unknown altitude, and a serializer that skipped the key instead would make the
+    /// field indistinguishable from a node too old to have it.
+    #[test]
+    fn golden_mount_position_with_no_horizontal_transform() {
+        let event = MountPosition::new(5.5675, -5.3897, None, None, PierSide::Unknown)
+            .into_event_at(fixed_ts());
+
+        assert_eq!(
+            serde_json::to_string(&event).expect("event serializes"),
+            r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":null,"az":null,"dec":-5.3897,"pier_side":"unknown","ra":5.5675}}"#
         );
     }
 
@@ -1071,8 +1162,14 @@ mod tests {
         let ts = fixed_ts();
         let cases: Vec<(Event, &str)> = vec![
             (
-                MountStatus::new(MountState::Slewing, true).into_event_at(ts),
-                r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.status","data":{"parked":false,"slewing":true,"state":"slewing","tracking":true}}"#,
+                MountStatus::new(MountState::Slewing, Some(TrackingMode::Sidereal))
+                    .into_event_at(ts),
+                r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.status","data":{"parked":false,"slewing":true,"state":"slewing","tracking":true,"tracking_mode":"sidereal"}}"#,
+            ),
+            // Tracking off: `tracking_mode` is `null`, not absent. Same contract as `alt`/`az`.
+            (
+                MountStatus::new(MountState::Idle, None).into_event_at(ts),
+                r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.status","data":{"parked":false,"slewing":false,"state":"idle","tracking":false,"tracking_mode":null}}"#,
             ),
             (
                 CameraStatus::connected(87, false, 51_200).into_event_at(ts),
@@ -1214,7 +1311,7 @@ mod tests {
         for topic in Topic::ALL {
             let built = match topic {
                 Topic::MountPosition => {
-                    MountPosition::new(0.0, 0.0, 0.0, 0.0, PierSide::Unknown).into_event()
+                    MountPosition::new(0.0, 0.0, None, None, PierSide::Unknown).into_event()
                 }
                 Topic::MountStatus => MountStatus::disconnected().into_event(),
                 Topic::CameraStatus => CameraStatus::disconnected().into_event(),
@@ -1239,11 +1336,23 @@ mod tests {
 
     #[test]
     fn mount_status_flags_cannot_contradict_state() {
-        let parked = MountStatus::new(MountState::Parked, false);
+        let parked = MountStatus::new(MountState::Parked, None);
         assert!(parked.parked() && !parked.slewing());
 
-        let slewing = MountStatus::new(MountState::Slewing, true);
+        let slewing = MountStatus::new(MountState::Slewing, Some(TrackingMode::Sidereal));
         assert!(slewing.slewing() && !slewing.parked() && slewing.tracking());
+
+        // The rate and the boolean are one field's two views, so they cannot disagree.
+        for mode in [
+            None,
+            Some(TrackingMode::Sidereal),
+            Some(TrackingMode::Lunar),
+            Some(TrackingMode::Solar),
+        ] {
+            let status = MountStatus::new(MountState::Idle, mode);
+            assert_eq!(status.tracking(), mode.is_some());
+            assert_eq!(status.tracking_mode(), mode);
+        }
 
         assert_eq!(
             MountStatus::disconnected().state(),
@@ -1255,6 +1364,33 @@ mod tests {
     fn only_mount_position_coalesces() {
         for topic in Topic::ALL {
             assert_eq!(topic.is_coalescable(), topic == Topic::MountPosition);
+        }
+    }
+
+    #[test]
+    fn the_snapshot_set_is_the_seven_stateful_topics() {
+        // Pinned as a literal list rather than derived, because this set is a wire contract: the
+        // PWA reduces a topic *absent* from the snapshot back to unknown, so moving a topic
+        // between these two groups silently changes what a reconnecting client displays.
+        let stateful: Vec<Topic> = Topic::ALL.into_iter().filter(|t| t.is_stateful()).collect();
+        assert_eq!(
+            stateful,
+            vec![
+                Topic::MountPosition,
+                Topic::MountStatus,
+                Topic::CameraStatus,
+                Topic::CaptureProgress,
+                Topic::TransferStatus,
+                Topic::StackStatus,
+                Topic::SystemHealth,
+            ]
+        );
+        // The three occurrences, named so a reader sees why each is excluded.
+        for occurrence in [Topic::Alert, Topic::FrameSaved, Topic::TransferAcked] {
+            assert!(
+                !occurrence.is_stateful(),
+                "{occurrence} is something that happened, not something that is true"
+            );
         }
     }
 }

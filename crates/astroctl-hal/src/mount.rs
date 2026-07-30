@@ -106,6 +106,17 @@ pub trait MountDevice: Debug + Send + Sync {
     /// (a mechanical limit), `Timeout`/`Transport`/`Protocol` from the exchange. A goto that
     /// fails mid-motion must leave the mount stopped, not drifting toward a target nobody is
     /// tracking.
+    ///
+    /// **A goto that *started* and was then stopped by something else — an emergency stop, a
+    /// safety limit, an operator stop — is [`DeviceError::Aborted`](astroctl_core::error::DeviceError::Aborted),
+    /// not `Rejected`.** The distinction reaches the operator: `Rejected` is
+    /// `DEVICE_REJECTED`/422 ("your request was bad"), `Aborted` is `ABORTED`/409 ("something
+    /// stopped the mount"). Answering 422 for a working e-stop is the defect this variant was
+    /// added to fix (M1-T02 handoff → M1-T03).
+    ///
+    /// Callers should still not switch on the variant to learn where the mount is. Any error
+    /// means the slew did not complete; [`status`](Self::status) is what says what it is doing
+    /// now.
     async fn goto(&self, target: RaDec) -> Result<(), DeviceError>;
 
     /// Tells the mount that it is currently pointing at `pos`, without moving.

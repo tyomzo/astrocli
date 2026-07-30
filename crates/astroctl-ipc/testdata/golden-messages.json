@@ -11,6 +11,7 @@
   "proto_version": 1,
   "max_line_bytes": 1048576,
   "error_codes": [
+    "ABORTED",
     "AUTH",
     "BUSY",
     "CAMERA_TIMEOUT",

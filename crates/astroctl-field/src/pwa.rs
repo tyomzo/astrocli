@@ -345,8 +345,12 @@ mod tests {
     /// half. `crate::assemble` is the same function `main` calls.
     async fn call(node: &TestNode, method: Method, path: &str, token: Option<&str>) -> Answer {
         let (router, declarations) = api::router();
-        let state = state_with(node, declarations);
-        let app = crate::assemble(router, state);
+        let (ws_router, ws_declarations) = api::ws_router();
+        let state = state_with(
+            node,
+            declarations.into_iter().chain(ws_declarations).collect(),
+        );
+        let app = crate::assemble(router, ws_router, state);
 
         let mut request = Request::builder().method(method).uri(path);
         if let Some(token) = token {
@@ -409,7 +413,12 @@ mod tests {
     #[tokio::test]
     async fn an_undeclared_api_path_is_404_once_the_token_is_valid() {
         let node = TestNode::authenticated("s3cret");
-        let answer = get(&node, "/api/mount/position", Some("s3cret")).await;
+        // `/api/camera/capture` is in SDD §5.8.1's table and not in this build (M1-T08). That
+        // makes it the honest example: a route the design promises, that a client may well try,
+        // and that must answer 404 rather than the app shell. This test used `/api/mount/position`
+        // until M1-T03 declared it — which is the failure mode the check exists for, caught by
+        // the check itself.
+        let answer = get(&node, "/api/camera/capture", Some("s3cret")).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
         assert_eq!(answer.json()["code"], "NOT_FOUND");
         assert_eq!(answer.json()["retryable"], false);
@@ -645,8 +654,12 @@ mod tests {
     async fn the_fallbacks_401_is_the_middlewares_401() {
         let node = TestNode::authenticated("s3cret");
         let (router, declarations) = api::router();
-        let state = state_with(&node, declarations);
-        let app = crate::assemble(router, state);
+        let (ws_router, ws_declarations) = api::ws_router();
+        let state = state_with(
+            &node,
+            declarations.into_iter().chain(ws_declarations).collect(),
+        );
+        let app = crate::assemble(router, ws_router, state);
 
         let mut responses = Vec::new();
         for path in ["/api/system/health", "/api/undeclared"] {

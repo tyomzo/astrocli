@@ -87,6 +87,20 @@ pub enum DeviceError {
     /// The device is busy with something that must finish first, e.g. a slew.
     #[error("busy: {0}")]
     Busy(&'static str),
+    /// A motion that had started was stopped before it finished — an emergency stop, a safety
+    /// limit, or an operator stop took the axes.
+    ///
+    /// Added by M1-T03 because the alternative was `Rejected`, which maps to
+    /// `DEVICE_REJECTED`/422 and therefore tells the operator their *request* was bad at the
+    /// exact moment the truth is that their e-stop worked. The simulator's author flagged this
+    /// in the M1-T02 handoff: "there is no `Aborted`" was a gap in this enum, not a driver
+    /// quirk. Nothing about an aborted goto is a client error, so it must not be a 4xx that
+    /// blames the client — see [`ErrorCode::Aborted`].
+    ///
+    /// The string names what took the axes, so an operator reading a log can tell an e-stop
+    /// from a meridian limit without correlating timestamps.
+    #[error("aborted: {0}")]
+    Aborted(String),
 }
 
 // ---------------------------------------------------------------------------------------
@@ -111,6 +125,18 @@ pub enum ErrorCode {
     Unsupported,
     /// The device or the orchestrator is busy with a conflicting operation.
     Busy,
+    /// A motion that had started was stopped before it finished (M1-T03; SDD §4.2).
+    ///
+    /// The 409 twin of [`Cancelled`](Self::Cancelled), and separate from it for the reason
+    /// §4.2 keeps `WORKER_CRASHED` separate from `INTERNAL`: the two send the operator to
+    /// different places. `CANCELLED` is a *stacking job* the supervisor gave up on; `ABORTED`
+    /// is the *telescope* stopping mid-slew because an e-stop, a safety limit or a manual stop
+    /// took the axes. Rendering worker copy for an e-stop would be worse than saying nothing.
+    ///
+    /// Deliberately **not** retryable. The request was valid, so 422 would be a lie — but the
+    /// thing that stopped the motion was almost always a safety action, and a client that
+    /// re-issued the goto automatically would drive the mount straight back into it.
+    Aborted,
     // --- device communication (502) ---
     /// The mount did not respond in time.
     MountTimeout,
@@ -173,6 +199,7 @@ impl ErrorCode {
         ErrorCode::NotConnected,
         ErrorCode::Unsupported,
         ErrorCode::Busy,
+        ErrorCode::Aborted,
         ErrorCode::MountTimeout,
         ErrorCode::CameraTimeout,
         ErrorCode::DeviceTimeout,
@@ -203,6 +230,7 @@ impl ErrorCode {
             Self::NotConnected => "NOT_CONNECTED",
             Self::Unsupported => "UNSUPPORTED",
             Self::Busy => "BUSY",
+            Self::Aborted => "ABORTED",
             Self::MountTimeout => "MOUNT_TIMEOUT",
             Self::CameraTimeout => "CAMERA_TIMEOUT",
             Self::DeviceTimeout => "DEVICE_TIMEOUT",
@@ -261,6 +289,10 @@ impl ErrorCode {
             // Cancellation is the operator's own act arriving back; nothing failed. 409 rather
             // than a 4xx blame code: the request was fine, the state moved under it.
             Self::Cancelled => 409,
+            // Same reasoning as Cancelled, one layer down: the goto was valid and an e-stop or
+            // a limit took the axes out from under it. 422 was the status this replaces, and it
+            // told the operator their request was malformed while their e-stop was working.
+            Self::Aborted => 409,
             // Worker failures are upstream-of-the-API failures, like the device 502s: the
             // caller's request was valid and the thing behind the API could not serve it.
             Self::WorkerUnavailable | Self::WorkerCrashed | Self::WorkerTimeout => 502,
@@ -283,7 +315,9 @@ impl ErrorCode {
             // the same request later is expected to succeed. A worker *timeout* is not retried:
             // the same job hitting the same ceiling repeats deterministically, like Protocol.
             Self::WorkerUnavailable | Self::WorkerCrashed => true,
-            Self::Cancelled | Self::WorkerTimeout => false,
+            // Aborted joins these: a motion stopped by a safety action must not be re-issued
+            // automatically, or the client drives the mount back into whatever stopped it.
+            Self::Cancelled | Self::WorkerTimeout | Self::Aborted => false,
             // A protocol error repeats deterministically until the driver or firmware
             // changes; retrying it just burns the operator's link budget.
             Self::DeviceProtocol
@@ -324,6 +358,7 @@ impl ErrorCode {
             DeviceError::Transport(_) => Self::DeviceTransport,
             DeviceError::Unsupported => Self::Unsupported,
             DeviceError::Busy(_) => Self::Busy,
+            DeviceError::Aborted(_) => Self::Aborted,
         }
     }
 }
@@ -445,6 +480,10 @@ mod tests {
                 DeviceError::Busy("slew in progress"),
                 "busy: slew in progress",
             ),
+            (
+                DeviceError::Aborted("goto aborted by an emergency stop".to_owned()),
+                "aborted: goto aborted by an emergency stop",
+            ),
         ];
         for (err, expected) in cases {
             assert_eq!(err.to_string(), expected);
@@ -477,6 +516,10 @@ mod tests {
             // §5.11.2: checksum mismatch → 422, disk critical → 507
             (ErrorCode::ChecksumMismatch, 422, false),
             (ErrorCode::DiskFull, 507, false),
+            // M1-T03: a goto stopped by an e-stop is 409, not the 422 it used to be. The row is
+            // here rather than only in `every_code_has_a_plausible_status` because the *status*
+            // is the whole point of the code existing — 422 was the defect.
+            (ErrorCode::Aborted, 409, false),
         ];
         for &(code, status, retryable) in table {
             assert_eq!(code.http_status(), status, "status for {code}");
@@ -509,8 +552,10 @@ mod tests {
         // Adding a variant without adding it to ALL leaves this count stale on purpose:
         // the number is the review checkpoint for a frozen contract. 20 → 24 was the worker
         // vocabulary (SDD §4.2 change note, 2026-07-30) — approved before M1-T04 builds the
-        // PWA switch, i.e. while extending was still cheap.
-        assert_eq!(before, 24);
+        // PWA switch, i.e. while extending was still cheap. 24 → 25 is `ABORTED` (M1-T03,
+        // SDD §4.2 change note): a goto stopped by an e-stop was answering 422 DEVICE_REJECTED,
+        // which blames the operator's request for their own safety action working.
+        assert_eq!(before, 25);
     }
 
     #[test]
