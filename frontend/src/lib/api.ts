@@ -156,11 +156,37 @@ export async function getJson<T>(path: string, token: string | null): Promise<Re
  * the whole mutation surface in one pass, on purpose, because a half-covered envelope looks
  * enforced and is not.
  */
-export async function postJson<T>(
+export function postJson<T>(
   path: string,
   token: string | null,
   body?: unknown,
   options: { keepalive?: boolean } = {},
+): Promise<RequestResult<T | null>> {
+  return send<T>('POST', path, token, body, options);
+}
+
+/**
+ * One authenticated PUT — used by `/api/camera/settings` and, so far, nothing else.
+ *
+ * The method is the point rather than a preference: sending the same settings twice must leave the
+ * camera where sending them once did, and over a tunnel where a reply can be lost that is the
+ * difference between a retry and a second change. The node declares the route as a `PUT` for the
+ * same reason (SDD §5.8.1), so this is the two halves agreeing rather than a client convention.
+ */
+export function putJson<T>(
+  path: string,
+  token: string | null,
+  body?: unknown,
+): Promise<RequestResult<T | null>> {
+  return send<T>('PUT', path, token, body, {});
+}
+
+async function send<T>(
+  method: 'POST' | 'PUT',
+  path: string,
+  token: string | null,
+  body: unknown,
+  options: { keepalive?: boolean },
 ): Promise<RequestResult<T | null>> {
   assertSameOrigin(path);
 
@@ -175,7 +201,7 @@ export async function postJson<T>(
   let response: Response;
   try {
     response = await fetch(path, {
-      method: 'POST',
+      method,
       headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(options.keepalive === true ? { keepalive: true } : {}),

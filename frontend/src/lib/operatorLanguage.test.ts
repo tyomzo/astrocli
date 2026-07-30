@@ -5,9 +5,12 @@ import { describe, expect, it } from 'vitest';
 // graph resolves the files, which also means a rename cannot leave the guard silently pointing at
 // nothing.
 import estopButton from '../app/EStopButton.tsx?raw';
+import cameraVitals from '../panels/CameraVitals.tsx?raw';
+import captureStrip from '../panels/CaptureStrip.tsx?raw';
 import failureNote from '../ui/FailureNote.tsx?raw';
 import linkBanner from '../panels/LinkBanner.tsx?raw';
 import manualTargetChooser from '../panels/ManualTargetChooser.tsx?raw';
+import sessionFrames from '../panels/SessionFrames.tsx?raw';
 import trackingControl from '../panels/TrackingControl.tsx?raw';
 import { nudgeAvailability } from './nudge';
 import nudgeSource from './nudge.ts?raw';
@@ -57,6 +60,12 @@ const OPERATOR_FACING: readonly [string, string][] = [
   ['panels/LinkBanner.tsx', linkBanner],
   ['panels/ManualTargetChooser.tsx', manualTargetChooser],
   ['panels/TrackingControl.tsx', trackingControl],
+  // The capture controls are read in the dark by someone deciding whether to press a button that
+  // opens a shutter for ten minutes. "The capture orchestrator is in the Faulted phase" is a
+  // sentence about this program; what they need is what the camera did and what to do next.
+  ['panels/CaptureStrip.tsx', captureStrip],
+  ['panels/SessionFrames.tsx', sessionFrames],
+  ['panels/CameraVitals.tsx', cameraVitals],
   ['ui/FailureNote.tsx', failureNote],
   ['lib/nudge.ts', nudgeSource],
 ];

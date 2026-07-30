@@ -5,6 +5,7 @@ import type {
   Alert,
   CameraStatus,
   CaptureProgress,
+  FrameSaved,
   MountPosition,
   MountStatus,
   StackStatus,
@@ -124,6 +125,25 @@ export interface TelemetryState {
   alerts: ReceivedAlert[];
   /** Monotonic, so a React key survives the list being trimmed. */
   alertSeq: number;
+  /**
+   * The last frame the node reported durable, and how many it has reported on this connection.
+   *
+   * `frame.saved` is an **occurrence**, not a value that is true (SDD §5.8.3 keeps it out of the
+   * connect snapshot for exactly that reason), so it is not a `Slot` that a panel renders. What it
+   * is good for is knowing *when to ask again*: the frame list is a document served by
+   * `/api/session/current`, and this counter is the signal that the document changed.
+   *
+   * That is not the REST polling §5.9 forbids. Polling means a timer, and a timer is what makes a
+   * display look live while being up to one interval stale. This is event-driven revalidation —
+   * nothing is fetched until the node says something happened — and the list a panel shows is
+   * still only ever what the node returned, never something the client assembled from a command
+   * it issued.
+   *
+   * `count` rather than a boolean because two frames saved in quick succession must produce two
+   * distinguishable states, or a panel keyed on it would skip a refresh.
+   */
+  lastFrameSaved: Slot<FrameSaved>;
+  framesSavedCount: number;
 }
 
 const UNKNOWN = { state: 'unknown' } as const;
@@ -145,6 +165,8 @@ export const EMPTY: TelemetryState = {
   ...NO_TELEMETRY,
   alerts: [],
   alertSeq: 0,
+  lastFrameSaved: UNKNOWN as Slot<FrameSaved>,
+  framesSavedCount: 0,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -236,10 +258,18 @@ function applyEvent(state: TelemetryState, event: TelemetryEvent, at: number): T
         ].slice(0, ALERT_LIMIT),
       };
     case 'frame.saved':
+      // Not a `Slot` anything renders — see `lastFrameSaved`. It records that the session's frame
+      // list changed, which is what makes the panel re-read the list instead of assembling one
+      // from the captures it happened to issue.
+      return {
+        ...state,
+        lastFrameSaved: observed(at, event.ts, event.data),
+        framesSavedCount: state.framesSavedCount + 1,
+      };
     case 'transfer.acked':
-      // Per-frame facts, not state: they belong to a session frame list that M1-T08 (capture) and
-      // M1-T11 (transfer) add. Listed explicitly rather than caught by a default so that a new
-      // §4.3 topic still fails to compile until somebody decides what it means here.
+      // A per-frame fact, not state: it belongs to the transfer view M1-T11 adds. Listed
+      // explicitly rather than caught by a default so that a new §4.3 topic still fails to compile
+      // until somebody decides what it means here.
       return state;
   }
 }
@@ -275,6 +305,16 @@ export const selectMountStatus = (state: TelemetryState): Slot<MountStatus> => s
 export const selectCameraStatus = (state: TelemetryState): Slot<CameraStatus> => state.cameraStatus;
 export const selectStackStatus = (state: TelemetryState): Slot<StackStatus> => state.stackStatus;
 export const selectAlerts = (state: TelemetryState): ReceivedAlert[] => state.alerts;
+export const selectCaptureProgress = (state: TelemetryState): Slot<CaptureProgress> =>
+  state.captureProgress;
+/**
+ * A number that changes whenever the session's frame list does.
+ *
+ * A panel subscribes to this rather than to `lastFrameSaved` so that it re-renders on the *fact* of
+ * a new frame and not on the frame's contents — which it does not display, because it displays the
+ * node's listing.
+ */
+export const selectFramesSavedCount = (state: TelemetryState): number => state.framesSavedCount;
 
 /** Whether the socket is up *and* the snapshot has been applied — not merely connected. */
 export function isLive(link: LinkPhase): boolean {
