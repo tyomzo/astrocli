@@ -40,8 +40,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use astroctl_core::error::{ApiError, ErrorCode};
 use astroctl_core::event::{ts_rfc3339_millis_opt, Alert};
-use axum::extract::{ConnectInfo, FromRequestParts, Multipart, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Multipart, Path, State};
 use axum::http::request::Parts;
+use axum::http::{header::HeaderName, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -219,6 +221,46 @@ impl<S: Send + Sync> FromRequestParts<S> for Source {
 // ---------------------------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------------------------
+
+/// `HEAD`/`GET /api/ingest/{session_id}/{frame_id}` — the pre-flight of SDD §5.11.1.
+///
+/// M1-T11 measured the cost this removes: without it, a duplicate is discovered only after the
+/// full body has crossed the link — ~200 s for a 48 MB frame at the T-HOL-1 1 Mbit shape — and
+/// the sender learns `duplicate: true` about bytes the far side already held. The sender asks
+/// this first and treats *any* non-204 answer as "not stored, upload", so the route is an
+/// optimisation and never a gate — a node without it (or a 500 from it) costs a body, not a
+/// frame.
+///
+/// Declared as GET and served for HEAD too (axum answers HEAD from a GET handler, dropping the
+/// body — a 204 has none anyway). The stored hash rides a header so a HEAD can carry it.
+pub async fn preflight(
+    State(state): State<AppState>,
+    Path((session_id, frame_id)): Path<(String, String)>,
+) -> Result<Response, ApiFailure> {
+    let stored = state
+        .ingest
+        .archive()
+        .journal()
+        .lookup(&session_id, &frame_id)
+        .await
+        .map_err(ApiFailure::from)?;
+
+    match stored {
+        Some(frame) => Ok((
+            StatusCode::NO_CONTENT,
+            [(
+                HeaderName::from_static("x-astroctl-sha256"),
+                frame.sha256.clone(),
+            )],
+        )
+            .into_response()),
+        // The path is not echoed: it is caller-controlled text (same reasoning as pwa::api_miss).
+        None => Err(ApiFailure(ApiError::new(
+            ErrorCode::NotFound,
+            "that frame is not stored on this node",
+        ))),
+    }
+}
 
 /// `POST /api/ingest` — the procedure of SDD §5.11.2.
 pub async fn ingest(
@@ -859,6 +901,32 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap_or(Value::Null)
     }
 
+    /// A raw request returning status + headers + body, for the pre-flight's header assertion.
+    async fn request_raw(
+        app: &TestApp,
+        method: &str,
+        path: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .expect("request builds");
+        let response = app
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body reads");
+        (status, headers, bytes.to_vec())
+    }
+
     /// Alert codes seen on the bus, so a test can assert "once, not per attempt".
     async fn alerts(sub: &mut EventSubscriber) -> Vec<String> {
         let mut codes = Vec::new();
@@ -1239,5 +1307,37 @@ mod tests {
             .unwrap()
             .expect("recorded");
         assert_eq!(row.source.as_deref(), Some("10.8.0.2:51820"));
+    }
+    /// The §5.11.1 pre-flight, landed after M1-T11 measured what its absence costs: a duplicate
+    /// discovered only after ~200 s of shaped-link body. 204 + the stored hash for a held frame;
+    /// a NOT_FOUND envelope otherwise; HEAD answered from the same route with no body. The
+    /// sender treats any non-204 as "upload", so the 404's shape only needs to not be a 204.
+    #[tokio::test]
+    async fn the_preflight_reports_a_stored_frame_and_404s_an_unknown_one() {
+        let app = app_for(&TestNode::authenticated(TOKEN)).await;
+        let body = b"preflight-frame-bytes".to_vec();
+        let (status, ack) = upload(&app, "2026-01-01_m42", "light_00001", &body).await;
+        assert_eq!(status, StatusCode::OK);
+        let stored_sha = ack["sha256"].as_str().expect("ack carries sha").to_owned();
+
+        let (status, headers, _) =
+            request_raw(&app, "GET", "/api/ingest/2026-01-01_m42/light_00001").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            headers.get("x-astroctl-sha256").unwrap().to_str().unwrap(),
+            stored_sha
+        );
+
+        let (status, _, body) =
+            request_raw(&app, "GET", "/api/ingest/2026-01-01_m42/light_09999").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let json: Value = serde_json::from_slice(&body).expect("envelope");
+        assert_eq!(json["code"], "NOT_FOUND");
+
+        let (status, headers, body) =
+            request_raw(&app, "HEAD", "/api/ingest/2026-01-01_m42/light_00001").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(headers.contains_key("x-astroctl-sha256"));
+        assert!(body.is_empty(), "a HEAD answer carries no body");
     }
 }

@@ -167,7 +167,15 @@ pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
             MAX_UPLOAD_BYTES,
             ingest::ingest,
         )
-        .get("/api/stacking/stats", RouteMeta::read(), ingest::stats);
+        .get("/api/stacking/stats", RouteMeta::read(), ingest::stats)
+        // The §5.11.1 pre-flight. GET also answers HEAD (axum drops the body), which is the form
+        // the transfer agent sends before committing ~200 s of shaped link to a body the node
+        // may already hold.
+        .get(
+            "/api/ingest/{session_id}/{frame_id}",
+            RouteMeta::read(),
+            ingest::preflight,
+        );
 
     let declarations = api.declarations();
     (api.into_router(), declarations)
@@ -472,7 +480,8 @@ mod tests {
 
         assert_eq!(body["node"], "stack");
         let routes = body["routes"].as_array().expect("routes is a list");
-        assert_eq!(routes.len(), 4);
+        // 5 = health, info, ingest, stats, and the §5.11.1 pre-flight.
+        assert_eq!(routes.len(), 5);
         let ingest = routes
             .iter()
             .find(|r| r["path"] == "/api/ingest")
