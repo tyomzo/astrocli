@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.14.1
+**Version:** 1.15.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -56,6 +56,8 @@
 **Change note (1.14.0):** §5.11 specified to the level M1-T11 can implement against, because the ingest contract has two sides and only one of them was written down. The `meta` part now has a schema (§5.11.1) rather than a parenthesized list of field names — it gained `v` and `ext`, the second because §5.11.1's ack format could not name the stored file without it and the first because the object is strict about unknown keys. The procedure (§5.11.2) records six ordering properties that were implicit and are each one bug away from data loss: the dedup key is `(session_id, frame_id)` and **not** `frame_id`, since §5.5's per-session counters make `light_00042` recur in every session; the temporary carries a nonce, since two overlapping retries otherwise write through a rename into a stored frame; the link is `renameat2(RENAME_NOREPLACE)`, since check-then-rename has a window a retry fits through and `EEXIST` is also the crash-recovery signal; the journal row follows the frame, since REL-13's authority may under-claim but never over-claim; a *definitive* answer is delivered only after the body is drained, since an early response is lost to a client still writing and the frame would then be retried forever; and the derived metadata files are outside the ack, since they are rebuildable and the frame is not. §5.11.3 pins `ingest.db` to the archive volume with `synchronous = FULL`, names the shared layout fixture, gives `session.json` a shape, states that the archive opens before the socket, and adds the startup sweep of leftover temporaries. Response bodies gain the `v` §2 requires of every externally visible schema. Landed by M1-T12.
 
 **Change note (1.14.1):** §5.11.2's first ordering property described the wrong failure. A bare `frame_id` dedup key does not produce a false `duplicate: true` — the two frames' hashes differ, so the sha comparison separates them. It fires the **conflict** branch, `409 FRAME_ID_CONFLICT`, which is terminal: the sender stops retrying and the frame is lost. The fix (key on `(session_id, frame_id)`) was right; the justification was not, and a justification that names the wrong mechanism invites someone to "fix" it by comparing hashes more carefully instead of keying on the session.
+
+**Change note (1.15.0):** §5.12 gains the worker-side obligations M1-T13 found by implementing it. The load-bearing one: **a worker must answer pings while it computes**. At the documented defaults a single-threaded worker computing for 15 s is SIGKILLed by its own liveness probe, so every real stacking job would crash-loop, and the config validator's `job_timeout > 3 × health_ping` bound reads as though it prevents this but does not. Also recorded: `result` is rejected at the decoder if it claims success and carries an error; frames are bounded at 1 MiB and a trailing partial frame is dropped, so a worker that loses framing cannot stream its heap into the backbone; unknown fields are ignored *because* a strict decoder would defeat §5.12.2's version-mismatch reporting; the retry backoff resets after a worker outlives the ceiling, or one bad night leaves it there permanently; writes to the child are deadline-bounded, since a full pipe would otherwise park the task holding the ping timer and let a wedge disable its own detector; worker stdout is redirected to stderr, because a stray `print` desynchronises the decoder and surfaces hours later as previews stopping; and the JPEG write is atomic. Found by building it, not by review.
 
 ---
 
@@ -1183,6 +1185,29 @@ startup rather than on the first job.
 
 A worker that produces no `Hello` within 10 s is killed and treated as a failed start.
 
+**`result` cannot express a contradiction.** `{ok, data, error}` as listed permits "succeeded,
+here is the failure". Both decoders reject it: `ok: true` ⟺ `error` absent, checked at parse time
+so a contradictory frame is a decode error rather than a runtime surprise three layers up. Absent
+`data`/`error` are omitted, never null.
+
+**Frames are bounded at 1 MiB including the newline, and a trailing partial frame is dropped.** A
+worker that loses framing would otherwise stream its heap into the backbone — and a reader that
+grows a buffer before anyone can object gives no opportunity to refuse. A worker SIGKILLed midway
+through writing a result leaves a newline-less remainder; discarding it at EOF is what stops a
+truncated JSON object from parsing as a whole one by luck.
+
+**Unknown fields are ignored, deliberately.** A strict decoder would defeat §5.12.2: a v2 worker's
+`hello` must parse far enough for the version check to fire, or the operator gets "malformed frame"
+instead of the two version numbers the mismatch path exists to report.
+
+**A stray `print` in worker code breaks framing.** fd 1 belongs to the protocol, so the worker
+redirects Python-level stdout to stderr at channel open. Without that, a library banner from some
+Phase 2b dependency desynchronises the decoder, and the symptom arrives hours later as previews
+quietly stopping.
+
+**The JPEG write is atomic** — temp file then `os.replace`, the same discipline as §5.11.2's
+archive. A worker killed mid-save would otherwise leave a truncated file at the path the API serves.
+
 #### 5.12.3 Supervision
 
 ```
@@ -1196,6 +1221,33 @@ spawn(python_interpreter, compute_worker.py) ─► handshake ─► ready
                                             restart with capped exponential backoff
                                             (base `restart_backoff_seconds`, 60 s ceiling)
 ```
+
+**A worker must answer pings while it computes.** This is a requirement on the worker, not an
+implementation note, and it is the one thing above that a naive worker gets wrong. At the defaults
+— ping every 5 s, three misses is a kill — a single-threaded worker that computes for **15 seconds
+is SIGKILLed by its own liveness probe**, and every real stacking job is longer than that. The
+symptom is a worker that dies partway through each frame, restarts, and dies again: a crash loop
+whose cause is the health check.
+
+The config validator does **not** protect against this, and reads as though it might: bounding
+`job_timeout_seconds` above `3 × health_ping_seconds` only ensures the timeout is not the first
+thing to fire. It says nothing about whether pongs arrive during the job.
+
+So the contract is: **read stdin and answer `ping` on a thread that compute does not occupy.**
+`workers/compute_worker.py` is the reference — it reads on the main thread and computes on another.
+Verified by `pings_are_answered_while_a_job_is_running`, which was shown to fail (`no answer to 3
+consecutive pings`) when the stub was temporarily changed to compute on its reading thread; a test
+that has never failed would not be evidence of anything here.
+
+Two further supervision rules that follow from the same place:
+
+- **The retry backoff resets** once a worker has run longer than the 60 s ceiling. Without a reset,
+  one bad night leaves the supervisor at the ceiling permanently, and the next night's first frame
+  waits a minute for a worker that would have started instantly.
+- **Writes to the child are deadline-bounded.** A worker that stops reading stdin fills the pipe,
+  and an unbounded write then parks the same task that holds the ping timer — the wedge disables
+  its own detector. The deadline is what keeps the liveness check independent of the thing it
+  watches.
 
 An in-flight job whose worker dies is retried **once** on the fresh worker, then failed with an
 alert — a job that reliably kills its worker must not become a restart loop. The restart counter
