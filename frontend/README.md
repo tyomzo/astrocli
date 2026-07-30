@@ -18,10 +18,38 @@ exists, and without it the binary serves a page telling you to run the script. N
 side needs Node installed.
 
 ```sh
-npm run dev        # Vite dev server, proxying /api and /stack to 127.0.0.1:8470
+npm run dev        # Vite dev server, proxying /api, /stack and /ws to 127.0.0.1:8470
+npm test           # vitest, run once; part of scripts/check.sh's frontend gate
+npm run test:watch # vitest in watch mode
 npm run typecheck  # tsc --noEmit; Vite itself never type-checks
 npm run icons      # regenerate the PWA icon set after changing the artwork
 ```
+
+## Running it without a field node
+
+`mock/` is a dev-only Node process that impersonates the field node's Phase 1 surface — the
+ws-ticket exchange, `/ws` with snapshot-on-connect, and the mount routes — closely enough to drive
+every state the mount panel can be in, including a goto ramp and an expiring slew lease.
+
+```sh
+npm run mock       # terminal 1: 127.0.0.1:8470, the port vite already proxies to
+npm run dev        # terminal 2: http://localhost:5173/
+```
+
+**[`mock/README.md`](mock/README.md) is the written contract** — every route, every frame, and the
+two frame shapes SDD §5.8.3 leaves undefined. M1-T03 implements that and deletes `mock/`.
+
+## Tests
+
+`vitest`, `environment: 'node'`, no jsdom. What is tested is what would fail silently: the store's
+reducer (especially that a resnapshot *replaces* rather than merges), the reconnect state machine
+(a fresh ticket per attempt, backoff, buffered pre-snapshot events, a socket that goes silent
+without closing), coordinate notation, and the two rules this codebase enforces mechanically —
+that `lib/commands.ts` cannot import the store, and that the nudge badge encodes its state in the
+glyph and not only in the colour.
+
+Components that read stores are not rendered in tests; that is what the device-gated acceptance
+criteria are for.
 
 ## The four conventions this scaffold exists to set
 
@@ -50,9 +78,13 @@ something physical belongs in, because the operator may be gloved. The e-stop is
 sits in a fixed header slot on every screen (USB-03).
 
 **4. The store is a reducer over observations, and nothing else writes it.** `src/store/nodes.ts`
-has the long version. Commands change no state; only observations do, they carry the instant they
-were observed at, and subscription is selector-based. M1-T04 adds the WebSocket feed as another
-action source into the same reducer.
+has the long version and `src/store/telemetry.ts` is the socket-fed one M1-T04 added. Commands
+change no state; only observations do, they carry the instant they were observed at, and
+subscription is selector-based.
+
+That rule is enforced, not just documented: `src/lib/commands.ts` imports nothing from `store/`,
+and `commands.test.ts` fails the build if it ever does. A command layer that cannot see the store
+cannot write to it, and the telemetry reducer has no action a command could dispatch either.
 
 ## Target platform
 

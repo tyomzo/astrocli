@@ -63,7 +63,14 @@ gate() {
 frontend() {
     # `npm ci`, not `npm install`: the lockfile is the pinned input, and a gate that silently
     # resolves a different tree than CI is not a gate.
-    ( cd frontend && npm ci --silent && npm run build --silent && npx tsc --noEmit )
+    #
+    # `npm test` runs before the build for the same reason the Rust gates are ordered by cost: the
+    # unit tests take well under a second and fail on the things most likely to be wrong.
+    ( cd frontend \
+        && npm ci --silent \
+        && npm test --silent \
+        && npm run build --silent \
+        && npx tsc --noEmit )
 }
 
 echo "AstroCtl quality gate"
