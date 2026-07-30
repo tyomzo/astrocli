@@ -242,4 +242,18 @@ describe('link phases', () => {
 
     expect(state.rttMs).toBe(42);
   });
+
+  it('keeps the measured clock offset across a snapshot too, and starts out not knowing it', () => {
+    // `null` rather than `0`: "not measured yet" and "the clocks agree" send the UI to different
+    // places, and a fabricated zero would suppress the SDD §5.8.1 warning on a device that has
+    // never answered a ping.
+    expect(EMPTY.skewMs).toBeNull();
+
+    const state = apply(
+      EMPTY,
+      { type: 'link/skew', skewMs: -60_000 },
+      { type: 'link/snapshot', at, events: [POSITION] },
+    );
+    expect(state.skewMs).toBe(-60_000);
+  });
 });

@@ -413,7 +413,7 @@ mod tests {
             let (router, declarations) = api::router();
             let state = state_with(node, declarations).await;
             let auth = Arc::clone(&state.auth);
-            let app = api::with_auth(router.with_state(state), auth);
+            let app = api::with_auth(api::with_state(router, state), auth);
 
             let response = app
                 .oneshot(
@@ -498,7 +498,7 @@ mod tests {
             let (router, declarations) = api::router();
             let state = state_with(&node, declarations).await;
             let auth = Arc::clone(&state.auth);
-            let app = api::with_auth(router.with_state(state), auth);
+            let app = api::with_auth(api::with_state(router, state), auth);
 
             let response = app
                 .oneshot(

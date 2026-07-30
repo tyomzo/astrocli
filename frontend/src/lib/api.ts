@@ -21,6 +21,26 @@
  * look at the other machine.
  */
 
+import { issuedAt, newCommandId } from './clock';
+
+/**
+ * The command envelope's two request headers — SDD §5.8.1, M1-T10.
+ *
+ * Headers rather than body fields because half the mutation surface has no body: the node's
+ * `/api/mount/park`, `/api/camera/capture/abort` and both live-view controls take none at all, and
+ * `/api/mount/slew/stop` takes an optional one *so that a stop can never fail to parse*. See the
+ * field node's `command.rs` for the full argument; what matters here is that the client and the
+ * server put them in the same place.
+ */
+export const COMMAND_ID_HEADER = 'astroctl-command-id';
+export const ISSUED_AT_HEADER = 'astroctl-issued-at';
+
+/** The node's clock on every response, which is what `lib/clock.ts` corrects against. */
+export const SERVER_TIME_HEADER = 'astroctl-server-time';
+
+/** Set when the node answered from its idempotency ledger instead of executing again. */
+export const REPLAYED_HEADER = 'astroctl-replayed';
+
 /** SDD §4.2 error envelope, as it arrives on the wire. */
 interface ErrorEnvelope {
   v: number;
@@ -181,15 +201,22 @@ export async function getJson<T>(path: string, token: string | null): Promise<Re
  * away — the axis would then keep moving until the dead-man's TTL caught it. §8.3(5) puts stop
  * traffic on the browser's separate keepalive-capable pool for the same reason.
  *
- * There is deliberately **no `issued_at`/`command_id` envelope** here yet: M1-T10 adds it across
- * the whole mutation surface in one pass, on purpose, because a half-covered envelope looks
- * enforced and is not.
+ * # The envelope (M1-T10)
+ *
+ * Every call carries a fresh `command_id` and a skew-corrected `issued_at` (SDD §5.8.1), because
+ * the node refuses a covered mutation without them. Attached here rather than at each call site
+ * for the reason the node classifies in its route table rather than in each handler: the failure
+ * being designed against is the *one* command somebody forgets.
+ *
+ * `envelope: false` opts out, and exactly one caller uses it — the e-stop, whose route is declared
+ * `exempt` on the node (§5.8.2). Sending headers it ignores would cost nothing but would suggest
+ * this route depends on them, and it depends on nothing.
  */
 export function postJson<T>(
   path: string,
   token: string | null,
   body?: unknown,
-  options: { keepalive?: boolean } = {},
+  options: { keepalive?: boolean; envelope?: false } = {},
 ): Promise<RequestResult<T | null>> {
   return send<T>('POST', path, token, body, options);
 }
@@ -215,7 +242,7 @@ async function send<T>(
   path: string,
   token: string | null,
   body: unknown,
-  options: { keepalive?: boolean },
+  options: { keepalive?: boolean; envelope?: false },
 ): Promise<RequestResult<T | null>> {
   assertSameOrigin(path);
 
@@ -225,6 +252,10 @@ async function send<T>(
   }
   if (body !== undefined) {
     headers.set('Content-Type', 'application/json');
+  }
+  if (options.envelope !== false) {
+    headers.set(COMMAND_ID_HEADER, newCommandId());
+    headers.set(ISSUED_AT_HEADER, issuedAt());
   }
 
   let response: Response;

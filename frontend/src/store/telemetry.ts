@@ -114,6 +114,18 @@ export interface TelemetryState {
    * usually dies — so publishing the number it already has costs nothing and saves T15 a rework.
    */
   rttMs: number | null;
+  /**
+   * How far the node's clock is ahead of this device's, milliseconds — SDD §5.8.1, REL-14.
+   *
+   * Measured from the `server_time` on each `pong` and applied to every command's `issued_at` by
+   * `lib/clock.ts`; this copy exists **only so the UI can say so**. The two are deliberately not
+   * the same value read twice: the correction has to work whether or not anything renders it, and
+   * a store that owned it would put a display concern on the path between the operator's finger
+   * and the mount.
+   *
+   * `null` until the first pong is answered — "not measured yet" is not "no skew".
+   */
+  skewMs: number | null;
   mountPosition: Slot<MountPosition>;
   mountStatus: Slot<MountStatus>;
   cameraStatus: Slot<CameraStatus>;
@@ -162,6 +174,7 @@ const NO_TELEMETRY = {
 export const EMPTY: TelemetryState = {
   link: { phase: 'idle' },
   rttMs: null,
+  skewMs: null,
   ...NO_TELEMETRY,
   alerts: [],
   alertSeq: 0,
@@ -189,6 +202,7 @@ export type LinkAction =
   | { type: 'link/retrying'; at: number; attempt: number; retryAt: number; failure: RequestFailure }
   | { type: 'link/unauthorized'; at: number; message: string }
   | { type: 'link/rtt'; rttMs: number }
+  | { type: 'link/skew'; skewMs: number }
   | { type: 'link/stopped'; at: number }
   | { type: 'session/reset' };
 
@@ -225,6 +239,8 @@ export function reduce(state: TelemetryState, action: LinkAction): TelemetryStat
       return { ...state, link: { phase: 'unauthorized', at: action.at, message: action.message } };
     case 'link/rtt':
       return { ...state, rttMs: action.rttMs };
+    case 'link/skew':
+      return { ...state, skewMs: action.skewMs };
     case 'link/stopped':
       return { ...state, link: { phase: 'idle' } };
     case 'session/reset':
@@ -299,6 +315,8 @@ export const dispatch = (action: LinkAction): void => useTelemetryStore.getState
 // ---------------------------------------------------------------------------------------------
 
 export const selectLink = (state: TelemetryState): LinkPhase => state.link;
+/** The measured clock offset, for the §5.8.1 warning. `null` until the first pong is answered. */
+export const selectSkewMs = (state: TelemetryState): number | null => state.skewMs;
 export const selectMountPosition = (state: TelemetryState): Slot<MountPosition> =>
   state.mountPosition;
 export const selectMountStatus = (state: TelemetryState): Slot<MountStatus> => state.mountStatus;

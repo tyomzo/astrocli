@@ -1135,13 +1135,50 @@ mod tests {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> (StatusCode, serde_json::Value) {
+        call_enveloped(state, method, path, body, Envelope::Fresh).await
+    }
+
+    /// Which M1-T10 envelope the harness should send.
+    #[derive(Clone, Copy)]
+    enum Envelope<'a> {
+        /// A new id and the node's own clock — what the PWA sends.
+        Fresh,
+        /// A chosen id and a chosen issue time, for staleness and replay.
+        Exactly(&'a str, chrono::DateTime<chrono::Utc>),
+        /// None at all — a client older than this node, and the only shape the e-stop must
+        /// still answer.
+        Absent,
+    }
+
+    /// [`call`], with the envelope chosen by the caller.
+    async fn call_enveloped(
+        state: &AppState,
+        method: axum::http::Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        envelope: Envelope<'_>,
+    ) -> (StatusCode, serde_json::Value) {
         use tower::ServiceExt as _;
 
         let (router, _) = crate::api::router();
         let (ws_router, _) = crate::api::ws_router();
         let app = crate::assemble(router, ws_router, state.clone());
 
-        let mut request = axum::http::Request::builder().method(method).uri(path);
+        // The harness is a client, so by default it carries a client's envelope (SDD §5.8.1,
+        // M1-T10). Reads ignore it, which is why `Fresh` is unconditional: a helper that stamped
+        // it only on POSTs would be a second copy of the route table's classification.
+        let builder = axum::http::Request::builder().method(method);
+        let mut request = match envelope {
+            Envelope::Fresh => crate::test_support::with_envelope(builder),
+            Envelope::Exactly(id, issued_at) => {
+                builder.header(crate::command::COMMAND_ID, id).header(
+                    crate::command::ISSUED_AT,
+                    issued_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                )
+            }
+            Envelope::Absent => builder,
+        }
+        .uri(path);
         let body = match body {
             Some(json) => {
                 request = request.header(axum::http::header::CONTENT_TYPE, "application/json");
@@ -1548,7 +1585,261 @@ mod tests {
         );
     }
 
+    // --- T-STALE-1: the command envelope on the real routes (SDD §5.8.1, M1-T10) ---------------
+
+    /// A connected, unparked mount at a known place, so "the mount never moved" is assertable.
+    async fn connected_node() -> AppState {
+        let state = node().await;
+        call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/connect",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        state
+    }
+
+    async fn mount_status(state: &AppState) -> serde_json::Value {
+        call(
+            &state.clone(),
+            axum::http::Method::GET,
+            "/api/mount/status",
+            None,
+        )
+        .await
+        .1
+    }
+
+    /// T-STALE-1, first clause: a 5 s-old goto is refused and the simulator is never commanded.
+    ///
+    /// "Never commanded" is asserted three ways, because the status code alone would pass on a
+    /// node that started the slew and then apologised: the mount is still `idle`, it is still
+    /// where it was, and the in-flight goto slot is still free — that last one is what a `202`
+    /// followed by a refusal would have consumed, and it is the difference between "refused" and
+    /// "refused after doing it".
+    #[tokio::test]
+    async fn a_five_second_old_goto_is_refused_and_the_simulator_is_never_commanded() {
+        let state = connected_node().await;
+        let before = call(&state, axum::http::Method::GET, "/api/mount/position", None)
+            .await
+            .1;
+
+        let (status, body) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+            Envelope::Exactly(
+                "stale-goto-id-01",
+                chrono::Utc::now() - chrono::Duration::seconds(5),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "COMMAND_STALE", "{body}");
+        assert_eq!(body["retryable"], false, "{body}");
+
+        let after = call(&state, axum::http::Method::GET, "/api/mount/position", None)
+            .await
+            .1;
+        assert_ne!(
+            mount_status(&state).await["state"],
+            "slewing",
+            "a refused goto must not have started a slew"
+        );
+        // A tolerance rather than equality, and the number says why: a connected simulator is
+        // *tracking*, so its coordinates drift by microseconds of RA between two reads. The
+        // refused goto asked for a target degrees away, so anything under a thousandth of an hour
+        // is the sky turning rather than the mount slewing.
+        let drift = |key: &str| {
+            (after[key].as_f64().unwrap_or_default() - before[key].as_f64().unwrap_or_default())
+                .abs()
+        };
+        assert!(
+            drift("ra") < 0.001,
+            "the mount must not have moved: ra {} → {}",
+            before["ra"],
+            after["ra"]
+        );
+        assert!(
+            drift("dec") < 0.01,
+            "the mount must not have moved: dec {} → {}",
+            before["dec"],
+            after["dec"]
+        );
+
+        // The slot is free, which a `202`-then-refuse would not have left.
+        let (accepted, _) = call(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+        )
+        .await;
+        assert_eq!(
+            accepted,
+            StatusCode::ACCEPTED,
+            "the stale request must have left no trace at all"
+        );
+        state.mount.abort_inflight();
+    }
+
+    /// T-STALE-1, second clause: the same age on a stopping route executes.
+    ///
+    /// Both stopping routes, and the e-stop, at an age no motion command would survive — an hour,
+    /// so the test is about the rule rather than about five seconds being under some other
+    /// threshold.
+    #[tokio::test]
+    async fn a_stop_of_any_age_is_honoured() {
+        let state = connected_node().await;
+        let an_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+
+        let (status, body) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/slew/stop",
+            None,
+            Envelope::Exactly("old-slew-stop-1", an_hour_ago),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/estop",
+            None,
+            Envelope::Exactly("old-estop-id-01", an_hour_ago),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["stopped"], true);
+    }
+
+    /// T-STALE-1, third clause: a repeated `command_id` gets the original `202` and the mount
+    /// slews once.
+    ///
+    /// The correlation id is the assertion that matters. A second execution would produce a
+    /// second id (or a `409 BUSY` from the in-flight slot); the same id coming back means the
+    /// node answered from its ledger without touching the mount.
+    #[tokio::test]
+    async fn a_repeated_goto_command_id_replays_the_original_202() {
+        let state = connected_node().await;
+        let now = chrono::Utc::now();
+        let target = circumpolar_target();
+
+        let (first_status, first) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(target.clone()),
+            Envelope::Exactly("repeat-goto-id-1", now),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::ACCEPTED, "{first}");
+        let correlation_id = first["correlation_id"]
+            .as_str()
+            .expect("a correlation id")
+            .to_owned();
+        assert!(first.get("replayed").is_none(), "{first}");
+
+        let (second_status, second) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(target),
+            Envelope::Exactly("repeat-goto-id-1", now),
+        )
+        .await;
+        assert_eq!(
+            second_status,
+            StatusCode::ACCEPTED,
+            "the outcome to replay is the 202, not the slew's eventual result: {second}"
+        );
+        assert_eq!(second["replayed"], true, "{second}");
+        assert_eq!(
+            second["correlation_id"], correlation_id,
+            "a second execution would have produced a second id — or a 409 from the in-flight \
+             slot, which is the same statement said louder"
+        );
+        state.mount.abort_inflight();
+    }
+
+    /// The other half of the closed rollout: a covered mutation with no envelope is refused, and
+    /// the refusal names the header rather than leaving the client's author reading their body.
+    #[tokio::test]
+    async fn a_mutation_without_an_envelope_is_refused_by_name() {
+        let state = connected_node().await;
+        let (status, body) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/goto",
+            Some(circumpolar_target()),
+            Envelope::Absent,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["code"], "VALIDATION", "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(crate::command::COMMAND_ID)),
+            "{body}"
+        );
+    }
+
+    /// Every response carries the node's clock, which is what a client with a wrong one measures
+    /// its skew against (§5.8.1).
+    #[tokio::test]
+    async fn every_response_carries_the_nodes_clock() {
+        use tower::ServiceExt as _;
+        let state = node().await;
+        let (router, _) = crate::api::router();
+        let (ws_router, _) = crate::api::ws_router();
+        let app = crate::assemble(router, ws_router, state.clone());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/mount/status")
+                    .body(axum::body::Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("the router responds");
+        let stamped = response
+            .headers()
+            .get(crate::command::SERVER_TIME)
+            .expect("server time")
+            .to_str()
+            .expect("ascii");
+        assert!(stamped.ends_with('Z'), "SDD §2 wants UTC: {stamped}");
+    }
+
     // --- the e-stop route (SDD §5.8.2, REL-01, MNT-08) ----------------------------------------
+
+    /// M1-T05's handoff to M1-T10, kept as its own test: the e-stop takes **no envelope**, and
+    /// nothing this task added may put a 4xx in front of it.
+    #[tokio::test]
+    async fn the_estop_route_needs_no_envelope_at_all() {
+        let state = connected_node().await;
+        let (status, body) = call_enveloped(
+            &state,
+            axum::http::Method::POST,
+            "/api/mount/estop",
+            None,
+            Envelope::Absent,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "§5.8.2's route is `exempt` from the M1-T10 envelope, not merely `stopping`: {body}"
+        );
+        assert_eq!(body["stopped"], true);
+    }
 
     #[tokio::test]
     async fn the_estop_route_accepts_a_request_with_no_body_at_all() {

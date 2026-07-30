@@ -1232,7 +1232,10 @@ mod tests {
         let (ws_router, _) = crate::api::ws_router();
         let app = crate::assemble(router, ws_router, state.clone());
 
-        let mut request = axum::http::Request::builder().method(method).uri(path);
+        // See `mount.rs`'s `call`: the harness is a client and carries a client's envelope.
+        let mut request =
+            crate::test_support::with_envelope(axum::http::Request::builder().method(method))
+                .uri(path);
         let body = match body {
             Some(json) => {
                 request = request.header(axum::http::header::CONTENT_TYPE, "application/json");

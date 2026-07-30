@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { AlertStrip } from '../panels/AlertStrip';
 import { CameraVitals } from '../panels/CameraVitals';
 import { CaptureStrip } from '../panels/CaptureStrip';
+import { ClockSkewNote } from '../panels/ClockSkewNote';
 import { ImageSurface } from '../panels/ImageSurface';
 import { LinkBanner } from '../panels/LinkBanner';
 import { SessionFrames } from '../panels/SessionFrames';
@@ -35,6 +36,8 @@ export function OperatingView(): ReactNode {
   return (
     <>
       <LinkBanner />
+      {/* Above the alerts: a wrong clock changes how every timestamp below it should be read. */}
+      <ClockSkewNote />
       <AlertStrip />
 
       <PanelGrid layout="sidebar">

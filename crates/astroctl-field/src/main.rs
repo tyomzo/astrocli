@@ -37,6 +37,7 @@ mod api;
 mod auth;
 mod camera;
 mod cli;
+mod command;
 mod liveview;
 mod mount;
 mod orchestrator;
@@ -293,6 +294,11 @@ async fn serve(
         mount: Arc::clone(&mount),
         camera: Arc::clone(&camera),
         tickets: Arc::new(ticket::TicketStore::new()),
+        // SDD §5.8.1's staleness budget is read once, here, and never again: a handler that
+        // re-read the config would be a second place for the number to come from.
+        commands: Arc::new(command::CommandLedger::new(Duration::from_millis(
+            config.server.max_command_age_ms,
+        ))),
         snapshots: Arc::clone(&snapshots),
         liveview: Arc::clone(&liveview),
     };
@@ -502,8 +508,8 @@ fn assemble(
 ) -> axum::Router {
     let auth = Arc::clone(&state.auth);
     let deployment = state.config.server.deployment_label.clone();
-    api::with_auth(router.with_state(state.clone()), Arc::clone(&auth))
-        .merge(ws_router.with_state(state))
+    api::with_auth(api::with_state(router, state.clone()), Arc::clone(&auth))
+        .merge(api::with_state(ws_router, state))
         .merge(pwa::router(auth, deployment))
 }
 

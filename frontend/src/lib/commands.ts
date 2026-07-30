@@ -101,6 +101,13 @@ export function mountTracking(
  * parameters every `SLEW_RENEW_MS`; silence means stop. See `slewHold.ts` for the loop and
  * §5.8.1 for why the server treats an identical repeat as a deadline extension rather than a new
  * motor command.
+ *
+ * **Each renewal is a new command with a new `command_id`** (M1-T10), which `postJson` gives it
+ * without anything here asking. That is not an implementation detail: a renewal that reused the
+ * previous id would be replayed out of the node's idempotency ledger, the lease would never be
+ * extended, and the dead-man's switch would stop the axis half a second into a hold the operator
+ * is still performing. "Identical parameters extend the deadline" is a property of the *lease*,
+ * decided in `SafeMount`; identical `command_id`s would mean the second request never got there.
  */
 export function mountSlew(
   token: string | null,
@@ -125,12 +132,18 @@ export function mountSlew(
  * sending nothing means there is no serialisation step between the operator's finger and the
  * socket, and nothing that can make the request malformed.
  *
+ * **No envelope either** (`envelope: false`, M1-T10). The node declares this route `exempt` rather
+ * than merely `stopping`: it reads nothing off the request, so there is no header, no timestamp
+ * and no command id whose absence or malformation could put a 4xx in front of a stop. Sending them
+ * anyway would work — they would be ignored — and would leave the next person to read this file
+ * believing the e-stop needs something. It needs nothing.
+ *
  * The reply is **not** evidence that the mount stopped — only that the node accepted the request.
  * What the telescope did arrives on the event stream, like everything else (§5.9). The header
  * button is written against that distinction; see `app/EStopButton.tsx`.
  */
 export function mountEstop(token: string | null): Promise<RequestResult<unknown>> {
-  return postJson('/api/mount/estop', token, undefined, { keepalive: true });
+  return postJson('/api/mount/estop', token, undefined, { keepalive: true, envelope: false });
 }
 
 /**

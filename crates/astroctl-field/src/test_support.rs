@@ -229,6 +229,36 @@ fn append_under_server(yaml: &str, block: &str) -> String {
     format!("{yaml}{block}")
 }
 
+/// Attach a fresh command envelope to a request under construction — SDD §5.8.1, M1-T10.
+///
+/// A test that drives a mutation is a *client* of this API, and since M1-T10 a client that sends
+/// no envelope on a covered route gets a 422 naming the header. Stamping it in the shared harness
+/// rather than in ninety individual tests keeps each of them about what it was about; the
+/// envelope's own behaviour — a chosen `issued_at`, a repeated id, a missing header — is tested
+/// where those values are the subject, in `command.rs` and `route_meta.rs`.
+///
+/// **A fresh id every call**, and that is not incidental. Two requests are two commands, and a
+/// shared constant would make the second mutation in any test replay the first one's answer
+/// instead of executing — which would look exactly like the route being broken.
+pub fn with_envelope(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    builder
+        .header(
+            crate::command::COMMAND_ID,
+            format!(
+                "test-{}-{:012}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ),
+        )
+        .header(
+            crate::command::ISSUED_AT,
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        )
+}
+
 /// Build application state for a node, with the route table the router just declared.
 ///
 /// Async since M1-T08 because opening the frame store is: `FrameStore::open` creates the session
@@ -256,6 +286,7 @@ pub async fn state_with_camera(
     profile: astroctl_drivers::simulator::CameraProfile,
 ) -> AppState {
     let config = node.config();
+    let max_command_age_ms = config.server.max_command_age_ms;
     let auth = AuthPolicy::resolve("ASTROCTL_TOKEN", node.token.as_deref(), node.bind())
         .expect("the fixture posture must be startable");
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
@@ -317,6 +348,12 @@ pub async fn state_with_camera(
         mount,
         camera,
         tickets: Arc::new(crate::ticket::TicketStore::new()),
+        // Built from the fixture's own `server.max_command_age_ms`, so a test asserting on
+        // staleness is asserting against the operator's default rather than a number the harness
+        // picked.
+        commands: Arc::new(crate::command::CommandLedger::new(
+            std::time::Duration::from_millis(max_command_age_ms),
+        )),
         snapshots: Arc::new(crate::ws::SnapshotStore::new()),
         // Idle, exactly as the binary's is until something starts the camera stream. A fixture
         // that pre-started it would make every test that touches `/ws/liveview` depend on a

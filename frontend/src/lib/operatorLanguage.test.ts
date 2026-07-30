@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 import estopButton from '../app/EStopButton.tsx?raw';
 import cameraVitals from '../panels/CameraVitals.tsx?raw';
 import captureStrip from '../panels/CaptureStrip.tsx?raw';
+import clockSkewNote from '../panels/ClockSkewNote.tsx?raw';
 import failureNote from '../ui/FailureNote.tsx?raw';
 import linkBanner from '../panels/LinkBanner.tsx?raw';
 import manualTargetChooser from '../panels/ManualTargetChooser.tsx?raw';
@@ -58,6 +59,10 @@ const OPERATOR_FACING: readonly [string, string][] = [
   // going wrong, by someone who is not going to parse a sentence about topics and payloads.
   ['app/EStopButton.tsx', estopButton],
   ['panels/LinkBanner.tsx', linkBanner],
+  // The clock warning is about a fact of the operator's *device*. Every honest way to describe
+  // its cause names something they cannot see — a pong, an offset, a command envelope — so this
+  // is the copy most likely to drift back into the implementation's vocabulary.
+  ['panels/ClockSkewNote.tsx', clockSkewNote],
   ['panels/ManualTargetChooser.tsx', manualTargetChooser],
   ['panels/TrackingControl.tsx', trackingControl],
   // The capture controls are read in the dark by someone deciding whether to press a button that
