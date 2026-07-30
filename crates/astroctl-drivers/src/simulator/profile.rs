@@ -12,6 +12,10 @@
 
 use std::time::Duration;
 
+use astroctl_core::types::RaDec;
+
+use super::sky::StarField;
+
 // -----------------------------------------------------------------------------------------
 // Measured constants (spikes/skywatcher-heq5/FINDINGS.md)
 // -----------------------------------------------------------------------------------------
@@ -191,6 +195,278 @@ impl SimulatorProfile {
     }
 }
 
+// -----------------------------------------------------------------------------------------
+// The camera (Canon EOS R10 — spikes/gphoto2-r10/FINDINGS.md, PRD §4.3/§8.3)
+// -----------------------------------------------------------------------------------------
+
+/// Arcseconds subtended by one radian, to four more digits than anyone needs. Converts a pixel
+/// pitch and a focal length into a plate scale.
+const ARCSEC_PER_RADIAN: f64 = 206_264.806_247_096_36;
+
+/// Plate scale in arcseconds per pixel for a sensor of `pitch_um` behind `focal_mm`.
+#[must_use]
+pub fn arcsec_per_pixel(pitch_um: f64, focal_mm: f64) -> f64 {
+    ARCSEC_PER_RADIAN * (pitch_um / 1000.0) / focal_mm
+}
+
+/// What the simulated imaging camera is, and how long it takes to do things (PRD §4.5).
+///
+/// The timings are the R10 as the M2 spike measured it; the *optical* numbers are the reference
+/// rig of PRD §8.3; the *sensor noise* numbers are invented and say so. As with
+/// [`SimulatorProfile`], every field is public with a `Default`, so a test that cares about one
+/// knob writes `CameraProfile { download: …, ..Default::default() }`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraProfile {
+    /// Frame width in pixels. 6000 on the reference body (PRD §8.3); tests use far less,
+    /// because a full-size frame is 24 megapixels of arithmetic per exposure.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+    /// Plate scale after the telescope. 0.77″/px on the reference rig — 3.72 µm pixels behind
+    /// 1000 mm (PRD §8.3, which states the same figure).
+    pub arcsec_per_pixel: f64,
+    /// Pixel pitch in micrometres, for the FITS header and the capability report. **Measured**
+    /// (PRD §4.3: 22.3 mm APS-C across 6000 px).
+    pub pixel_size_um: f64,
+    /// Focal length in millimetres — PRD §8.3's `sw200pds-r10-none` profile.
+    pub focal_length_mm: f64,
+
+    /// Opening the camera. **Measured**: autodetect + connect took 190–210 ms.
+    pub connect: Duration,
+    /// One setting read or write. **Measured**: 11 ms per write, 0.4–10 ms per read.
+    pub setting: Duration,
+    /// Reading the whole settings tree. **Measured**: 91 config entries in 222 ms, which is why
+    /// [`Camera::available_settings`](astroctl_hal::camera::Camera::available_settings) has a
+    /// `config_seconds` timeout in the first place.
+    pub settings_tree: Duration,
+    /// What a capture costs beyond the exposure itself — the "download".
+    ///
+    /// **Measured, and not where it looks.** The spike timed a capture at 2.08 s
+    /// trigger-to-file-ready on a short exposure, then wrote the 32 MB to disk in 2.67 ms. With
+    /// `capturetarget=Internal RAM` the USB transfer happens *inside* the capture call, so the
+    /// two seconds are the transfer and the disk write is nothing. The simulator charges them
+    /// after the exposure, where a caller can see them, because that is where they are on a body
+    /// configured to download straight to the host — and because T-ISO-1 (SDD §9) is specified
+    /// as "a realistic ~2 s blocking capture and a slow download" and needs somewhere to put the
+    /// slow download.
+    pub download: Duration,
+    /// Live-view frames per second.
+    ///
+    /// **Not the measurement**, deliberately. The R10 sustains 58.5 fps (measured, 133 KB per
+    /// frame), but SDD §5.7 rate-limits the stream to 5 fps on a LAN and every synthetic frame
+    /// costs real CPU — so a simulator defaulting to 58.5 would spend eleven times the node's
+    /// budget generating frames the pipeline then throws away. A test that wants the body's own
+    /// cadence sets it.
+    pub live_view_fps: f64,
+    /// Live-view frame width. The spike measured the *size* of a frame (133 KB) but never its
+    /// dimensions; 960×640 keeps the sensor's 3:2 aspect at a size a JPEG of that order fits.
+    pub live_view_width: u32,
+    /// Live-view frame height.
+    pub live_view_height: u32,
+
+    /// Seeing, as the FWHM of a star image in arcseconds. **Invented**: 3″ is an ordinary night
+    /// at a UK back-garden site, and at 0.77″/px it puts a star across four pixels, which is
+    /// what a centroid needs to be worth computing.
+    pub fwhm_arcsec: f64,
+    /// Sky brightness in electrons per pixel per second. **Invented**: chosen so a 30 s sub sits
+    /// near 600 e⁻ — a sky-limited exposure, which is what a light-polluted site actually gives
+    /// and what makes the background dominate the read noise.
+    pub sky_electrons_per_second: f64,
+    /// Read noise in electrons RMS. **Invented**, but in the right place: a modern APS-C CMOS is
+    /// 1.5–4 e⁻ depending on ISO.
+    pub read_noise_electrons: f64,
+    /// Bias pedestal in ADU. **Invented**; the R10's own black level is 2047 (measured by
+    /// `rawler` in the spike), and the simulator uses a round 512 because its samples are 16-bit
+    /// rather than the R10's 14.
+    pub bias_adu: f64,
+    /// Full well in electrons. **Invented**: 30,000 e⁻ is typical for a 3.7 µm pixel, and it is
+    /// what makes bright stars saturate — a simulator whose stars never clip would let a
+    /// saturation-aware stacker be written and never exercised.
+    pub full_well_electrons: f64,
+    /// Sensor temperature, or `None` for a body that reports none.
+    ///
+    /// The R10 reports no sensor temperature over PTP, so the honest default is `None` — and
+    /// that makes the simulator the one place the `Option` arm of
+    /// [`Camera::sensor_temperature_celsius`](astroctl_hal::camera::Camera::sensor_temperature_celsius)
+    /// is exercised before there is hardware.
+    pub sensor_temperature_celsius: Option<f64>,
+
+    /// The sky this camera looks at.
+    pub field: StarField,
+    /// Where the tube points when no [`PointingSource`](super::sky::PointingSource) can say —
+    /// no mount configured, or a mount that is not connected. M42, because a simulator that
+    /// opens on an empty patch of sky looks broken.
+    pub default_pointing: RaDec,
+}
+
+impl Default for CameraProfile {
+    fn default() -> Self {
+        Self {
+            width: 6000,
+            height: 4000,
+            arcsec_per_pixel: arcsec_per_pixel(3.72, 1000.0),
+            pixel_size_um: 3.72,
+            focal_length_mm: 1000.0,
+            connect: Duration::from_millis(200),
+            setting: Duration::from_millis(11),
+            settings_tree: Duration::from_millis(222),
+            download: Duration::from_millis(2000),
+            live_view_fps: 5.0,
+            live_view_width: 960,
+            live_view_height: 640,
+            fwhm_arcsec: 3.0,
+            sky_electrons_per_second: 20.0,
+            read_noise_electrons: 3.0,
+            bias_adu: 512.0,
+            full_well_electrons: 30_000.0,
+            sensor_temperature_celsius: None,
+            field: StarField::default(),
+            // 05h35m −05°23′ — the Orion Nebula. Cannot fail; both components are in range.
+            default_pointing: RaDec::from_parts(5.5833, -5.3911)
+                .expect("M42 is a valid coordinate"),
+        }
+    }
+}
+
+impl CameraProfile {
+    /// A small, instant camera — for tests whose subject is not the camera.
+    ///
+    /// 128×96 frames and no latency anywhere. Anything whose subject *is* timing must use
+    /// [`Default`] and a paused clock, and anything whose subject is a frame must at least
+    /// enlarge this, because a 128-pixel frame at the default plate scale sees a hundredth of a
+    /// square degree and may honestly contain no stars.
+    #[must_use]
+    pub fn fast() -> Self {
+        Self {
+            width: 128,
+            height: 96,
+            connect: Duration::ZERO,
+            setting: Duration::ZERO,
+            settings_tree: Duration::ZERO,
+            download: Duration::ZERO,
+            live_view_width: 64,
+            live_view_height: 48,
+            ..Self::default()
+        }
+    }
+}
+
+/// What the simulated guide camera is (PRD §4.5, HAL-04).
+///
+/// **Nothing here is measured.** There is no guide camera in the project yet and no spike has
+/// touched one, so every number is an invented stand-in for a small mono CMOS on a short guide
+/// scope — the ASI120MM-and-50-mm-finder combination most of amateur astronomy guides with. The
+/// values are chosen to be *representative* rather than precise, and the one that matters is the
+/// plate scale: at 3.2″/px a guide camera is four times coarser than the imaging chain, which is
+/// what makes sub-pixel centroiding necessary rather than optional.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GuideCameraProfile {
+    /// Unbinned sensor width.
+    pub width: u32,
+    /// Unbinned sensor height.
+    pub height: u32,
+    /// Pixel pitch in micrometres.
+    pub pixel_size_um: f64,
+    /// Guide scope focal length in millimetres.
+    pub focal_length_mm: f64,
+    /// Plate scale, arcseconds per unbinned pixel.
+    pub arcsec_per_pixel: f64,
+    /// Highest gain the camera accepts, in its own units.
+    pub max_gain: u32,
+    /// Bits actually filled. 12 is what a small CMOS guider gives, and it is why a guide frame
+    /// saturates at 4095 rather than 65535.
+    pub bit_depth: u8,
+    /// Largest binning factor on either axis.
+    pub max_binning: u8,
+    /// Shortest accepted exposure, in seconds.
+    pub min_exposure_seconds: f64,
+    /// Longest accepted exposure, in seconds.
+    pub max_exposure_seconds: f64,
+    /// Readout and USB transfer for one frame — the floor under the frame interval, and the
+    /// reason a 0.5 s guide exposure is not a 2 Hz loop.
+    pub readout: Duration,
+    /// Opening the camera.
+    pub connect: Duration,
+
+    /// Atmospheric seeing as the guide loop meets it: the standard deviation, in arcseconds, of
+    /// the whole field's position from one frame to the next.
+    ///
+    /// This is *not* the same quantity as [`fwhm_arcsec`](Self::fwhm_arcsec), and conflating them
+    /// is the mistake this comment exists to prevent. FWHM is how big a star is in a long
+    /// exposure — the time-average of the wander. This is how far the star moves between short
+    /// exposures, which is what a guide algorithm chases and what a mount cannot correct faster
+    /// than. 1.5″ RMS is ordinary seeing.
+    pub seeing_arcsec: f64,
+    /// Star size in a guide frame, FWHM in arcseconds.
+    pub fwhm_arcsec: f64,
+    /// Brightness of the star the simulator guarantees at the field centre.
+    ///
+    /// PRD §4.5 asks for this knob by name. It exists because a guide star drawn from the
+    /// catalogue would have a brightness that depends on where the mount is pointed, which would
+    /// make a guiding test a test of the catalogue's luck.
+    pub guide_star_magnitude: Option<f64>,
+    /// Sky brightness in electrons per pixel per second.
+    pub sky_electrons_per_second: f64,
+    /// Read noise in electrons RMS. Higher than the imaging sensor's, as a small guider's is.
+    pub read_noise_electrons: f64,
+    /// Bias pedestal in ADU.
+    pub bias_adu: f64,
+    /// Full well in electrons.
+    pub full_well_electrons: f64,
+    /// Sensor temperature, or `None`. An uncooled guider that reports a reading is common, so
+    /// this defaults to a number: it is the arm of the API a cooled-camera path will need.
+    pub sensor_temperature_celsius: Option<f64>,
+    /// The sky it looks at — the same value the imaging camera holds, which is what makes the
+    /// two cameras agree (see [`StarField`]).
+    pub field: StarField,
+    /// Where it looks when nothing can say.
+    pub default_pointing: RaDec,
+}
+
+impl Default for GuideCameraProfile {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 960,
+            pixel_size_um: 3.75,
+            focal_length_mm: 240.0,
+            arcsec_per_pixel: arcsec_per_pixel(3.75, 240.0),
+            max_gain: 100,
+            bit_depth: 12,
+            max_binning: 4,
+            min_exposure_seconds: 0.001,
+            max_exposure_seconds: 60.0,
+            readout: Duration::from_millis(60),
+            connect: Duration::from_millis(120),
+            seeing_arcsec: 1.5,
+            fwhm_arcsec: 3.5,
+            guide_star_magnitude: Some(8.0),
+            sky_electrons_per_second: 12.0,
+            read_noise_electrons: 5.0,
+            bias_adu: 100.0,
+            full_well_electrons: 14_000.0,
+            sensor_temperature_celsius: Some(11.5),
+            field: StarField::default(),
+            default_pointing: RaDec::from_parts(5.5833, -5.3911)
+                .expect("M42 is a valid coordinate"),
+        }
+    }
+}
+
+impl GuideCameraProfile {
+    /// A small, instant guide camera for tests that are not about the guider.
+    #[must_use]
+    pub fn fast() -> Self {
+        Self {
+            width: 128,
+            height: 96,
+            readout: Duration::ZERO,
+            connect: Duration::ZERO,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +511,35 @@ mod tests {
             (5.0..6.0).contains(&total),
             "a 10 degree goto takes {total} s; the HEQ5 took 5.61 s"
         );
+    }
+
+    #[test]
+    fn the_camera_profile_reproduces_the_equipment_profile_of_the_prd() {
+        let camera = CameraProfile::default();
+        // PRD §8.3's `sw200pds-r10-none` states 0.77 arcsec/px for these three numbers. If this
+        // drifts, every simulated plate scale disagrees with the operator's own equipment sheet.
+        assert_eq!(camera.width, 6000);
+        assert_eq!(camera.height, 4000);
+        assert!(
+            (camera.arcsec_per_pixel - 0.77).abs() < 0.005,
+            "plate scale is {}",
+            camera.arcsec_per_pixel
+        );
+        // The measured 2.08 s capture overhead, rounded to the 2 s that T-ISO-1 (SDD §9) calls
+        // "a realistic ~2 s blocking capture".
+        assert_eq!(camera.download, Duration::from_secs(2));
+
+        // The guide chain is deliberately coarser — four times, which is what makes the guide
+        // loop's sub-pixel centroiding necessary rather than a nicety.
+        let guide = GuideCameraProfile::default();
+        assert!(
+            (guide.arcsec_per_pixel / camera.arcsec_per_pixel - 4.2).abs() < 0.2,
+            "the guider is {}x the imaging scale",
+            guide.arcsec_per_pixel / camera.arcsec_per_pixel
+        );
+        // Both cameras must start from the same sky, or they are two simulators that happen to
+        // be configured alike (task M1-T06: "the guide camera reads the same generator").
+        assert_eq!(camera.field, guide.field);
     }
 
     #[test]

@@ -252,6 +252,175 @@ impl ArmedFaults {
     }
 }
 
+// -----------------------------------------------------------------------------------------
+// The camera's failures (M1-T06)
+// -----------------------------------------------------------------------------------------
+
+/// One scripted camera failure (task M1-T06 scope, SDD §9).
+///
+/// A separate enum from [`Fault`] rather than three more variants on it, because the two devices
+/// fail at different *layers*. A mount's failures are all transport — no reply, a corrupt reply,
+/// an unplugged adapter — because a mount is a serial line with a motor behind it. A camera's
+/// are mostly not: it refuses an exposure, or a download takes forever, and both of those happen
+/// with a perfectly healthy USB link. Sharing one enum would mean every camera test carrying a
+/// `MountCommand` it cannot use.
+///
+/// The rule from the module docs holds unchanged: **every fault is consumed once**, so the
+/// assertion after a failure is that the next call works. A test that wants three slow downloads
+/// asks for three.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CameraFault {
+    /// The `n`-th capture after connecting (1-based) fails; the rest succeed.
+    ///
+    /// Numbered rather than "the next one" because the interesting cases are positional: a
+    /// sequence's *first* frame failing is a setup problem the operator sees immediately, and
+    /// its fortieth failing at three in the morning is the one the retry logic exists for.
+    ///
+    /// Reported as [`DeviceError::Rejected`] — the body understood the command and refused it,
+    /// which is what a card-less or a focus-hunting camera does. A transport-level failure is
+    /// [`DisconnectAfter`](Self::DisconnectAfter) instead.
+    FailCapture(u32),
+
+    /// The next download takes this multiple of the profile's download time.
+    ///
+    /// The T-ISO-1 knob (SDD §9: "a realistic ~2 s blocking capture and **a slow download**").
+    /// A multiplier rather than a duration so a test can say "ten times slower than this camera
+    /// normally is" without restating the camera's timing — and so the same plan means the same
+    /// thing against a profile whose download time was changed for other reasons.
+    SlowDownload(f64),
+
+    /// The camera falls off the bus this long after
+    /// [`connect`](astroctl_hal::camera::Camera::connect).
+    ///
+    /// The call that discovers it gets [`DeviceError::Transport`]; everything after that gets
+    /// [`DeviceError::NotConnected`] until the operator reconnects, which succeeds. Modelled on
+    /// the measured case: the spike pulled the cable mid-transfer and libgphoto2 reported
+    /// "Could not find the requested device on the USB port", and no retry on the old handle
+    /// ever recovered — only a fresh context did.
+    DisconnectAfter(Duration),
+}
+
+/// A script of camera faults handed to a simulator at construction (SDD §9).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CameraFaultPlan {
+    faults: Vec<CameraFault>,
+}
+
+impl CameraFaultPlan {
+    /// A camera that behaves.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// A plan from a list of faults.
+    ///
+    /// ```
+    /// use astroctl_drivers::simulator::{CameraFault, CameraFaultPlan};
+    ///
+    /// // The third frame of the sequence fails, and the fourth downloads slowly.
+    /// let plan = CameraFaultPlan::new([
+    ///     CameraFault::FailCapture(3),
+    ///     CameraFault::SlowDownload(10.0),
+    /// ]);
+    /// assert_eq!(plan.len(), 2);
+    /// ```
+    #[must_use]
+    pub fn new(faults: impl IntoIterator<Item = CameraFault>) -> Self {
+        Self {
+            faults: faults.into_iter().collect(),
+        }
+    }
+
+    /// Adds one fault, for building a plan up in a fixture.
+    #[must_use]
+    pub fn with(mut self, fault: CameraFault) -> Self {
+        self.faults.push(fault);
+        self
+    }
+
+    /// How many faults are still armed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.faults.len()
+    }
+
+    /// Whether the camera will behave.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.faults.is_empty()
+    }
+
+    /// Arms the plan against a live device.
+    pub(super) fn arm(&self) -> ArmedCameraFaults {
+        ArmedCameraFaults {
+            remaining: self.faults.clone(),
+            captures: 0,
+        }
+    }
+}
+
+/// The mutable half: what is left of the plan, and how many frames in we are.
+#[derive(Debug)]
+pub(super) struct ArmedCameraFaults {
+    remaining: Vec<CameraFault>,
+    /// Captures attempted since the last successful connect — what
+    /// [`CameraFault::FailCapture`] counts.
+    captures: u32,
+}
+
+impl ArmedCameraFaults {
+    /// Restarts the capture count, for the same reason the mount restarts its exchange count:
+    /// `FailCapture(3)` must mean the third frame of the session and not "the third, unless the
+    /// test reconnected".
+    pub(super) fn on_connect(&mut self) {
+        self.captures = 0;
+    }
+
+    /// Consumes the failure scripted for this capture, if any.
+    pub(super) fn next_capture(&mut self) -> Option<DeviceError> {
+        self.captures += 1;
+        let captures = self.captures;
+        let hit = self
+            .remaining
+            .iter()
+            .position(|fault| matches!(*fault, CameraFault::FailCapture(n) if n == captures))?;
+        self.remaining.remove(hit);
+        Some(DeviceError::Rejected(
+            "the camera refused the exposure (simulated capture failure)".to_owned(),
+        ))
+    }
+
+    /// Consumes the slow-download fault, returning what to multiply the download time by.
+    pub(super) fn take_download_factor(&mut self) -> f64 {
+        let Some(hit) = self
+            .remaining
+            .iter()
+            .position(|fault| matches!(fault, CameraFault::SlowDownload(_)))
+        else {
+            return 1.0;
+        };
+        match self.remaining.remove(hit) {
+            // Clamped at 1: a factor below one would make a *fault* speed the camera up, which
+            // is not a failure mode any camera has and would silently weaken a timing test.
+            CameraFault::SlowDownload(factor) => factor.max(1.0),
+            _ => 1.0,
+        }
+    }
+
+    /// Consumes the link-loss fault, returning how long after connecting the camera vanishes.
+    pub(super) fn take_disconnect_delay(&mut self) -> Option<Duration> {
+        let hit = self
+            .remaining
+            .iter()
+            .position(|fault| matches!(fault, CameraFault::DisconnectAfter(_)))?;
+        match self.remaining.remove(hit) {
+            CameraFault::DisconnectAfter(after) => Some(after),
+            _ => None,
+        }
+    }
+}
+
 /// The error a garbled reply produces, worded for the operator who has to decide whether to
 /// check a cable or a driver.
 pub(super) fn garbled_error(command: MountCommand) -> DeviceError {
@@ -319,11 +488,58 @@ mod tests {
     }
 
     #[test]
+    fn a_capture_failure_lands_on_its_numbered_frame_and_only_there() {
+        let mut armed = CameraFaultPlan::new([CameraFault::FailCapture(2)]).arm();
+        assert!(armed.next_capture().is_none());
+        let error = armed.next_capture().expect("the second frame fails");
+        assert!(matches!(error, DeviceError::Rejected(_)), "{error:?}");
+        // ...and the sequence carries on, which is the half a retry test needs.
+        assert!(armed.next_capture().is_none());
+    }
+
+    #[test]
+    fn reconnecting_restarts_the_capture_count_too() {
+        let mut armed = CameraFaultPlan::new([CameraFault::FailCapture(1)]).arm();
+        armed.captures = 12;
+        armed.on_connect();
+        assert!(armed.next_capture().is_some());
+    }
+
+    #[test]
+    fn a_slow_download_is_a_multiplier_taken_once_and_never_a_speed_up() {
+        let mut armed = CameraFaultPlan::none()
+            .with(CameraFault::SlowDownload(10.0))
+            .with(CameraFault::SlowDownload(0.1))
+            .arm();
+        assert!((armed.take_download_factor() - 10.0).abs() < f64::EPSILON);
+        // The second is clamped: a fault must not make the camera faster than it is.
+        assert!((armed.take_download_factor() - 1.0).abs() < f64::EPSILON);
+        // Spent, so an unfaulted download is the plain configured one.
+        assert!((armed.take_download_factor() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_camera_link_loss_is_taken_once() {
+        let mut armed =
+            CameraFaultPlan::new([CameraFault::DisconnectAfter(Duration::from_secs(20))]).arm();
+        assert_eq!(armed.take_disconnect_delay(), Some(Duration::from_secs(20)));
+        assert_eq!(armed.take_disconnect_delay(), None);
+        // It is not a capture-time fault, so a capture cannot consume it.
+        assert!(armed.next_capture().is_none());
+    }
+
+    #[test]
     fn an_empty_plan_never_injects_anything() {
         let mut armed = FaultPlan::none().arm();
         assert!(FaultPlan::none().is_empty());
         for _ in 0..100 {
             assert!(armed.next_exchange(MountCommand::Position).is_none());
+        }
+
+        let mut camera = CameraFaultPlan::none().arm();
+        assert!(CameraFaultPlan::none().is_empty());
+        for _ in 0..100 {
+            assert!(camera.next_capture().is_none());
         }
     }
 }
