@@ -8,10 +8,35 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+# One feature per driver family, so a field node built for real hardware does not carry code for
+# devices it will never see (M1-T02 acceptance: "behind a `simulator` feature flag"). Making the
+# dependencies optional too is what keeps the claim checkable: with `--no-default-features` this
+# crate links nothing at all, which a build demonstrates rather than a comment promising it.
+#
+# On by default for the reason astroctl-ipc's `supervisor` is: `scripts/check.sh` compiles, lints
+# and tests default features only, and a driver no gate ever looks at is the worse failure.
+[features]
+default = ["simulator"]
+simulator = ["dep:async-trait", "dep:tokio"]
+
 [dependencies]
 # ADD §5.6 rule 1: these two, and nothing else internal, ever.
 astroctl-core = { workspace = true }
 astroctl-hal = { workspace = true }
+
+# The HAL's traits are `async-trait`, so an implementation of one has to be too.
+async-trait = { workspace = true, optional = true }
+# `time` is the whole simulator: sleeps for the injected serial latency and `Instant` for the
+# axis clock, which under `tokio::time::pause` makes a 90-second slew testable in milliseconds.
+# `sync` is the semaphore standing in for the one serial cable — the thing an `emergency_stop`
+# must be able to jump (SDD §5.2.4). No runtime is started here; drivers run on the caller's.
+tokio = { workspace = true, features = ["sync", "time"], optional = true }
+
+[dev-dependencies]
+# `test-util` is load-bearing rather than convenient: it is what makes `tokio::time::pause`
+# available, and without it every timing test in this crate would be a real-time sleep and a
+# source of CI flakes. `macros`/`rt` run the tests themselves.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
 
 [lints]
 workspace = true

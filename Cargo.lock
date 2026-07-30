@@ -68,6 +68,8 @@ version = "0.1.0"
 dependencies = [
  "astroctl-core",
  "astroctl-hal",
+ "async-trait",
+ "tokio",
 ]
 
 [[package]]
