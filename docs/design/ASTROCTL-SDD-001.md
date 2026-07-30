@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.13.0
+**Version:** 1.14.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -52,6 +52,8 @@
 **Change note (1.12.0):** §5.9's target-platform paragraph named the three Android capabilities the PWA relies on without recording that all three require a **secure context**. Added, with the trap that makes it worth stating: every one of them works on `http://localhost` and none work on a phone over the VPN, so a capability check passing on the workstation says nothing about the field. Found by testing M0-T06 on a real phone after it reported the shell working. Also records that an expired certificate revokes the secure context as thoroughly as a missing one, which is why SEC-07 puts expiry in the health payload.
 
 **Change note (1.13.0):** §5.8.1's field health response gains SEC-07's certificate expiry — `cert_expires_at`, `cert_days_remaining`, and a third `status` value `warn`. `warn` is derived when the response is built and never stored: it is a property of the clock rather than a lifecycle transition, so the `starting`→`ok` cell of §8.1 keeps exactly the two states it names, and a renewed certificate turns the warning off without anything having to reset it. TLS itself terminates in `astroctl-field` (ADD §4); the operator procedure is `docs/ops/tls-setup.md`. Landed by M0-T09.
+
+**Change note (1.14.0):** §5.11 specified to the level M1-T11 can implement against, because the ingest contract has two sides and only one of them was written down. The `meta` part now has a schema (§5.11.1) rather than a parenthesized list of field names — it gained `v` and `ext`, the second because §5.11.1's ack format could not name the stored file without it and the first because the object is strict about unknown keys. The procedure (§5.11.2) records six ordering properties that were implicit and are each one bug away from data loss: the dedup key is `(session_id, frame_id)` and **not** `frame_id`, since §5.5's per-session counters make `light_00042` recur in every session; the temporary carries a nonce, since two overlapping retries otherwise write through a rename into a stored frame; the link is `renameat2(RENAME_NOREPLACE)`, since check-then-rename has a window a retry fits through and `EEXIST` is also the crash-recovery signal; the journal row follows the frame, since REL-13's authority may under-claim but never over-claim; a *definitive* answer is delivered only after the body is drained, since an early response is lost to a client still writing and the frame would then be retried forever; and the derived metadata files are outside the ack, since they are rebuildable and the frame is not. §5.11.3 pins `ingest.db` to the archive volume with `synchronous = FULL`, names the shared layout fixture, gives `session.json` a shape, states that the archive opens before the socket, and adds the startup sweep of leftover temporaries. Response bodies gain the `v` §2 requires of every externally visible schema. Landed by M1-T12.
 
 ---
 
@@ -998,41 +1000,134 @@ on the stack node's disk, fsynced, and their checksum matched.**
 |-------|--------|-----------------|
 | `/api/system/health` | GET | → `{status, disk_free_gb, versions, worker: {state, restarts}}` |
 | `/api/system/info` | GET | → config summary, **resolved runtime worker threads (§7)**, route table. §7 requires this on *both* binaries; it was listed only for the field node |
-| `/api/ingest` | POST | multipart: `meta` (JSON: session_id, frame_id, sha256, size, capture params) + `frame` (binary) → `{sha256, stored: true, duplicate: bool}` |
-| `/api/stacking/stats` | GET | → `{session_id, frame_count, last_ingest_ts, last_preview_ts}` (real statistics arrive in 2b) |
+| `/api/ingest` | POST | multipart, `meta` **then** `frame` — see the schema below → `{v, session_id, frame_id, sha256, stored: true, duplicate: bool}` |
+| `/api/stacking/stats` | GET | → `{v, session_id, frame_count, last_ingest_ts, last_preview_ts}` (real statistics arrive in 2b) |
 | `/ws` | GET | WS — JSON status events |
 | `/ws/preview` | GET | WS — binary JPEG previews only (mirrors the field node's `/ws/liveview` split, §8.3(5)) |
 
-All routes under the same bearer-token middleware as the field node (§4.5).
+All routes under the same bearer-token middleware as the field node (§4.5). `/api/ingest` declares
+tier `low` and is **audited** (§8.2): it changes state but moves nothing, and the audit log is
+where "when did this node stop receiving frames" gets answered. It also raises the request body
+limit to 512 MiB + 1 MiB of slack for the metadata part and the MIME framing; the framework
+default is 2 MiB, which rejects every real frame.
+
+##### The `meta` part
+
+```jsonc
+{ "v": 1,                       // equality-checked, like the worker handshake (§5.12.2)
+  "session_id": "2026-07-29_ngc7000",   // [A-Za-z0-9._-]{1,64}, no leading dot
+  "frame_id":   "light_00042",          // <kind>_<id> per §5.5: [a-z]{1,16} _ [A-Za-z0-9-]{1,64}
+  "sha256":     "<64 hex>",             // of the frame bytes; case-insensitive on the wire
+  "size":       26214400,               // exact, 1..=512 MiB — enforced per chunk, not at the end
+  "ext":        "cr3",                  // [a-z0-9]{1,8}; the stored name is <frame_id>.<ext>
+  "capture":    { … } | null,           // opaque; mirrored verbatim to control/quality_<id>.json
+  "session":    { "target": … | null,   // opaque; session.json is built from this (§5.11.4)
+                  "equipment": … | null,
+                  "created_ts": "<RFC 3339 ms>" | null } | null }
+```
+
+`session_id`, `frame_id` and `ext` are whitelist-validated because they become path components:
+this is the check that keeps an upload inside the archive. `capture` and `session` are deliberately
+opaque — the field node owns those schemas (§5.5), and a second declaration here would drift from
+it. The object is otherwise strict: an unrecognized key is a `VALIDATION` refusal, since silently
+dropping capture metadata has no symptom, and `v` is what makes that strictness safe.
+
+`meta` **must precede** `frame`. Streaming to the right path requires the destination, the declared
+size and the dedup answer first, and buffering the frame instead would put 25 MB in RAM.
 
 #### 5.11.2 Ingest procedure
 
 ```
-stream body → sessions/<sid>/frames/.tmp_<frame_id>   (never buffered whole in RAM)
-  → hash while streaming; compare to meta.sha256
-      mismatch → delete tmp, 422 {code: "CHECKSUM_MISMATCH"}, nothing stored
-  → fsync file → rename to frames/light_<id>.<ext> → fsync dir     ← durable
-  → journal insert → 200 {sha256, stored: true}
+parse meta                                    → 422 VALIDATION on anything malformed
+  → free space < storage.disk_critical_free_gb → 507 DISK_FULL, body NOT read (see below)
+  → journal lookup (session_id, frame_id)
+        same sha256      → drain body, 200 {duplicate: true}     ← file never touched
+        different sha256 → drain body, 409 FRAME_ID_CONFLICT
+  → stream frame → sessions/<sid>/frames/.tmp_<frame_id>.<pid>.<nonce>   (never whole in RAM)
+        hashing as the bytes arrive; over meta.size → 422, tmp deleted
+  → sha mismatch → delete tmp, 422 CHECKSUM_MISMATCH, nothing stored
+  → fsync file → renameat2(RENAME_NOREPLACE) → fsync frames dir      ← durable
+        EEXIST → re-hash what is there: equal → adopt, differ → 409 FRAME_ID_CONFLICT
+  → control/quality_<id>.json  → journal row → session.json → 200 {stored: true}
 ```
 
 Hashing happens *during* the stream, so a corrupt 25 MB upload costs one disk write and no
-second pass. Dedup: if `(frame_id, sha256)` is already `stored`, return `200 {duplicate: true}`
-immediately without touching the file — this is what makes the field agent's blind retry safe.
-A same-`frame_id`-different-`sha256` arrival is a hard error (`FRAME_ID_CONFLICT`), never an
-overwrite; raw frames are immutable here too (REL-11).
+second pass. Six properties of that order are load-bearing:
 
-Ingest refuses new frames below `storage.disk_critical_free_gb` with `507` and a `DISK_FULL`
-alert, so the field node's queue absorbs the backlog rather than the archive filling (REL-12).
+1. **The dedup key is `(session_id, frame_id)`, not `frame_id`.** §5.5 hands out frame ids from a
+   per-session counter, so `light_00042` recurs in every session; on a node that mirrors many
+   sessions a bare `frame_id` key would make the second session's frame 42 a duplicate of the
+   first's. (§5.10.1's `frame_id TEXT PRIMARY KEY` holds only within one field node's queue.)
+2. **The temporary carries a nonce.** Two overlapping uploads of one frame id would otherwise
+   share `.tmp_<frame_id>`, and the loser goes on writing into a descriptor the winner has already
+   renamed *into the archive* — a stored raw modified after the fact, which REL-11 forbids.
+3. **`renameat2(RENAME_NOREPLACE)`, not `rename`.** A `metadata()` check followed by a rename has
+   a window in which a concurrent retry lands, and `rename(2)` replaces silently. The kernel does
+   it atomically or fails with `EEXIST`, and `EEXIST` is the crash-recovery path: a frame on disk
+   that no journal row knows about (a crash between the two steps) is re-hashed and adopted rather
+   than refused or rewritten.
+4. **The journal row is written after the frame, never before.** The row is REL-13's authority: a
+   field node deletes its only copy on the strength of it. It may under-claim — a missing row costs
+   one retransmission — but never over-claim.
+5. **A definitive answer is delivered after the body is drained.** Responding before the body is
+   consumed makes the server close the connection, and a client still writing gets a transport
+   error instead of the response — so a `duplicate` or `conflict` verdict would never be recorded
+   and the frame would be retried forever. The `507` is the deliberate exception: it means "come
+   back later", which is what a transport error produces anyway, and making a node whose disk is
+   full accept 25 MB before saying so defeats REL-12's back-pressure.
+6. **The derived files are not part of the ack.** `quality_<id>.json` and `session.json` are
+   rebuildable from the frames and the journal; a failure to write one is logged, not returned.
+   Failing an ingest whose bytes are already durable would ask the field node to re-send 25 MB to
+   fix a metadata write.
+
+Every answer is chosen against §5.10.1's rule that a 4xx which is not 408/429 is *terminal* for
+the sender: `CHECKSUM_MISMATCH`, `FRAME_ID_CONFLICT` and `VALIDATION` are 4xx because they are
+definitive; `DISK_FULL` is 507 and carries `retryable: true` (overriding §4.2's default for that
+code) because freeing space makes the identical request succeed; a body that stops arriving is
+mapped to 5xx, never 4xx, because abandoning a good frame over a dropped link would lose it.
 
 #### 5.11.3 Session mirror and journal
 
 The mirror layout is **byte-for-byte the same structure** as the field node's (§5.5) — this is
 asserted by a fixture test shared between `astroctl-session` and `astroctl-stack`, so the two
-layouts cannot drift. `session.json` on the stack is constructed from ingest metadata rather
-than copied, and tolerates frames arriving in any order or long after the session ended (IPP-15).
+layouts cannot drift. The fixture is `crates/astroctl-session/testdata/session-layout.txt`, a list
+of relative paths read by both crates' tests with `include_str!` rather than through a Cargo
+dependency: it is data, and the ADD §5.6 matrix should not acquire an edge to carry it. It fixes
+the *paths*; `session.json` differs in content between the nodes by design, so a content-level
+fixture would assert something this design does not require.
 
-`ingest.db` (SQLite, WAL) records every received frame with source and timestamp. It is the
-future authority for REL-13 reclaim decisions and, from 2b, the work list for rebuilds.
+`session.json` on the stack is constructed from ingest metadata rather than copied, and tolerates
+frames arriving in any order or long after the session ended (IPP-15):
+
+```jsonc
+{ "v": 1, "session_id": "…",
+  "created_ts": "…",              // earliest known: the field node's, else the first arrival —
+                                  //   a late frame must not rewrite when the session began
+  "target": … | null,             // latest non-null wins; a frame with no session block does not
+  "equipment": … | null,          //   erase what an earlier one supplied
+  "mirror": { "frame_count": 3, "first_ingest_ts": "…", "last_ingest_ts": "…" } }
+```
+
+`ingest.db` (SQLite, WAL) records every received frame with source and timestamp — one row keyed
+`(session_id, frame_id)` holding `sha256`, `size_bytes`, `rel_path`, `source` and `received_ts`.
+It lives **on the archive volume**, at `<storage.sessions_dir>/ingest.db`: an index that can be
+mounted separately from the frames it indexes will one day describe a different disk's contents,
+and PRD §8.2 has no key for a state directory. `synchronous = FULL` under WAL, because the ack
+that quotes a row is a durability claim and the alternative loses the last commits to a power cut
+— exactly the window in which the field node was told it could reclaim. It is the future authority
+for REL-13 reclaim decisions and, from 2b, the work list for rebuilds.
+
+"Which session is current" is answered by **insertion order** (`MAX(rowid)`), not by
+`MAX(received_ts)`: timestamps are millisecond-resolution (§2), so two sessions gaining a frame in
+the same millisecond tie, and REL-14 admits a clock that steps backwards, which insertion order
+cannot do.
+
+Opening the archive and its journal is a **startup step, before the socket** (§8.1): a node that
+cannot record an ingest cannot honour the contract this section opens with, and one that accepts
+frames it cannot account for is worse than one that refuses to start. Startup also sweeps
+`.tmp_*` files from every session directory — nothing else ever removes a temporary left by a
+killed upload, and on an archive volume those accumulate into an unexplained disk-full alert
+months later (REL-12).
 
 ### 5.12 Worker IPC and supervision (`astroctl-ipc`)
 
