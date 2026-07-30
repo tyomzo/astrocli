@@ -12,7 +12,9 @@ publish.workspace = true
 astroctl-core = { workspace = true }
 
 # M0-T05 (binary bootstrap). No `hyper-util`: only the field node proxies (ADR-07).
-axum = { workspace = true }
+# `multipart` (M1-T12): the ingest body of SDD §5.11.1. It brings `multer`, whose `Field::chunk`
+# is what lets a 25 MB raw stream to disk instead of through RAM (§5.11.2).
+axum = { workspace = true, features = ["multipart"] }
 tokio = { workspace = true, features = [
     "fs",
     "io-util",
@@ -26,6 +28,12 @@ tokio = { workspace = true, features = [
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+
+# M1-T12 (stack ingest). `rusqlite` is the ingest journal (ADR-06, SDD §5.11.3); `chrono` is the
+# timestamp type the event schema already fixes (SDD §4.3), so the journal and the session mirror
+# spell a timestamp the same way the events do rather than inventing a second format.
+rusqlite = { workspace = true }
+chrono = { workspace = true }
 subtle = { workspace = true }
 rustix = { workspace = true }
 thiserror = { workspace = true }

@@ -7,9 +7,8 @@
 //!
 //! # What is not here yet
 //!
-//! `/api/ingest` (M1-T12), `/api/stacking/stats` (M1-T12), `/ws` and `/ws/preview` (M1-T14). They
-//! are listed in SDD §5.11.1 and land with the tasks that give them something to do; declaring
-//! them now would mean either a fake 200 or a route that lies about what the node can accept.
+//! `/ws` and `/ws/preview` (M1-T14). They are listed in SDD §5.11.1 and land with the task that
+//! gives them something to push; declaring them now would mean a socket that never sends.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -19,10 +18,13 @@ use astroctl_core::config::StackConfig;
 use astroctl_core::error::ApiError;
 use astroctl_core::event::{WorkerState, EVENT_SCHEMA_VERSION};
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use serde::Serialize;
 
 use crate::auth::{require_bearer, AuthPolicy};
+use crate::ingest::{self, Ingest, MAX_UPLOAD_BYTES};
 use crate::route_meta::{ApiRouter, RouteDecl, RouteMeta, Tier};
 use crate::vitals::{self, Uptime};
 
@@ -119,13 +121,28 @@ pub struct AppState {
     pub routes: Arc<[RouteDecl]>,
     /// Logging destination, for support questions.
     pub logging: LoggingInfo,
+    /// The mirrored archive and its journal (SDD §5.11).
+    pub ingest: Arc<Ingest>,
 }
 
-// The field node's `ApiFailure` (an `IntoResponse` wrapper for `ApiError`, which cannot
-// implement the trait itself — it lives below the API layer, SDD §4.2) has no counterpart here
-// yet: no handler on this node returns an error. It arrives with `/api/ingest` and its
-// `CHECKSUM_MISMATCH` / `FRAME_ID_CONFLICT` / `DISK_FULL` answers in M1-T12. The 401 path does
-// not need it — `auth::require_bearer` renders its own response.
+/// An [`ApiError`] on its way out as a response.
+///
+/// The wrapper exists because `ApiError` cannot implement `IntoResponse` itself — it lives in
+/// `astroctl-core`, below the API layer, and SDD §4.2 keeps axum out of that crate. The field
+/// node carries the identical type for the identical reason (ADD §5.6 rule 5).
+#[derive(Debug)]
+pub struct ApiFailure(pub ApiError);
+
+impl IntoResponse for ApiFailure {
+    fn into_response(self) -> Response {
+        let status = StatusCode::from_u16(self.0.http_status())
+            // Unreachable: `ErrorCode::http_status` is a total function over a closed enum and
+            // every value in it is a valid status. Not an `expect`, because a panic here would
+            // take the node down while *reporting an error*.
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self.0)).into_response()
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Router
@@ -135,7 +152,22 @@ pub struct AppState {
 pub fn router() -> (Router<AppState>, Vec<RouteDecl>) {
     let api = ApiRouter::<AppState>::new()
         .get("/api/system/health", RouteMeta::read(), health)
-        .get("/api/system/info", RouteMeta::read(), info);
+        .get("/api/system/info", RouteMeta::read(), info)
+        // `Low`, not `Medium`: ingest changes state here but moves nothing and captures nothing,
+        // and it is the field node's transfer agent that calls it, never an operator. Audited,
+        // because the audit log is where "when did this node stop receiving frames" is answered.
+        //
+        // Not `BlockedForLlm` even though no LLM should ever call it: SDD §5.8.1 reserves that
+        // tier for actions an *operator* may take and an agent may not (the e-stop). An agent
+        // cannot usefully call ingest at all — it has no frame — so the tier that describes the
+        // route honestly is the one that describes its consequence.
+        .post_with_body_limit(
+            "/api/ingest",
+            RouteMeta::new(Tier::Low, true),
+            MAX_UPLOAD_BYTES,
+            ingest::ingest,
+        )
+        .get("/api/stacking/stats", RouteMeta::read(), ingest::stats);
 
     let declarations = api.declarations();
     (api.into_router(), declarations)
@@ -336,23 +368,22 @@ fn debug_name<T: std::fmt::Debug>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{state_with, TestNode};
+    use crate::test_support::{app_for, TestNode};
+    use astroctl_core::error::ErrorCode;
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
     use serde_json::Value;
     use tower::ServiceExt as _;
 
     async fn call(node: &TestNode, path: &str, token: Option<&str>) -> (StatusCode, Value) {
-        let (router, declarations) = router();
-        let state = state_with(node, declarations);
-        let auth = Arc::clone(&state.auth);
-        let app = with_auth(router.with_state(state), auth);
+        let app = app_for(node).await;
 
         let mut request = Request::builder().uri(path);
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         let response = app
+            .router
             .oneshot(request.body(Body::empty()).expect("request builds"))
             .await
             .expect("router responds");
@@ -373,7 +404,9 @@ mod tests {
         for path in [
             "/api/system/health",
             "/api/system/info",
-            // Not declared yet (M1-T12), and still 401 rather than 404: auth runs before routing.
+            "/api/stacking/stats",
+            // A GET against the POST-only ingest route: still 401 rather than 405, because auth
+            // runs outside routing. An unauthenticated caller learns nothing about the surface.
             "/api/ingest",
         ] {
             let (status, body) = call(&node, path, None).await;
@@ -439,9 +472,17 @@ mod tests {
 
         assert_eq!(body["node"], "stack");
         let routes = body["routes"].as_array().expect("routes is a list");
-        assert_eq!(routes.len(), 2);
+        assert_eq!(routes.len(), 4);
+        let ingest = routes
+            .iter()
+            .find(|r| r["path"] == "/api/ingest")
+            .expect("ingest is declared");
+        assert_eq!(ingest["method"], "POST");
+        assert_eq!(ingest["tier"], "low");
+        assert_eq!(ingest["audit"], true, "ingest is the audited route");
         assert!(routes
             .iter()
+            .filter(|r| r["path"] != "/api/ingest")
             .all(|r| r["tier"] == "read" && r["audit"] == false));
 
         let tiers = body["tiers"].as_array().expect("tiers is a list");
@@ -458,6 +499,23 @@ mod tests {
         assert_eq!(body["config"]["export_dir"], "/data/astro/stacks");
         assert_eq!(body["config"]["gpu"]["enabled"], true);
         assert_eq!(body["server"]["auth_enforced"], true);
+    }
+
+    /// The statuses ingest actually answers with (SDD §4.2's table, §5.11.2's three refusals).
+    /// The wrapper is the only thing that turns a code into a status, so a wrong mapping here
+    /// would send the transfer agent's state machine the wrong way (SDD §5.10.1).
+    #[test]
+    fn the_error_wrapper_maps_each_ingest_code_to_its_status() {
+        for (code, expected) in [
+            (ErrorCode::ChecksumMismatch, 422),
+            (ErrorCode::Validation, 422),
+            (ErrorCode::FrameIdConflict, 409),
+            (ErrorCode::DiskFull, 507),
+            (ErrorCode::Internal, 500),
+        ] {
+            let response = ApiFailure(ApiError::new(code, "x")).into_response();
+            assert_eq!(response.status().as_u16(), expected, "for {code}");
+        }
     }
 
     #[tokio::test]

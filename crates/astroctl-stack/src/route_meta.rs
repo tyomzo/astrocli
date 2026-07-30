@@ -26,7 +26,7 @@
 
 use std::time::Instant;
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::handler::Handler;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::Response;
@@ -164,9 +164,34 @@ where
         self.declare(path, "GET", meta, axum::routing::get(handler))
     }
 
-    // Only `get` for now: every route this node serves in M0 is a GET. The `post` and `any`
-    // constructors arrive with the routes that need them (`/api/ingest`, M1-T12) rather than
-    // sitting here unused — an unbuilt constructor is dead code, not a seam.
+    /// Declare a `POST` route that accepts a body larger than axum's 2 MiB default.
+    ///
+    /// The limit is a parameter rather than a constant here because raising it is a per-route
+    /// decision: `/api/ingest` carries a raw frame and needs 512 MiB (SDD §5.11.2), and the
+    /// default exists precisely so that nothing else on the node inherits that. Without the
+    /// layer the first real 25 MB upload comes back as a 413 that no code in SDD §4.2 describes.
+    ///
+    /// There is no plain `post`: the only POST this node serves in M1 is ingest, and an unbuilt
+    /// constructor is dead code, not a seam.
+    #[must_use]
+    pub fn post_with_body_limit<H, T>(
+        self,
+        path: &'static str,
+        meta: RouteMeta,
+        max_body_bytes: usize,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, S>,
+        T: 'static,
+    {
+        self.declare(
+            path,
+            "POST",
+            meta,
+            axum::routing::post(handler).layer(DefaultBodyLimit::max(max_body_bytes)),
+        )
+    }
 
     fn declare(
         mut self,

@@ -21,10 +21,13 @@
 //! ```
 //!
 //! §8.1 is written for the field node; the steps it names between the auth check and the API
-//! coming up (frame store, driver registry, safety wrapper) have stack-node counterparts —
-//! session mirror, worker supervisor — that arrive with M1-T12 and M1-T13. **Workers are not
-//! spawned at boot**: SDD §5.12.3 supervises them as on-demand child processes, which is the same
-//! principle as the field node never connecting hardware at startup.
+//! coming up (frame store, driver registry, safety wrapper) have stack-node counterparts. The
+//! session mirror is one of them and is opened there, before the socket: a node that cannot
+//! record an ingest cannot honour the contract of SDD §5.11, and one that accepts frames it
+//! cannot account for is worse than one that refuses to start. The worker supervisor is the
+//! other and arrives with M1-T13. **Workers are not spawned at boot**: SDD §5.12.3 supervises
+//! them as on-demand child processes, which is the same principle as the field node never
+//! connecting hardware at startup.
 //!
 //! # Shutdown (SDD §7)
 //!
@@ -37,6 +40,9 @@
 mod api;
 mod auth;
 mod cli;
+mod ingest;
+mod journal;
+mod mirror;
 mod route_meta;
 mod telemetry;
 #[cfg(test)]
@@ -200,6 +206,19 @@ async fn serve(
              `server.auth_token_env` before exposing it on a network."
         );
     }
+
+    // --- 4b. the session mirror and its journal (SDD §5.11.3) ---------------------------------
+    let mirror = mirror::SessionMirror::open(&config.storage.sessions_dir).await?;
+    let swept = mirror.sweep_temporaries().await;
+    if swept > 0 {
+        tracing::warn!(
+            count = swept,
+            "removed temporaries left by interrupted uploads; the frames they belonged to were \
+             never acked and will be re-sent (SDD §5.10.3)"
+        );
+    }
+    tracing::info!(path = %mirror.root().display(), "session archive open");
+
     let status = Arc::new(StatusCell::starting());
     let (router, declarations) = api::router();
     let state = AppState {
@@ -211,6 +230,7 @@ async fn serve(
         routes: declarations.into(),
         logging,
         config: Arc::clone(&config),
+        ingest: Arc::new(ingest::Ingest::new(mirror)),
     };
     let app = api::with_auth(router.with_state(state), auth);
 
@@ -229,10 +249,16 @@ async fn serve(
         .map_err(|e| format!("cannot bind {addr}: {e}"))?;
     tracing::info!(%addr, auth_enforced, "API listening");
 
+    // `into_make_service_with_connect_info` so ingest can record *who* uploaded a frame in the
+    // journal (SDD §5.11.3 "received frames, timestamps, source"). It costs one extension per
+    // connection and is the only way to get the peer address into a handler.
     let server = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await
     });
 
     // --- 6. watchdogs on (SDD §8.1) ----------------------------------------------------------

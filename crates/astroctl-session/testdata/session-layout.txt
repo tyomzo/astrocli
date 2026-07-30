@@ -1,0 +1,26 @@
+# The Phase-1 session layout — SDD §5.5, PRD §5.9.
+#
+# Every path is relative to `sessions/<session_id>/`, for a session holding one light frame with
+# id `light_00042` captured as a Canon raw. Blank lines and `#` comments are ignored.
+#
+# Two crates write this layout and they must not drift:
+#
+#   * `astroctl-session` — the field node's frame store (M1-T07), the origin of the layout;
+#   * `astroctl-stack`   — the mirrored archive (M1-T12), which SDD §5.11.3 requires to be
+#                          "byte-for-byte the same structure".
+#
+# The fixture lives here, in the crate that owns the layout, and is read by the mirror's tests
+# with `include_str!` rather than through a Cargo dependency: it is data, and the dependency
+# matrix of ADD §5.6 should not acquire an edge to carry a test fixture.
+#
+# What this fixture fixes is the *paths*. `session.json` differs in content between the two
+# nodes by design — SDD §5.11.3 constructs the stack node's copy from ingest metadata instead of
+# copying the field node's — so a content-level fixture would assert something the design
+# explicitly does not require.
+#
+# Note the `<id>` in `quality_<id>.json`: SDD §5.5 spells the frame `light_<id>.cr3` and its
+# sidecar `quality_<id>.json`, so the sidecar drops the frame id's kind prefix.
+
+session.json
+frames/light_00042.cr3
+control/quality_00042.json
