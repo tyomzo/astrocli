@@ -36,6 +36,34 @@ describe('command layer isolation', () => {
 });
 
 /*
+ * The two stop paths carry `keepalive` — SDD §8.3(5), M1-T05.
+ *
+ * The most common way either of them is issued is not a finger lifting: it is the phone locking,
+ * the tab hiding, or the operator switching apps. A plain `fetch` started as the document goes
+ * away is cancelled with it, and for the e-stop that means the telescope keeps moving after the
+ * operator believes they stopped it. Asserted on the source because the flag has no observable
+ * effect in a test environment — it only matters in the moment the page is being torn down, which
+ * is precisely the moment nothing is watching.
+ */
+describe('the stop paths', () => {
+  it('send slew/stop and estop with keepalive', () => {
+    for (const command of ['mountSlewStop', 'mountEstop']) {
+      const body = commandsSource.slice(commandsSource.indexOf(`export function ${command}`));
+      const end = body.indexOf('\n}\n');
+      expect(body.slice(0, end), `${command} must survive the document going away`).toContain(
+        'keepalive: true',
+      );
+    }
+  });
+
+  it('sends the e-stop with no body, because the route parses none', () => {
+    // SDD §5.8.2: "auth only, no JSON parsing — empty body accepted". Sending nothing means there
+    // is no serialisation step between the operator's finger and the socket.
+    expect(commandsSource).toMatch(/postJson\('\/api\/mount\/estop', token, undefined/);
+  });
+});
+
+/*
  * Nudge availability — SDD §5.9's badge states. Pure, so it is tested where the sentences live
  * rather than through a rendered badge.
  */

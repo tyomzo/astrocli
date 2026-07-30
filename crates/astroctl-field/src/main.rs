@@ -18,10 +18,10 @@
 //! ```
 //!
 //! §8.1's "frame store open/create session → registry builds drivers → safety wrapper" steps sit
-//! between the auth check and the API coming up. They are absent here because the crates that
-//! implement them are empty until M1-T01/M1-T07, not because the order is different. **Hardware
-//! is never connected at startup** either way — that is an explicit operator action (§8.1), so
-//! nothing in this milestone moves a motor by booting.
+//! between the auth check and the API coming up. The last two are implemented — see
+//! [`build_mount`], which does both in one expression so nothing can hold an unwrapped driver;
+//! the frame store waits for M1-T07. **Hardware is never connected at startup** either way — that
+//! is an explicit operator action (§8.1), so nothing in this milestone moves a motor by booting.
 //!
 //! # Shutdown (SDD §7)
 //!
@@ -232,7 +232,7 @@ async fn serve(
     // "The registry builds drivers, no connect": switching the field node on must not produce
     // motion, so connecting stays an operator action and a failure here is a configuration
     // error rather than a hardware one.
-    let device = build_mount(&config)?;
+    let device = build_mount(&config, bus.clone())?;
     let mount = Arc::new(mount::MountFacade::new(device, bus.clone(), &config.mount));
     let snapshots = Arc::new(ws::SnapshotStore::new());
 
@@ -428,7 +428,8 @@ fn assemble(
         .merge(pwa::router(auth, deployment))
 }
 
-/// Build the configured mount driver through the HAL registry (SDD §5.1, §8.1; HAL-07).
+/// Build the configured mount driver through the HAL registry and wrap it in the safety layer
+/// (SDD §5.1, §5.4, §8.1; HAL-07, ADR-11).
 ///
 /// This function is the one place in the workspace that names a concrete driver — ADD §5.6 rule
 /// 1 puts that job on a binary, because the registry type lives in `astroctl-hal` and hal cannot
@@ -438,9 +439,18 @@ fn assemble(
 /// The registry is built and consulted rather than matched on directly so that
 /// `mount.driver: skywatcher` fails with the registry's own "no such driver, available: …"
 /// message naming what this build actually has, instead of a match arm nobody updated.
+///
+/// # The wrap happens here, and nowhere else
+///
+/// ADR-11 says the facade the API sees **is** the safety wrapper. This is the seam that makes it
+/// literally true: the driver `create_mount` returns is moved into a `SafeMount` in the same
+/// expression and no caller ever sees the raw handle. Nothing downstream can be given an
+/// unwrapped mount, because nothing downstream is ever handed one — which is what makes MNT-15's
+/// "for all callers (UI, REST API, LLM agent)" a property of the code rather than a convention.
 fn build_mount(
     config: &FieldConfig,
-) -> Result<Arc<dyn astroctl_hal::mount::MountDevice>, Box<dyn std::error::Error>> {
+    bus: EventBus,
+) -> Result<Arc<astroctl_safety::SafeMount>, Box<dyn std::error::Error>> {
     let mut registry = astroctl_hal::registry::DriverRegistry::new();
     // Fault and profile knobs live on the factory rather than in config (SDD §9): a failure
     // scenario is a value a test writes down, not something an operator can switch on in
@@ -449,15 +459,18 @@ fn build_mount(
         .register_mount(astroctl_drivers::simulator::SimulatorMountFactory::new())
         .map_err(|e| format!("cannot register the simulator mount driver: {e}"))?;
 
-    registry
+    let driver = registry
         .create_mount(config.mount.driver.as_str(), &config.mount)
         .map_err(|e| {
             format!(
                 "cannot build the mount driver named by `mount.driver` ({}): {e}",
                 config.mount.driver.as_str()
             )
-            .into()
-        })
+        })?;
+
+    Ok(Arc::new(astroctl_safety::SafeMount::from_config(
+        driver, config, bus,
+    )))
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

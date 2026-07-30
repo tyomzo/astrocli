@@ -162,9 +162,12 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
         .map(|materials| materials.status());
 
     // Through the same `build_mount` the binary uses, so a test drives the driver the operator's
-    // `mount.driver` actually selects rather than one the harness picked.
-    let device = crate::build_mount(&config).expect("the fixture must build a mount driver");
+    // `mount.driver` actually selects rather than one the harness picked — and, since M1-T05,
+    // through the same `SafeMount` wrap, so no test can accidentally exercise an unguarded mount
+    // and no route can pass a test it would fail in production (ADR-11).
     let bus = EventBus::new();
+    let device =
+        crate::build_mount(&config, bus.clone()).expect("the fixture must build a mount driver");
     let mount = Arc::new(crate::mount::MountFacade::new(
         device,
         bus.clone(),
