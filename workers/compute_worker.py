@@ -144,7 +144,11 @@ def _read_fits(numpy, path):
     # (BITPIX 16 with BZERO 32768). Ignoring them halves the sky and inverts the highlights.
     scale = _header_float(header, "BSCALE", 1.0)
     zero = _header_float(header, "BZERO", 0.0)
-    return samples.astype("float32") * scale + zero
+    # FITS rows run bottom-up; an image raster runs top-down. Without this flip every preview
+    # this worker renders is mirrored in declination — which looks entirely plausible on a star
+    # field and disagrees with the field node's preview of the same frame. Found by M1-T09
+    # matching the two pipelines sample for sample.
+    return numpy.flipud(samples.astype("float32") * scale + zero)
 
 
 def _parse_header_block(block, header):
