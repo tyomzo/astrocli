@@ -11,5 +11,40 @@ publish.workspace = true
 [dependencies]
 astroctl-core = { workspace = true }
 
+# M1-T07 (frame store). Nothing here is new to the workspace — every version is already pinned in
+# the root manifest, so this task adds no `[workspace.dependencies]` entry at all.
+#
+# `tokio`: the store is called from the field binary's runtime, and every fsync-heavy path either
+#   goes through `tokio::fs` or into `spawn_blocking` (SDD §7 — a blocked worker on a Pi's
+#   two-worker runtime is half the node).
+# `rustix`: `renameat2(RENAME_NOREPLACE)` for the write-once frame link and `statvfs` for REL-12.
+#   Both are single syscalls with no safe wrapper in std.
+# `sha2`: the frame checksum that `frame.saved` and `control/quality_<id>.json` both carry (SDD §4.3).
+# `chrono`: the timestamp type SDD §2 fixes, so `session.json` spells an instant the way events do.
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "sync",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+rustix = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The T-DUR-1 fixture: a process that can actually be SIGKILLed between `begin_frame` and
+# `commit_frame`. It lives in `testdata/` beside `session-layout.txt` because that is what it is —
+# a fixture, the Rust counterpart of `astroctl-ipc/testdata/worker_stub.py` — and it is declared as
+# a `[[bin]]` only because `CARGO_BIN_EXE_*` is the one mechanism that hands an integration test the
+# path to an executable cargo has built. Neither deployment image copies it: `deploy/Dockerfile.*`
+# name the binary they install.
+[[bin]]
+name = "frame-store-crash-harness"
+path = "testdata/crash_harness.rs"
+
 [lints]
 workspace = true
