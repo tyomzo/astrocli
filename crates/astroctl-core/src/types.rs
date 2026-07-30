@@ -505,6 +505,20 @@ pub enum DeviceKind {
     GuideCamera,
 }
 
+/// Renders as the operator would say it: `mount`, `camera`, `guide camera`.
+///
+/// Error messages name the slot a driver failed to fill — `no mount driver named …` from the
+/// HAL registry (SDD §5.1) — so the spelling has to be prose, not the variant name.
+impl fmt::Display for DeviceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Mount => "mount",
+            Self::Camera => "camera",
+            Self::GuideCamera => "guide camera",
+        })
+    }
+}
+
 /// Identity of a connected device (SDD §5.1 `device_info`, PRD §4.1).
 ///
 /// `firmware` and `serial` are optional because the two device families report different
@@ -650,6 +664,47 @@ pub enum ImageFormat {
     RawPlusJpeg,
 }
 
+/// The camera's current exposure settings (PRD §4.1 `get_settings`, SDD §5.8.1
+/// `/api/camera/settings`).
+///
+/// ISO, shutter and aperture are **the camera's own tokens**, not numbers: gphoto2 reports
+/// `"1600"`, `"1/250"`, `"30"`, `"bulb"`, `"5.6"`, and which tokens exist is a property of the
+/// body ([`AvailableSettings`]). Parsing them into floats here would mean re-rendering them to
+/// speak to the camera, and every round trip through a float is a chance to hand the body a
+/// string it does not recognize — PRD §8.1 keeps `camera.default_iso` a string for the same
+/// reason. `format` is the exception because it is the one setting the *system* reasons about
+/// (the pipeline needs to know whether a raw file exists), so drivers map their native mode
+/// names onto [`ImageFormat`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraSettings {
+    /// ISO token, e.g. `"1600"`.
+    pub iso: String,
+    /// Shutter token, e.g. `"1/250"`, `"30"` or `"bulb"`.
+    pub shutter: String,
+    /// Aperture token, e.g. `"5.6"`; `None` on a body that reports none (a manual lens).
+    pub aperture: Option<String>,
+    /// Capture format currently selected.
+    pub format: ImageFormat,
+}
+
+/// The values a camera will accept for each setting (PRD §4.1 `get_available_settings`).
+///
+/// Each list is in the camera's own order, which is the order a UI should offer them in — a
+/// sorted copy would put `"1/4000"` next to `"1/400"` and read as noise. A setter given a value
+/// outside these lists must fail with `DeviceError::Rejected` rather than pick a neighbour: a
+/// silently substituted exposure is a frame the operator did not ask for and cannot detect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AvailableSettings {
+    /// Selectable ISO tokens.
+    pub isos: Vec<String>,
+    /// Selectable shutter tokens.
+    pub shutters: Vec<String>,
+    /// Selectable aperture tokens; empty when the lens has no electronic aperture.
+    pub apertures: Vec<String>,
+    /// Selectable capture formats.
+    pub formats: Vec<ImageFormat>,
+}
+
 /// What a camera driver can do (PRD §4.1; SDD §5.1 "same pattern" as [`MountCapabilities`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraCapabilities {
@@ -675,6 +730,35 @@ pub struct CameraCapabilities {
     pub min_shutter_s: f64,
     /// Longest selectable non-bulb shutter time, in seconds.
     pub max_shutter_s: f64,
+}
+
+/// What a guide camera driver can do (PRD §4.1, HAL-04/05).
+///
+/// Completes the capability family; the guide loop is Phase 3 but the driver ships in M1 (task
+/// M1-T06), and a capability struct invented later would be invented against one implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GuideCameraCapabilities {
+    /// Sensor width in pixels, unbinned.
+    pub sensor_width_px: u32,
+    /// Sensor height in pixels, unbinned.
+    pub sensor_height_px: u32,
+    /// Pixel pitch in micrometres — with the guide scope's focal length this is the arcsec/px
+    /// the guide loop converts centroid error into mount corrections with.
+    pub pixel_size_um: f64,
+    /// Highest gain value the camera accepts, in its own units.
+    pub max_gain: u32,
+    /// Bits per sample actually filled. Samples are carried in 16 bits regardless, so this is
+    /// what tells a star detector where saturation is: a 12-bit camera clips at 4095, and a
+    /// detector assuming 65535 treats a saturated star as a merely bright one and centroids it.
+    pub bit_depth: u8,
+    /// Largest binning factor accepted on either axis.
+    pub max_binning: u8,
+    /// Regulated cooling available.
+    pub has_cooling: bool,
+    /// Shortest exposure the camera accepts, in seconds.
+    pub min_exposure_seconds: f64,
+    /// Longest exposure the camera accepts, in seconds.
+    pub max_exposure_seconds: f64,
 }
 
 #[cfg(test)]
@@ -1032,5 +1116,70 @@ mod tests {
             serde_json::from_str::<CameraCapabilities>(&json).expect("deserializes"),
             camera
         );
+
+        let guide = GuideCameraCapabilities {
+            sensor_width_px: 1280,
+            sensor_height_px: 960,
+            pixel_size_um: 3.75,
+            max_gain: 600,
+            bit_depth: 12,
+            max_binning: 4,
+            has_cooling: false,
+            min_exposure_seconds: 0.001,
+            max_exposure_seconds: 60.0,
+        };
+        let json = serde_json::to_string(&guide).expect("serializes");
+        assert_eq!(
+            serde_json::from_str::<GuideCameraCapabilities>(&json).expect("deserializes"),
+            guide
+        );
+    }
+
+    #[test]
+    fn camera_settings_round_trip_with_the_route_payload_shape() {
+        // SDD §5.8.1: `/api/camera/settings` is `{iso, shutter, aperture, format}`.
+        let settings = CameraSettings {
+            iso: "1600".to_owned(),
+            shutter: "1/250".to_owned(),
+            aperture: Some("5.6".to_owned()),
+            format: ImageFormat::RawPlusJpeg,
+        };
+        assert_eq!(
+            serde_json::to_value(&settings).expect("serializes"),
+            serde_json::json!({
+                "iso": "1600", "shutter": "1/250", "aperture": "5.6", "format": "RAW+JPEG"
+            })
+        );
+
+        // A manual lens reports no aperture, and that is a value, not an omission.
+        let manual = CameraSettings {
+            aperture: None,
+            ..settings
+        };
+        assert_eq!(
+            serde_json::to_value(&manual).expect("serializes")["aperture"],
+            serde_json::Value::Null
+        );
+
+        let available = AvailableSettings {
+            isos: vec!["100".to_owned(), "1600".to_owned()],
+            shutters: vec!["1/4000".to_owned(), "30".to_owned(), "bulb".to_owned()],
+            apertures: Vec::new(),
+            formats: vec![ImageFormat::Raw, ImageFormat::RawPlusJpeg],
+        };
+        let json = serde_json::to_string(&available).expect("serializes");
+        assert_eq!(
+            serde_json::from_str::<AvailableSettings>(&json).expect("deserializes"),
+            available
+        );
+    }
+
+    #[test]
+    fn device_kind_displays_as_prose() {
+        // The HAL registry's "no {kind} driver named `x`" message reads this, so `GuideCamera`
+        // would put a type name in front of an operator.
+        assert_eq!(DeviceKind::Mount.to_string(), "mount");
+        assert_eq!(DeviceKind::Camera.to_string(), "camera");
+        assert_eq!(DeviceKind::GuideCamera.to_string(), "guide camera");
     }
 }
