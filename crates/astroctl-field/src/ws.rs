@@ -444,24 +444,39 @@ pub async fn upgrade(
         ));
     }
 
-    upgrade.on_upgrade(move |socket| serve(socket, state))
-}
-
-/// Drive one client for the life of its connection.
-async fn serve(socket: WebSocket, state: AppState) {
-    let outbox = Arc::new(Outbox::new());
-    let subscriptions = Arc::new(Subscriptions::all());
-
-    // Subscribe to the bus *before* taking the snapshot. The other order has a hole exactly one
-    // scheduling gap wide: an event published between the snapshot and the subscription would
-    // be in neither, and the client would carry a stale value until the next one on that topic
-    // — which for `mount.status` can be the rest of the night.
+    // Subscribe and snapshot *here*, before the upgrade completes, and hand the connection only
+    // those two values — never the `AppState` it came from.
+    //
+    // That is a shutdown requirement, not tidiness. `AppState` holds an `EventBus`, which is a
+    // broadcast *sender*, so a connection holding one keeps the channel open for as long as the
+    // client stays attached. `main`'s shutdown drops every sender in order to close the session
+    // log's subscriber and flush it; one live phone would have been enough to make that flush
+    // time out and lose the tail of the night's event log. The hub only ever reads the bus, so
+    // it has no business holding something that can publish to it.
+    //
+    // Subscribing before taking the snapshot is the other ordering that matters: the reverse has
+    // a hole exactly one scheduling gap wide, and an event published inside it would be in
+    // neither the snapshot nor the stream — which for `mount.status` means a stale badge for the
+    // rest of the night.
     let events = state.bus.subscribe();
     let snapshot = ControlFrame::Snapshot {
         v: EVENT_SCHEMA_VERSION,
         ts: now_rfc3339(),
         events: state.snapshots.snapshot(),
     };
+
+    upgrade.on_upgrade(move |socket| serve(socket, events, snapshot))
+}
+
+/// Drive one client for the life of its connection.
+async fn serve(
+    socket: WebSocket,
+    events: astroctl_core::bus::EventSubscriber,
+    snapshot: ControlFrame,
+) {
+    let outbox = Arc::new(Outbox::new());
+    let subscriptions = Arc::new(Subscriptions::all());
+
     match serde_json::to_string(&snapshot) {
         Ok(frame) => {
             outbox.push_control(frame);
