@@ -411,7 +411,7 @@ mod tests {
 
         async fn call(node: &TestNode, path: &str) -> (StatusCode, Value) {
             let (router, declarations) = api::router();
-            let state = state_with(node, declarations);
+            let state = state_with(node, declarations).await;
             let auth = Arc::clone(&state.auth);
             let app = api::with_auth(router.with_state(state), auth);
 
@@ -496,7 +496,7 @@ mod tests {
             let node = TestNode::authenticated("s3cret").with_stack_upstream("127.0.0.1", port);
 
             let (router, declarations) = api::router();
-            let state = state_with(&node, declarations);
+            let state = state_with(&node, declarations).await;
             let auth = Arc::clone(&state.auth);
             let app = api::with_auth(router.with_state(state), auth);
 

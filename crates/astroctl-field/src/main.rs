@@ -18,10 +18,11 @@
 //! ```
 //!
 //! §8.1's "frame store open/create session → registry builds drivers → safety wrapper" steps sit
-//! between the auth check and the API coming up. The last two are implemented — see
-//! [`build_mount`], which does both in one expression so nothing can hold an unwrapped driver;
-//! the frame store waits for M1-T07. **Hardware is never connected at startup** either way — that
-//! is an explicit operator action (§8.1), so nothing in this milestone moves a motor by booting.
+//! between the auth check and the API coming up, and all three are now implemented — see
+//! [`open_session`] for the first and [`build_mount`], which does the last two in one expression so
+//! nothing can hold an unwrapped driver. **Hardware is never connected at startup** either way —
+//! that is an explicit operator action (§8.1), so nothing in this milestone moves a motor or opens
+//! a shutter by booting.
 //!
 //! # Shutdown (SDD §7)
 //!
@@ -34,8 +35,10 @@
 
 mod api;
 mod auth;
+mod camera;
 mod cli;
 mod mount;
+mod orchestrator;
 mod proxy;
 mod pwa;
 mod route_meta;
@@ -70,6 +73,22 @@ use crate::vitals::Uptime;
 /// buffered lines in one second is not going to absorb them in five, and an operator power-cycling
 /// a Pi that will not die is worse than a truncated telemetry log.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long shutdown waits for a capture to finish before abandoning it (SDD §7 step 3).
+///
+/// The reference body's download is measured at ~2 s and the simulator's default profile is the
+/// same; the budget is `camera.timeouts.download_seconds` shaped by what a *restart* can afford
+/// rather than what a camera can take, so it is a fixed, generous multiple of the measured figure
+/// rather than the config value. A frame that has not landed in ten seconds is not landing.
+const CAPTURE_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The session name a node opens at startup when it is not continuing one.
+///
+/// There is no operator-facing key for this in PRD §8.1 and no target to name it after until the
+/// catalog arrives (Phase 2a, PLN-03/04), so the session is identified by its date — which is what
+/// [`open_or_create_session`](astroctl_session::FrameStore::open_or_create_session) prefixes anyway,
+/// giving `2026-07-30_session`. Naming it after tonight's target is the Phase 2a change.
+const DEFAULT_SESSION_SLUG: &str = "session";
 
 fn main() -> ExitCode {
     let uptime = Uptime::started_now();
@@ -227,6 +246,13 @@ async fn serve(
     }
     let status = Arc::new(StatusCell::starting());
 
+    // --- 5a. frame store open, session open or created (SDD §8.1, §5.5) -----------------------
+    //
+    // Before the drivers, because §8.1 puts it there and because the order is the one that
+    // matters at 2 a.m.: a node that cannot open its session directory must fail at startup,
+    // where the operator is looking, rather than at the first capture of the night.
+    let store = Arc::new(open_session(&config).await?);
+
     // --- 5b. drivers built, nothing connected (SDD §8.1) --------------------------------------
     //
     // "The registry builds drivers, no connect": switching the field node on must not produce
@@ -234,6 +260,14 @@ async fn serve(
     // error rather than a hardware one.
     let device = build_mount(&config, bus.clone())?;
     let mount = Arc::new(mount::MountFacade::new(device, bus.clone(), &config.mount));
+    let camera = Arc::new(camera::CameraFacade::new(
+        build_camera(
+            &config,
+            astroctl_drivers::simulator::CameraProfile::default(),
+        )?,
+        Arc::clone(&store),
+        bus.clone(),
+    ));
     let snapshots = Arc::new(ws::SnapshotStore::new());
 
     let (router, declarations) = api::router();
@@ -251,6 +285,7 @@ async fn serve(
         config: Arc::clone(&config),
         certificate: tls.as_ref().map(tls::Materials::status),
         mount: Arc::clone(&mount),
+        camera: Arc::clone(&camera),
         tickets: Arc::new(ticket::TicketStore::new()),
         snapshots: Arc::clone(&snapshots),
     };
@@ -324,6 +359,9 @@ async fn serve(
     // the exception that proves it — it publishes, so it does hold a bus clone, and it is
     // therefore aborted before `drop(bus)` like the watchdog.
     let poll = tokio::spawn(mount::poll(Arc::clone(&mount)));
+    // `camera.status` on change and every 60 s (§4.3). Same accounting as the position poll: it
+    // publishes, so it holds a bus clone and is aborted before `drop(bus)`.
+    let camera_poll = tokio::spawn(camera::poll(Arc::clone(&camera)));
     let snapshot_task = tokio::spawn(ws::maintain_snapshot(
         Arc::clone(&snapshots),
         bus.subscribe(),
@@ -355,7 +393,14 @@ async fn serve(
     // *sender* having been dropped first, which is a much stronger claim than it looks.
     snapshot_task.abort();
     let _ = snapshot_task.await;
-    // 3. finish an in-flight download — M1-T08; nothing owns a camera yet.
+    // The camera status poll publishes too, so it stops here with the others.
+    camera_poll.abort();
+    let _ = camera_poll.await;
+    // 3. finish an in-flight download (bounded). The one step of this sequence that deliberately
+    //    *waits*: the exposure has already been spent and a half-downloaded frame is a lost frame,
+    //    so the node pays up to `CAPTURE_DRAIN_TIMEOUT` to keep it. Past that it gives up, for the
+    //    same reason step 5 has a timeout — a Pi that will not die is worse than one lost frame.
+    camera.finish_inflight(CAPTURE_DRAIN_TIMEOUT).await;
     // 4. tracking is deliberately NOT stopped (see the module docs).
     // 5. flush the session log: dropping every `EventBus` handle closes the sink's subscriber,
     //    which is what makes the flush complete rather than merely likely.
@@ -367,9 +412,15 @@ async fn serve(
     // exactly when a service restart lands. Missing either costs a full `FLUSH_TIMEOUT` and the
     // tail of the night's event log.
     //
+    // M1-T08 added two more of the same shape, which is why step 3 above both waits and then
+    // guarantees the task is gone: the camera facade holds a handle, and so does the capture task
+    // — and a capture in flight is, like a slew, exactly when a restart is most likely to land.
+    //
     // Aborting the motion task does not stop the mount (HAL rule 3), which is what step 4 wants.
     mount.abort_inflight();
     drop(mount);
+    drop(camera);
+    drop(store);
     drop(bus);
     if let Some(sink) = sink {
         match tokio::time::timeout(FLUSH_TIMEOUT, sink).await {
@@ -471,6 +522,91 @@ fn build_mount(
     Ok(Arc::new(astroctl_safety::SafeMount::from_config(
         driver, config, bus,
     )))
+}
+
+/// Open the frame store and the session the node will write tonight's frames into (SDD §8.1, §5.5).
+///
+/// # `open_current` first, and why the order is not a preference
+///
+/// A node that restarts mid-night must continue the session it was in, not start a second one
+/// beside it: the frame counter is per session (SDD §5.5 note 1), so a fresh session directory
+/// would restart the numbering while the old directory still holds `light_00001`. Two frames with
+/// one id in one night is exactly what REL-04's "a crash never reuses an id" forbids, and the only
+/// thing that prevents it is asking `CURRENT` first.
+///
+/// Creating one is the *fallback*, which is also why the failure to create is a startup error: a
+/// node whose session directory is unwritable cannot capture at all, and finding that out at the
+/// first exposure of the night is finding it out in a field, in the dark.
+async fn open_session(
+    config: &FieldConfig,
+) -> Result<astroctl_session::FrameStore, Box<dyn std::error::Error>> {
+    let store = astroctl_session::FrameStore::open(&config.storage)
+        .await
+        .map_err(|e| {
+            format!(
+                "cannot open the session store at {}: {e}",
+                config.storage.sessions_dir.display()
+            )
+        })?;
+
+    let session = match store.open_current().await {
+        Ok(Some(session)) => {
+            tracing::info!(session = %session.id(), "continuing the session `CURRENT` points at");
+            session
+        }
+        Ok(None) => store
+            .open_or_create_session(astroctl_session::store::NewSession {
+                slug: DEFAULT_SESSION_SLUG.to_owned(),
+                target: None,
+                equipment: astroctl_session::Equipment::from(&config.equipment),
+            })
+            .await
+            .map_err(|e| format!("cannot create a session: {e}"))?,
+        Err(error) => {
+            return Err(format!("cannot open the session `CURRENT` points at: {error}").into())
+        }
+    };
+
+    tracing::info!(
+        session = %session.id(),
+        dir = %session.dir().display(),
+        "session open"
+    );
+    Ok(store)
+}
+
+/// Build the configured camera driver through the HAL registry (SDD §5.1, §8.1; HAL-07).
+///
+/// [`build_mount`]'s twin, and the second of the two places in the workspace that names a concrete
+/// driver (ADD §5.6 rule 1). There is no safety wrapper on the way out, and that asymmetry is the
+/// design rather than an omission: ADR-11 wraps the mount because a mount can drive a telescope into
+/// a pier, and nothing a camera is asked to do can move anything.
+///
+/// `profile` is a parameter for the reason SDD §9 gives for the fault plans: a simulator's timings
+/// are a value a *test* writes down, not something an operator can switch on in production YAML.
+/// The binary passes the measured R10 profile; the test fixtures pass `CameraProfile::fast()`, and
+/// still come through this function so they exercise the registry lookup the operator's
+/// `camera.driver` actually goes through.
+fn build_camera(
+    config: &FieldConfig,
+    profile: astroctl_drivers::simulator::CameraProfile,
+) -> Result<Arc<dyn astroctl_hal::camera::Camera>, Box<dyn std::error::Error>> {
+    let mut registry = astroctl_hal::registry::DriverRegistry::new();
+    registry
+        .register_camera(
+            astroctl_drivers::simulator::SimulatorCameraFactory::new().with_profile(profile),
+        )
+        .map_err(|e| format!("cannot register the simulator camera driver: {e}"))?;
+
+    registry
+        .create_camera(config.camera.driver.as_str(), &config.camera)
+        .map_err(|e| {
+            format!(
+                "cannot build the camera driver named by `camera.driver` ({}): {e}",
+                config.camera.driver.as_str()
+            )
+            .into()
+        })
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

@@ -1163,10 +1163,10 @@ mod tests {
         )
     }
 
-    fn node() -> AppState {
+    async fn node() -> AppState {
         let node = crate::test_support::TestNode::open_loopback();
         let (_, declarations) = crate::api::router();
-        crate::test_support::state_with(&node, declarations)
+        crate::test_support::state_with(&node, declarations).await
     }
 
     /// Wait until the tube is actually moving, not merely until the node says `slewing`.
@@ -1220,7 +1220,7 @@ mod tests {
     async fn a_second_goto_is_refused_with_a_busy_envelope() {
         // The §5.8.1 acceptance criterion. Two concurrent gotos: the second must be told the
         // node is busy, not silently retarget the slew the operator is watching.
-        let state = node();
+        let state = node().await;
         let (status, _) = call(
             &state,
             axum::http::Method::POST,
@@ -1266,7 +1266,7 @@ mod tests {
         // The first screen of the app polls this before anything is connected. A 409 here would
         // make "you have not pressed Connect yet" render as an error, and would not match the
         // shape the PWA parses.
-        let state = node();
+        let state = node().await;
         let (status, body) = call(&state, axum::http::Method::GET, "/api/mount/status", None).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["state"], "disconnected");
@@ -1280,7 +1280,7 @@ mod tests {
     async fn a_goto_on_a_disconnected_mount_is_409_not_422() {
         // `NOT_CONNECTED` is device *state*, not a malformed request. A 422 here would send the
         // operator looking for a typo in coordinates that were fine.
-        let state = node();
+        let state = node().await;
         let (status, envelope) = call(
             &state,
             axum::http::Method::POST,
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_out_of_range_coordinate_is_a_validation_failure() {
-        let state = node();
+        let state = node().await;
         // Declination, not right ascension: RA is cyclic and `RaHours::new` normalises 25 h to
         // 1 h on purpose, so it is the wrong axis to test a range refusal on. Declination has
         // actual poles.
@@ -1313,7 +1313,7 @@ mod tests {
     async fn an_unknown_body_field_is_refused_rather_than_ignored() {
         // `deny_unknown_fields` on every request body: a client sending `ra` instead of
         // `ra_hours` must be told, not silently pointed at declination zero.
-        let state = node();
+        let state = node().await;
         let (status, _) = call(
             &state,
             axum::http::Method::POST,
@@ -1328,7 +1328,7 @@ mod tests {
     async fn tracking_reports_the_rate_the_mount_settled_on() {
         // Decision 1, end to end: the response and the event both name the rate, so the UI can
         // show which one is running instead of remembering the last button pressed.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1363,7 +1363,7 @@ mod tests {
     async fn the_slew_ttl_is_clamped_server_side_rather_than_refused() {
         // §5.8.1: "default 500 ms, max 2000 ms, clamped server-side". A 422 would leave the
         // D-pad dead; clamping leaves it working and renewing more often than the client planned.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1403,7 +1403,7 @@ mod tests {
     async fn connect_publishes_a_status_event_without_waiting_for_the_poll() {
         // The operator pressed Connect and is watching the badge. A state change the node
         // already knows about must not sit behind a one-second timer.
-        let state = node();
+        let state = node().await;
         let mut events = state.bus.subscribe();
 
         call(
@@ -1428,7 +1428,7 @@ mod tests {
     async fn a_bare_post_with_no_body_connects() {
         // `curl -XPOST` sends no body and no content type. Answering that with a 415 or a 422
         // would make the documented curl session fail on its first line.
-        let state = node();
+        let state = node().await;
         let (status, _) = call(&state, axum::http::Method::POST, "/api/mount/connect", None).await;
         assert_eq!(status, StatusCode::OK);
     }
@@ -1439,7 +1439,7 @@ mod tests {
         // fields M1-T03 left `null` are populated, and by the same transform the limit uses (the
         // agreement with an independent reference is asserted in `astroctl-safety`, against
         // astropy, where the transform lives).
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1502,7 +1502,7 @@ mod tests {
         // the part that matters — that the telescope was not asked to move. A wrapper that
         // refused *after* forwarding would pass the first two assertions while slewing into the
         // ground.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1555,7 +1555,7 @@ mod tests {
         // §5.8.2: "auth only, no JSON parsing — empty body accepted". `curl -X POST` sends no
         // body and no content type, and the PWA's `keepalive` fetch sends none either. A 415 or a
         // 422 here would be the e-stop failing on the most ordinary way to call it.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1573,7 +1573,7 @@ mod tests {
     async fn the_estop_route_ignores_a_body_it_was_sent_anyway() {
         // The other half of "no JSON parsing": a client that sends something must not be refused
         // for it. There is no request shape that turns this route into a 4xx.
-        let state = node();
+        let state = node().await;
         let (status, _) = call(
             &state,
             axum::http::Method::POST,
@@ -1590,7 +1590,7 @@ mod tests {
         // to; the operator then reaches for the button. Two things must hold, and only the second
         // is obvious: the route has to *answer* (it is not queued behind the slew), and the slew
         // has to *stop*.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1661,7 +1661,7 @@ mod tests {
         // holding an in-flight record whose task would not resolve until the *originally planned*
         // finish, and the operator recovering from an emergency stop is the last person who
         // should be told to wait for a slew that is not happening.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1702,7 +1702,7 @@ mod tests {
         // cleared the slot unconditionally it would remove the *second* goto's record, and the
         // node would then answer `202` to a third while two were in flight — the exact confusion
         // the in-flight slot exists to prevent (§5.8.1).
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1752,7 +1752,7 @@ mod tests {
         // M1-T02's handoff defect, end to end through the e-stop route: `ABORTED`/409 says
         // something stopped the mount, `DEVICE_REJECTED`/422 would say the operator's goto was
         // malformed at the exact moment their emergency stop worked.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1796,7 +1796,7 @@ mod tests {
         // The route and the wrapper must agree about the window, because the app renews against
         // what the route reported and the wrapper stops the axis by what it recorded. One
         // resolution, in `SafeMount::resolve_ttl`, is what makes them the same number.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1836,7 +1836,7 @@ mod tests {
         //
         // The property under test is the one `main` depends on: once the facade and the state
         // are gone, a subscriber sees `Closed`. If it does not, some sender survived.
-        let state = node();
+        let state = node().await;
         call(
             &state,
             axum::http::Method::POST,
@@ -1877,7 +1877,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_ws_ticket_is_issued_and_is_thirty_seconds_long() {
-        let state = node();
+        let state = node().await;
         let (status, body) = call(
             &state,
             axum::http::Method::POST,
@@ -1896,7 +1896,7 @@ mod tests {
         // the same function, so the assertion is that the two numbers are bit-for-bit the same
         // rather than close: anything looser would let a second transform creep in later and
         // still pass.
-        let state = node();
+        let state = node().await;
         let pos = RaDec::from_parts(5.5, 22.0).expect("valid");
         let wire = to_wire_position(&state.mount.device, pos);
         let horizontal = state.mount.device.horizontal(pos);

@@ -178,6 +178,10 @@ pub struct AppState {
     pub proxy: Arc<StackProxy>,
     /// The mount facade (SDD §5.8, M1-T03) — the routes and the 1 Hz poll share this.
     pub mount: Arc<crate::mount::MountFacade>,
+    /// The camera facade (SDD §5.3.2, §5.6, M1-T08) — the routes, the capture task and the 60 s
+    /// status poll share this. It carries the frame store, so `/api/session/*` reaches the session
+    /// through the same handle that writes to it.
+    pub camera: Arc<crate::camera::CameraFacade>,
     /// Outstanding WebSocket tickets (SDD §4.5).
     pub tickets: Arc<crate::ticket::TicketStore>,
     /// The latest event per stateful topic, for the connect snapshot (SDD §5.8.3).
@@ -544,7 +548,7 @@ mod tests {
     /// Drive the real router, with auth, exactly as `main` assembles it.
     async fn call(node: &TestNode, path: &str, token: Option<&str>) -> (StatusCode, Value) {
         let (router, declarations) = router();
-        let state = state_with(node, declarations);
+        let state = state_with(node, declarations).await;
         let auth = Arc::clone(&state.auth);
         let app = with_auth(router.with_state(state), auth);
 
@@ -623,7 +627,7 @@ mod tests {
     async fn health_reports_ok_once_the_watchdogs_are_running() {
         let node = TestNode::authenticated("s3cret");
         let (router, declarations) = router();
-        let state = state_with(&node, declarations);
+        let state = state_with(&node, declarations).await;
         state.status.set(NodeStatus::Ok);
         let auth = Arc::clone(&state.auth);
         let app = with_auth(router.with_state(state), auth);
@@ -690,7 +694,7 @@ mod tests {
     /// `starting`, and the degraded reading only applies once the lifecycle has reached `ok`.
     async fn health_of_started(node: &TestNode) -> Value {
         let (router, declarations) = router();
-        let state = state_with(node, declarations);
+        let state = state_with(node, declarations).await;
         state.status.set(NodeStatus::Ok);
         let auth = Arc::clone(&state.auth);
         let app = with_auth(router.with_state(state), auth);
@@ -872,12 +876,12 @@ mod tests {
             body["config"]["stacking_server"]["upstream"],
             "http://192.168.1.100:8471"
         );
-        // The fixture rewrites `mount.driver` to `simulator` (see `test_support`): the example
-        // config selects skywatcher, which is right for the operator and unbuildable on a
-        // machine with no telescope. What matters here is that `info` reports the driver the
-        // config actually named, whichever that is.
+        // The fixture rewrites `mount.driver` and `camera.driver` to `simulator` (see
+        // `test_support`): the example config selects skywatcher and gphoto2, which are right for
+        // the operator and unbuildable on a machine with no telescope and no camera. What matters
+        // here is that `info` reports the drivers the config actually named, whichever those are.
         assert_eq!(body["config"]["mount_driver"], "simulator");
-        assert_eq!(body["config"]["camera_driver"], "gphoto2");
+        assert_eq!(body["config"]["camera_driver"], "simulator");
         assert!(body["drivers"].as_array().expect("list").is_empty());
     }
 

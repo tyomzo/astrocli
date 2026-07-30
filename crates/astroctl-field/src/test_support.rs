@@ -28,7 +28,7 @@ impl TestNode {
     /// A node bound to `0.0.0.0` with a token — the production posture.
     pub fn authenticated(token: &str) -> Self {
         Self {
-            yaml: simulated_mount(EXAMPLE),
+            yaml: simulated_devices(EXAMPLE),
             token: Some(token.to_owned()),
         }
     }
@@ -36,9 +36,54 @@ impl TestNode {
     /// A node with no token, bound to loopback — the SDD §4.5 exception.
     pub fn open_loopback() -> Self {
         Self {
-            yaml: simulated_mount(&EXAMPLE.replace("host: 0.0.0.0", "host: 127.0.0.1")),
+            yaml: simulated_devices(&EXAMPLE.replace("host: 0.0.0.0", "host: 127.0.0.1")),
             token: None,
         }
+    }
+
+    /// Drive the disk thresholds above the free space of any real volume, so the REL-12 critical
+    /// branch fires without needing a full disk.
+    ///
+    /// The alternative — a loopback filesystem sized to fill — needs root and a mount, which is
+    /// not something a unit test may do. Moving the *threshold* exercises the same comparison from
+    /// the same `statvfs` reading, which is the part under test.
+    pub fn with_disk_critical_above_any_volume(mut self) -> Self {
+        self.yaml = self
+            .yaml
+            .replace("disk_warn_free_gb: 20", "disk_warn_free_gb: 99000")
+            .replace("disk_critical_free_gb: 5", "disk_critical_free_gb: 98000");
+        self
+    }
+
+    /// Pin `camera.default_shutter`.
+    pub fn with_shutter(mut self, shutter: &str) -> Self {
+        self.yaml = self.yaml.replace(
+            "default_shutter: \"30\"",
+            &format!("default_shutter: \"{shutter}\""),
+        );
+        self
+    }
+
+    /// Pin `camera.default_format`.
+    pub fn with_format(mut self, format: &str) -> Self {
+        self.yaml = self.yaml.replace(
+            "default_format: \"RAW+JPEG\"",
+            &format!("default_format: \"{format}\""),
+        );
+        self
+    }
+
+    /// Pin `camera.timeouts.download_seconds`, so a slow simulated download breaches it.
+    ///
+    /// SDD §5.3.1's wedged-camera path is only reachable by making the download longer than its
+    /// operation-class budget, and the budget is config while the download is a profile knob — so
+    /// a test of that path has to move both.
+    pub fn with_download_timeout(mut self, seconds: u64) -> Self {
+        self.yaml = self.yaml.replace(
+            "download_seconds: 120",
+            &format!("download_seconds: {seconds}"),
+        );
+        self
     }
 
     /// Pin `server.runtime_worker_threads`.
@@ -110,21 +155,60 @@ impl TestNode {
     }
 }
 
-/// Point `mount.driver` at the simulator.
+/// Point `mount.driver` and `camera.driver` at the simulators, and the session store at a
+/// directory a test may write to.
 ///
-/// The example ships `driver: skywatcher`, which is right for the operator and wrong for a test
-/// suite that has no telescope: the registry would refuse to build it and every route test would
-/// fail at startup rather than at what it was testing. Rewriting the key rather than
-/// special-casing the driver in [`state_with`] means the tests still go through the real
-/// registry lookup, so a driver name that stopped resolving would be caught here.
-fn simulated_mount(yaml: &str) -> String {
-    let simulated = yaml.replace("driver: skywatcher", "driver: simulator");
+/// The example ships `driver: skywatcher` and `driver: gphoto2`, which are right for the operator
+/// and wrong for a test suite that has neither a telescope nor a camera: the registry would refuse
+/// to build them and every route test would fail at startup rather than at what it was testing.
+/// Rewriting the keys rather than special-casing the drivers in [`state_with`] means the tests
+/// still go through the real registry lookup, so a driver name that stopped resolving would be
+/// caught here.
+///
+/// `storage.sessions_dir` moves for a blunter reason: `/data/astro/sessions` is the operator's
+/// path and does not exist on a build machine, and `FrameStore::open` creates what it is given —
+/// so leaving it would have the test suite try to create a directory at the filesystem root.
+fn simulated_devices(yaml: &str) -> String {
+    let simulated = yaml
+        .replace("driver: skywatcher", "driver: simulator")
+        .replace("driver: gphoto2", "driver: simulator");
     assert_ne!(
         simulated, yaml,
-        "config/field-node.example.yaml no longer selects the skywatcher mount driver, so the \
-         test fixtures are silently running against whatever it does select"
+        "config/field-node.example.yaml no longer selects the skywatcher mount and gphoto2 camera \
+         drivers, so the test fixtures are silently running against whatever it does select"
     );
-    simulated
+
+    let sessions = simulated.replace(
+        "sessions_dir: /data/astro/sessions",
+        &format!("sessions_dir: {}", sessions_dir().display()),
+    );
+    assert_ne!(
+        sessions, simulated,
+        "config/field-node.example.yaml no longer puts sessions at /data/astro/sessions, so the \
+         test suite is about to write frames wherever it now points"
+    );
+    sessions
+}
+
+/// A session root nothing else is using.
+///
+/// Under the OS temporary directory rather than `target/`, because `CARGO_TARGET_TMPDIR` is only
+/// set for integration tests and these are unit tests. Not deleted on drop: the fixture that owns
+/// the path is routinely dropped while the `AppState` built from it is still serving requests
+/// (see `mount.rs`'s `node()`), so a `Drop` guard here would delete the session directory out from
+/// under a running test. The frames are 128×96 (see [`state_with`]), so what accumulates is
+/// kilobytes in a directory the OS already sweeps.
+fn sessions_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    std::env::temp_dir()
+        .join("astroctl-field-tests")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
 }
 
 /// Append a block to the end of the example, which lands it inside `server`.
@@ -146,7 +230,31 @@ fn append_under_server(yaml: &str, block: &str) -> String {
 }
 
 /// Build application state for a node, with the route table the router just declared.
-pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
+///
+/// Async since M1-T08 because opening the frame store is: `FrameStore::open` creates the session
+/// root and sweeps leftover temporaries, which is I/O and is `tokio::fs`. Doing it here rather
+/// than lazily in a route means a test drives the same "session is already open" precondition the
+/// binary establishes at startup (SDD §8.1).
+pub async fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
+    state_with_camera(
+        node,
+        routes,
+        astroctl_drivers::simulator::CameraProfile::fast(),
+    )
+    .await
+}
+
+/// [`state_with`], for a test whose subject is the camera's timing.
+///
+/// `CameraProfile::fast()` is the right default — 128×96 and no latency, because the measured R10
+/// profile is a 48 MB frame and a 2 s download and a test suite is not the place to find out how
+/// long that takes forty times over — but a test of SDD §5.3.1's operation-class timeout needs a
+/// download that actually takes time.
+pub async fn state_with_camera(
+    node: &TestNode,
+    routes: Vec<RouteDecl>,
+    profile: astroctl_drivers::simulator::CameraProfile,
+) -> AppState {
     let config = node.config();
     let auth = AuthPolicy::resolve("ASTROCTL_TOKEN", node.token.as_deref(), node.bind())
         .expect("the fixture posture must be startable");
@@ -174,6 +282,20 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
         &config.mount,
     ));
 
+    // Through `open_session` and `build_camera`, for the reason the mount goes through
+    // `build_mount`: a test that assembled its own approximation would keep passing after the
+    // binary's startup sequence changed.
+    let store = Arc::new(
+        crate::open_session(&config)
+            .await
+            .expect("the fixture must open a session"),
+    );
+    let camera = Arc::new(crate::camera::CameraFacade::new(
+        crate::build_camera(&config, profile).expect("the fixture must build a camera driver"),
+        Arc::clone(&store),
+        bus.clone(),
+    ));
+
     AppState {
         proxy: Arc::new(StackProxy::new(&config.stacking_server)),
         runtime: RuntimeSizing {
@@ -193,6 +315,7 @@ pub fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
             error: None,
         },
         mount,
+        camera,
         tickets: Arc::new(crate::ticket::TicketStore::new()),
         snapshots: Arc::new(crate::ws::SnapshotStore::new()),
     }

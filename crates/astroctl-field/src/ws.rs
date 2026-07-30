@@ -875,7 +875,8 @@ mod e2e {
             let state = state_with(
                 &node,
                 declarations.into_iter().chain(ws_declarations).collect(),
-            );
+            )
+            .await;
             let app = crate::assemble(router, ws_router, state.clone());
 
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

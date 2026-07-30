@@ -349,7 +349,8 @@ mod tests {
         let state = state_with(
             node,
             declarations.into_iter().chain(ws_declarations).collect(),
-        );
+        )
+        .await;
         let app = crate::assemble(router, ws_router, state);
 
         let mut request = Request::builder().method(method).uri(path);
@@ -658,7 +659,8 @@ mod tests {
         let state = state_with(
             &node,
             declarations.into_iter().chain(ws_declarations).collect(),
-        );
+        )
+        .await;
         let app = crate::assemble(router, ws_router, state);
 
         let mut responses = Vec::new();
