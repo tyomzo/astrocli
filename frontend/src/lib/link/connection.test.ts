@@ -107,6 +107,11 @@ function harness(): Harness {
       },
       random: () => 0.5, // no jitter, so delays are exactly the exponential series
       dispatch: (action) => state.actions.push(action),
+      // The real one folds the sample into `lib/clock.ts`; here the arithmetic is the assertion.
+      // A `null` server time must produce no `link/skew` at all, which is what makes "a node older
+      // than this bundle is normal" (§5.8.3) true rather than a silent zero.
+      recordServerTime: (serverTime, sentAt, receivedAt) =>
+        serverTime === null ? null : Date.parse(serverTime) - (sentAt + (receivedAt - sentAt) / 2),
     },
   };
 
@@ -329,6 +334,44 @@ describe('a link that stops carrying traffic', () => {
 
     const rtt = h.actions.filter((action) => action.type === 'link/rtt').at(-1);
     expect(rtt?.type === 'link/rtt' && rtt.rttMs).toBe(120);
+    // A pong with no `server_time` measures no clock offset. Dispatching a zero would tell the UI
+    // the clocks agree on the strength of a node that never said so (SDD §5.8.1).
+    expect(h.actions.filter((action) => action.type === 'link/skew')).toEqual([]);
+  });
+
+  /*
+   * The skew measurement rides on the same ping — SDD §5.8.1, §8.3(4), M1-T10.
+   *
+   * Asserted here rather than only in `clock.test.ts` because the wiring is what can silently
+   * rot: `protocol.ts` has parsed `server_time` since M1-T04 and nothing read it, which is
+   * exactly how a value ends up on the wire and nowhere else.
+   */
+  it('folds the pong’s server time into a clock offset', async () => {
+    const h = harness();
+    createLink(h.env).start();
+    await h.flush();
+    const socket = h.sockets[0];
+    socket?.handlers.onOpen();
+    socket?.handlers.onFrame(snapshotFrame);
+
+    h.advance(5000);
+    const ping: unknown = JSON.parse(socket?.sent[0] ?? '{}');
+    const id = (ping as { id: number }).id;
+    h.advance(200);
+    // The harness clock reads 5200 and the ping left at 5000, so the midpoint is 5100. A node
+    // reporting 65 100 is sixty seconds ahead of this device.
+    socket?.handlers.onFrame(
+      JSON.stringify({
+        v: 1,
+        type: 'pong',
+        ts: '',
+        id,
+        server_time: new Date(65_100).toISOString(),
+      }),
+    );
+
+    const skew = h.actions.filter((action) => action.type === 'link/skew').at(-1);
+    expect(skew?.type === 'link/skew' && skew.skewMs).toBe(60_000);
   });
 
   it('counts an unreadable frame as traffic — a newer node must not look like a dead link', async () => {

@@ -1,5 +1,6 @@
 import type { RequestFailure, RequestResult, WsTicket } from '../api';
 import { WS_TICKET, eventSocketUrl, postJson } from '../api';
+import { recordServerTime } from '../clock';
 import type { LinkAction } from '../../store/telemetry';
 import { dispatch as dispatchTelemetry } from '../../store/telemetry';
 import type { TelemetryEvent } from './protocol';
@@ -105,6 +106,16 @@ export interface LinkEnvironment {
   /** [0, 1) — jitter only. */
   random(): number;
   dispatch(action: LinkAction): void;
+  /**
+   * Fold an answered ping into the clock estimate, returning the skew now believed (SDD §5.8.1).
+   *
+   * Injected like everything else here so the reconnect tests stay pure, and separate from
+   * `dispatch` because it has two consumers that must not be collapsed: `lib/clock.ts` corrects
+   * `issued_at` on every command, and the store carries the number only so the UI can warn. If the
+   * warning were the only consumer, a skewed clock would be *reported* and every goto would still
+   * be refused.
+   */
+  recordServerTime(serverTime: string | null, sentAt: number, receivedAt: number): number | null;
 }
 
 export interface Link {
@@ -238,6 +249,14 @@ export function createLink(env: LinkEnvironment): Link {
             pingsInFlight.delete(frame.id);
             if (sentAt !== undefined) {
               env.dispatch({ type: 'link/rtt', rttMs: lastFrameAt - sentAt });
+              // The clock measurement rides on the ping that already exists (SDD §5.8.1,
+              // §8.3(4)). `sentAt` and `lastFrameAt` bracket the node's reading, which is what
+              // lets the estimate subtract transit instead of counting it as offset — see
+              // `lib/clock.ts`.
+              const skewMs = env.recordServerTime(frame.serverTime, sentAt, lastFrameAt);
+              if (skewMs !== null) {
+                env.dispatch({ type: 'link/skew', skewMs });
+              }
             }
             return;
           }
@@ -362,5 +381,6 @@ export function browserEnvironment(getToken: () => string | null): LinkEnvironme
     clearTimer: (handle) => window.clearTimeout(handle),
     random: () => Math.random(),
     dispatch: dispatchTelemetry,
+    recordServerTime,
   };
 }
