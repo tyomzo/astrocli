@@ -87,6 +87,14 @@ rustix = { version = "1", features = ["fs"] }
 # the auth/route-metadata tests assert on real responses rather than on handler return values.
 tower = { version = "0.5", features = ["util"] }
 
+# --- added by M1-T01 (HAL traits) ---
+# What makes the HAL traits usable as `Arc<dyn MountDevice>` (SDD §5.1, §2). Native
+# async-fn-in-trait is stable on this toolchain but is not dyn-compatible, and every consumer
+# above the HAL holds a trait object rather than a driver type (ADD §5.6 rule 1) — so the boxing
+# is not a stopgap for a missing feature, it is the feature. One heap allocation per device call
+# is invisible against a 16 ms serial round trip (SDD §5.2.4).
+async-trait = { version = "0.1" }
+
 # --- added by M0-T06 (frontend pipeline) ---
 # The built PWA compiled into the field binary (ARC-02: "deployment is a single service"). Chosen
 # over `rust-embed` because it is a plain proc macro over a directory with no runtime, no feature

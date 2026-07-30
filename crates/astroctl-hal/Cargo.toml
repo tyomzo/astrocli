@@ -10,6 +10,18 @@ publish.workspace = true
 
 [dependencies]
 astroctl-core = { workspace = true }
+# M1-T01. `async-trait` is what makes the traits `dyn`-usable (rationale in the workspace
+# manifest); `tokio` is here only for `sync::watch`, the latest-only channel every frame stream
+# is built on (SDD §5.3.1, §5.8.3) — this crate starts no runtime and performs no I/O.
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# The test doubles hand `Arc<dyn …>` to spawned tasks, which needs a real runtime.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

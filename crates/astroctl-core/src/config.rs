@@ -620,6 +620,24 @@ pub enum MountDriver {
     Simulator,
 }
 
+impl MountDriver {
+    /// The name this selection resolves to in the HAL driver registry (HAL-07, SDD §5.1).
+    ///
+    /// The registry is keyed by these strings — a driver whose factory reports a different
+    /// spelling is simply unreachable from configuration, and the failure is a startup error
+    /// naming a driver the operator can see in their own YAML. The test below pins each string
+    /// to what serde accepts, so the two spellings cannot drift apart.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skywatcher => "skywatcher",
+            Self::Indi => "indi",
+            Self::AscomAlpaca => "ascom_alpaca",
+            Self::Simulator => "simulator",
+        }
+    }
+}
+
 /// Mount configuration (PRD §8.1 `mount`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -802,6 +820,21 @@ pub enum CameraDriver {
     Simulator,
 }
 
+impl CameraDriver {
+    /// The name this selection resolves to in the HAL driver registry (HAL-07, SDD §5.1).
+    ///
+    /// See [`MountDriver::as_str`] for why the registry is keyed by these strings.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gphoto2 => "gphoto2",
+            Self::Indi => "indi",
+            Self::AscomAlpaca => "ascom_alpaca",
+            Self::Simulator => "simulator",
+        }
+    }
+}
+
 /// A camera operation that may be routed through the `gphoto2` binary instead of the crate
 /// bindings (PRD §8.1 `camera.ops_via_cli`, SDD §5.3.3).
 ///
@@ -921,6 +954,21 @@ pub enum GuideCameraDriver {
     Indi,
     /// In-process simulator.
     Simulator,
+}
+
+impl GuideCameraDriver {
+    /// The name this selection resolves to in the HAL driver registry (HAL-07, SDD §5.1).
+    ///
+    /// See [`MountDriver::as_str`] for why the registry is keyed by these strings.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asi => "asi",
+            Self::Qhy => "qhy",
+            Self::Indi => "indi",
+            Self::Simulator => "simulator",
+        }
+    }
 }
 
 /// Guide camera (PRD §8.1 `guide_camera`). `driver: null` disables guiding hardware.
@@ -2520,5 +2568,59 @@ mod tests {
                 .contains("/nonexistent/astroctl/field-node.yaml"),
             "{err}"
         );
+    }
+
+    // --- driver names (HAL-07) -------------------------------------------------------------
+
+    #[test]
+    fn driver_names_are_the_spelling_the_operator_writes() {
+        // The HAL registry (SDD §5.1) is keyed by `as_str()`. If it ever stopped agreeing with
+        // what serde accepts, a valid `field-node.yaml` would fail at startup with "no mount
+        // driver named `…`" — naming a driver that is registered. Assert the round trip on
+        // every variant, in YAML, because YAML is what the operator actually writes.
+        for driver in [
+            MountDriver::Skywatcher,
+            MountDriver::Indi,
+            MountDriver::AscomAlpaca,
+            MountDriver::Simulator,
+        ] {
+            let name = driver.as_str();
+            assert_eq!(
+                yaml_serde::from_str::<MountDriver>(name).expect("name deserializes"),
+                driver,
+                "mount driver `{name}`"
+            );
+        }
+        for driver in [
+            CameraDriver::Gphoto2,
+            CameraDriver::Indi,
+            CameraDriver::AscomAlpaca,
+            CameraDriver::Simulator,
+        ] {
+            let name = driver.as_str();
+            assert_eq!(
+                yaml_serde::from_str::<CameraDriver>(name).expect("name deserializes"),
+                driver,
+                "camera driver `{name}`"
+            );
+        }
+        for driver in [
+            GuideCameraDriver::Asi,
+            GuideCameraDriver::Qhy,
+            GuideCameraDriver::Indi,
+            GuideCameraDriver::Simulator,
+        ] {
+            let name = driver.as_str();
+            assert_eq!(
+                yaml_serde::from_str::<GuideCameraDriver>(name).expect("name deserializes"),
+                driver,
+                "guide camera driver `{name}`"
+            );
+        }
+
+        // And the example config's own selections resolve, which is the path startup takes.
+        let cfg = field(FIELD_EXAMPLE).expect("loads");
+        assert_eq!(cfg.mount.driver.as_str(), "skywatcher");
+        assert_eq!(cfg.camera.driver.as_str(), "gphoto2");
     }
 }
