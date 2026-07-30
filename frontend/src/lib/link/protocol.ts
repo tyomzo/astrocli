@@ -48,7 +48,7 @@ export type WorkerState = 'starting' | 'ready' | 'busy' | 'restarting' | 'failed
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 
 /**
- * The closed `ErrorCode` set of SDD §4.2 — 20 codes, the order of `ErrorCode::ALL`.
+ * The closed `ErrorCode` set of SDD §4.2 — 24 codes, the order of `ErrorCode::ALL`.
  *
  * Exported as a value as well as a type because the UI switches on these strings and a typo in a
  * `case` label is otherwise silent.
@@ -73,6 +73,12 @@ export const ERROR_CODES = [
   'FRAME_ID_CONFLICT',
   'DISK_FULL',
   'NOT_FOUND',
+  // The worker vocabulary (SDD §4.2 change note, 2026-07-30) — added so supervisor failures do
+  // not collapse onto INTERNAL: a crashed worker being restarted and a bug are different walks.
+  'CANCELLED',
+  'WORKER_UNAVAILABLE',
+  'WORKER_CRASHED',
+  'WORKER_TIMEOUT',
   'INTERNAL',
 ] as const;
 
@@ -151,9 +157,10 @@ export interface StackStatus {
  *
  * `code` is a bare string rather than [`ErrorCode`]: §4.3 says it is "the stable machine-readable
  * identifier the UI switches on", and the codes that reach it are a superset of the error set —
- * `astroctl-ipc` publishes `WORKER_PROTO_MISMATCH`, `WORKER_UNAVAILABLE`, `WORKER_RESTARTED` and
- * `WORKER_JOB_FAILED` on this topic and none of them is an `ErrorCode`. Typing it as `ErrorCode`
- * would have made a real alert unparseable.
+ * `astroctl-ipc` publishes alert-only codes such as `WORKER_PROTO_MISMATCH` and
+ * `WORKER_RESTARTED` on this topic, and `DISK_LOW` is alert-only by design (§4.2). Typing it as
+ * [`ErrorCode`] would have made a real alert unparseable. (Four worker codes *are* in the error
+ * set since 2026-07-30, but the superset argument stands on the others.)
  */
 export interface Alert {
   severity: AlertSeverity;
