@@ -1,15 +1,19 @@
 import { create } from 'zustand';
 
-import { dispatch } from './nodes';
+import { dispatch as dispatchNodes } from './nodes';
+import { dispatch as dispatchTelemetry } from './telemetry';
 
 /*
  * The operator's bearer token (SDD §4.5, SEC-02).
  *
- * TODO(M1-T04): replace this with the **connect panel** — SDD §5.9 lists it first among the
- * Phase 1 screens, and it is what turns "paste a token into a text box on the health screen"
- * into onboarding: enter the field node's address and token once, get a clear 401 diagnosis
- * rather than a generic failure, and drive the `/api/auth/ws-ticket` exchange the socket needs.
- * Until then this store is the whole of it.
+ * `screens/ConnectPanel.tsx` is the UI over it (the connect panel SDD §5.9 lists first among the
+ * Phase 1 screens). The node *address* the M0-T06 TODO expected this store to grow is not here
+ * and will not be: the bundle is served by the field node, so the address is the origin the app
+ * was loaded from — see the panel for the full reasoning.
+ *
+ * Changing the credential resets **both** event-fed stores, because everything either of them
+ * holds was learned under the old one, and `lib/link/useEventLink.ts` then tears down the socket
+ * and reconnects with a ticket minted from the new token.
  *
  * `localStorage`, not `sessionStorage` or a cookie. It has to survive the app being launched from
  * the home screen, killed by Android's memory manager and relaunched mid-session — the operator is
@@ -60,15 +64,20 @@ export const useTokenStore = create<TokenStore>()((set) => ({
   set: (token) => {
     const trimmed = token.trim();
     write(trimmed === '' ? null : trimmed);
-    // Everything already in the node store was observed under the previous credential.
-    dispatch({ type: 'session/reset' });
+    // Everything already in either store was observed under the previous credential.
+    reset();
     set({ token: trimmed === '' ? null : trimmed });
   },
   clear: () => {
     write(null);
-    dispatch({ type: 'session/reset' });
+    reset();
     set({ token: null });
   },
 }));
+
+function reset(): void {
+  dispatchNodes({ type: 'session/reset' });
+  dispatchTelemetry({ type: 'session/reset' });
+}
 
 export const currentToken = (): string | null => useTokenStore.getState().token;

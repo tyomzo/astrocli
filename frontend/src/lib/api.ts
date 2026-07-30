@@ -57,6 +57,35 @@ export const FIELD_HEALTH = '/api/system/health';
  */
 export const STACK_HEALTH = '/stack/api/system/health';
 
+/** Single-use WebSocket ticket — SDD §4.5, §5.8.1. */
+export const WS_TICKET = '/api/auth/ws-ticket';
+
+/** The control/status socket — SDD §5.8.1. Binary frames live on `/ws/liveview` (M1-T09). */
+export const WS_EVENTS = '/ws';
+
+/** `POST /api/auth/ws-ticket` → 200. */
+export interface WsTicket {
+  ticket: string;
+  expires_in: number;
+}
+
+/**
+ * The socket URL for one ticket, on this same origin.
+ *
+ * Derived from `location` rather than configured, for the reason the whole module exists: the
+ * PWA is served by the field node, so the field node is wherever the PWA came from. Deriving it
+ * also gets the scheme right without a second decision — `https` ⇒ `wss`, and an operator who
+ * reached the app over TLS cannot end up with an unencrypted socket carrying their telemetry.
+ *
+ * The ticket goes in the query string, which is exactly what §4.5's single-use, 30-second,
+ * server-generated ticket exists to make safe: the long-lived bearer token never appears in a URL
+ * and therefore never reaches the node's access log.
+ */
+export function eventSocketUrl(ticket: string, location: URL | Location = window.location): string {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${location.host}${WS_EVENTS}?ticket=${encodeURIComponent(ticket)}`;
+}
+
 function assertSameOrigin(path: string): void {
   if (/^[a-z][a-z0-9+.-]*:/i.test(path) || path.startsWith('//')) {
     throw new Error(
@@ -107,39 +136,105 @@ export async function getJson<T>(path: string, token: string | null): Promise<Re
     }
   }
 
+  return { ok: false, failure: await readFailure(response, path, token) };
+}
+
+/**
+ * One authenticated POST — the command path (SDD §5.8.1).
+ *
+ * The success type is `T | null` because a command's answer is frequently nothing: some routes
+ * return the resulting status, `goto` returns `202 {correlation_id, watch_topic}`, and others
+ * would reasonably return `204`. Making the empty case explicit in the type is what stops a
+ * caller destructuring `undefined` on the one route that happens to be silent.
+ *
+ * `keepalive` exists for the stop path. A hold released by the phone being locked fires
+ * `pagehide`, and a normal `fetch` started in that handler is cancelled when the document goes
+ * away — the axis would then keep moving until the dead-man's TTL caught it. §8.3(5) puts stop
+ * traffic on the browser's separate keepalive-capable pool for the same reason.
+ *
+ * There is deliberately **no `issued_at`/`command_id` envelope** here yet: M1-T10 adds it across
+ * the whole mutation surface in one pass, on purpose, because a half-covered envelope looks
+ * enforced and is not.
+ */
+export async function postJson<T>(
+  path: string,
+  token: string | null,
+  body?: unknown,
+  options: { keepalive?: boolean } = {},
+): Promise<RequestResult<T | null>> {
+  assertSameOrigin(path);
+
+  const headers = new Headers({ Accept: 'application/json' });
+  if (token !== null) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (body !== undefined) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method: 'POST',
+      headers,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(options.keepalive === true ? { keepalive: true } : {}),
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+  } catch (error) {
+    return { ok: false, failure: { kind: 'transport', message: describe(error) } };
+  }
+
+  if (response.ok) {
+    const text = await response.text();
+    if (text.trim() === '') {
+      return { ok: true, value: null };
+    }
+    try {
+      return { ok: true, value: JSON.parse(text) as T };
+    } catch (error) {
+      return {
+        ok: false,
+        failure: {
+          kind: 'transport',
+          message: `${path} answered ${response.status} with something that is not JSON: ${describe(error)}`,
+        },
+      };
+    }
+  }
+
+  return { ok: false, failure: await readFailure(response, path, token) };
+}
+
+/** The §4.2 envelope, or the two ways there isn't one, for any non-2xx response. */
+async function readFailure(
+  response: Response,
+  path: string,
+  token: string | null,
+): Promise<RequestFailure> {
   const envelope = await readEnvelope(response);
   if (response.status === 401) {
     return {
-      ok: false,
-      failure: {
-        kind: 'unauthorized',
-        presented: token !== null,
-        message:
-          envelope?.message ??
-          (token !== null
-            ? 'the node rejected the bearer token'
-            : 'the node requires a bearer token'),
-      },
+      kind: 'unauthorized',
+      presented: token !== null,
+      message:
+        envelope?.message ??
+        (token !== null ? 'the node rejected the bearer token' : 'the node requires a bearer token'),
     };
   }
   if (envelope !== null) {
     return {
-      ok: false,
-      failure: {
-        kind: 'api',
-        status: response.status,
-        code: envelope.code,
-        message: envelope.message,
-        retryable: envelope.retryable,
-      },
+      kind: 'api',
+      status: response.status,
+      code: envelope.code,
+      message: envelope.message,
+      retryable: envelope.retryable,
     };
   }
   return {
-    ok: false,
-    failure: {
-      kind: 'transport',
-      message: `${path} answered ${response.status} without an error envelope`,
-    },
+    kind: 'transport',
+    message: `${path} answered ${response.status} without an error envelope`,
   };
 }
 

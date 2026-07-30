@@ -75,4 +75,12 @@
   .tabular {
     font-variant-numeric: tabular-nums;
   }
+
+  /* Every image surface — live view (M1-T09), stack preview (M1-T14) — carries this, so night
+     mode's red filter is a theme decision made once in tokens.css rather than a decision each
+     panel gets to make differently. A stretched star field is the most greyscale-white thing in
+     the app and destroys 20-30 minutes of dark adaptation in one glance (SDD §5.9). */
+  .image-surface {
+    filter: var(--image-filter);
+  }
 }

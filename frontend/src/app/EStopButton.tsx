@@ -13,10 +13,12 @@ import type { ReactNode } from 'react';
  *    capture use). It is also diagonally distant from the nudge badge in the image surface's
  *    bottom-right corner: the frequent control should be easy to reach and the irreversible one
  *    should take a deliberate stretch.
- *  * **Its unavailability is visible.** `/api/mount/estop` does not exist until M1-T03, so in M0
- *    this button cannot stop anything. Rendering it as if it could is the worst possible failure
- *    for this particular control, so it carries the hollow-plus-slash treatment SDD §5.9 defines
- *    for the nudge badge — shape first, colour second — and says why when tapped.
+ *  * **Its unavailability is visible.** `/api/mount/estop` does not exist until **M1-T05** (the
+ *    route is out of M1-T03's scope and M1-T05 lists "wire PWA header button live" in its own),
+ *    so in this build the button cannot stop anything. Rendering it as if it could is the worst
+ *    possible failure for this particular control, so it carries the hollow-plus-slash treatment
+ *    SDD §5.9 defines for the nudge badge — shape first, colour second — and says why when
+ *    tapped.
  *
  * Tapping it rather than `disabled`-ing it is deliberate: SDD §5.9 requires an unavailable
  * affordance to explain itself rather than silently doing nothing, and a `disabled` button fires
@@ -26,7 +28,7 @@ import type { ReactNode } from 'react';
 export function EStopButton(): ReactNode {
   const [explained, setExplained] = useState(false);
 
-  // M1-T03 lands `POST /api/mount/estop` (SDD §5.8.1) and this becomes a real command.
+  // M1-T05 lands `POST /api/mount/estop` (SDD §5.8.1/§5.8.2) and this becomes a real command.
   const armed = false;
 
   return (
@@ -53,9 +55,11 @@ export function EStopButton(): ReactNode {
           role="status"
           className="absolute top-full right-0 z-10 mt-2 w-64 rounded-md border border-edge bg-overlay p-3 text-sm text-fg"
         >
-          The e-stop is not connected in this build. The mount facade and{' '}
-          <code className="font-mono text-muted">/api/mount/estop</code> arrive with M1-T03 — until
-          then nothing in this app can move or stop a motor.
+          The e-stop is not connected in this build.{' '}
+          <code className="font-mono text-muted">/api/mount/estop</code> and the safety layer
+          behind it arrive with M1-T05. The D-pad&rsquo;s own stop works: releasing it sends
+          <code className="font-mono text-muted"> /api/mount/slew/stop</code>, and an unrenewed
+          slew lease expires on its own.
         </p>
       )}
     </div>

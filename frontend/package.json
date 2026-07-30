@@ -10,7 +10,10 @@
   },
   "scripts": {
     "dev": "vite",
+    "mock": "node mock/server.mjs",
     "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "icons": "node scripts/make-icons.mjs"
@@ -27,6 +30,8 @@
     "@vitejs/plugin-react": "6.0.4",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
-    "vite": "8.1.5"
+    "vite": "8.1.5",
+    "vitest": "4.1.10",
+    "ws": "8.21.1"
   }
 }
