@@ -54,6 +54,7 @@ use tokio::time::Instant;
 use super::fault::{garbled_error, ArmedFaults, FaultPlan, Injected, MountCommand};
 use super::motion::{slew_rate, tracking_rate, AxisPlan};
 use super::profile::{SimulatorProfile, SIDEREAL_DEG_PER_SEC};
+use super::sky::PointingSource;
 
 /// How far into a slew [`Fault::StallDuringSlew`](super::fault::Fault::StallDuringSlew) jams the
 /// axis. Past the ramp-up and well short of the target, so a stall is unambiguous: the mount
@@ -738,6 +739,31 @@ impl SimulatorMount {
         Ok(())
     }
 
+    /// Where this mount is aimed, for the simulated cameras (PRD §4.5, task M1-T06).
+    ///
+    /// The cameras generate their star field from *the simulated mount position*, and this is
+    /// how they get it. Three properties are deliberate:
+    ///
+    /// * **Synchronous and free.** [`position`](MountDevice::position) is `async` and charges two
+    ///   16 ms serial round trips, because a caller polling the mount over a cable should feel
+    ///   that. A frame generator is not that caller — it reads the *simulated mechanism*, which
+    ///   is a lock and some arithmetic — and making every synthetic frame pay 32 ms would put
+    ///   fictional serial latency inside an exposure.
+    /// * **It moves.** The axes evaluate against the clock, so a camera holding this sees the
+    ///   sky drift under a mount that is not tracking, and holds still under one that is. That is
+    ///   the property that makes a simulated unguided exposure trail.
+    /// * **`None` while disconnected**, which the camera answers by falling back to its own
+    ///   default pointing rather than failing: a camera whose mount is unplugged still takes
+    ///   frames.
+    ///
+    /// The type does not escape this crate's boundary rules — [`PointingSource`] is defined in
+    /// [`sky`](super::sky), a sibling module, and nothing outside `astroctl-drivers` learns that
+    /// a camera and a mount are related at all.
+    #[must_use]
+    pub fn pointing_source(self: &Arc<Self>) -> Arc<dyn PointingSource> {
+        Arc::new(MountPointing(Arc::clone(self)))
+    }
+
     /// Stops both axes dead and forgets tracking — the shared body of `emergency_stop`.
     ///
     /// Tracking stops too because on a Synta mount tracking *is* a slew: `L` on axis 1 stops the
@@ -752,6 +778,24 @@ impl SimulatorMount {
             axes.ra.halt(now, 0.0);
             axes.dec.halt(now, 0.0);
         }
+    }
+}
+
+/// The simulated cameras' view of the simulated mount — see
+/// [`SimulatorMount::pointing_source`].
+#[derive(Debug)]
+struct MountPointing(Arc<SimulatorMount>);
+
+impl PointingSource for MountPointing {
+    fn pointing(&self) -> Option<RaDec> {
+        let now = Instant::now();
+        let state = self.0.locked();
+        state.connected().ok()?;
+        let axes = state.axes.as_ref()?;
+        // The two optical error terms (periodic error, polar drift) are inside `sky_position`,
+        // so a frame shows what an *observer* would see rather than what the controller
+        // believes — which is the whole point of them being there and not in the axis plans.
+        self.0.sky_position(axes, now).ok()
     }
 }
 

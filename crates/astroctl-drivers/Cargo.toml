@@ -17,7 +17,7 @@ publish.workspace = true
 # and tests default features only, and a driver no gate ever looks at is the worse failure.
 [features]
 default = ["simulator"]
-simulator = ["dep:async-trait", "dep:tokio"]
+simulator = ["dep:async-trait", "dep:chrono", "dep:jpeg-encoder", "dep:tokio"]
 
 [dependencies]
 # ADD §5.6 rule 1: these two, and nothing else internal, ever.
@@ -29,14 +29,28 @@ async-trait = { workspace = true, optional = true }
 # `time` is the whole simulator: sleeps for the injected serial latency and `Instant` for the
 # axis clock, which under `tokio::time::pause` makes a 90-second slew testable in milliseconds.
 # `sync` is the semaphore standing in for the one serial cable — the thing an `emergency_stop`
-# must be able to jump (SDD §5.2.4). No runtime is started here; drivers run on the caller's.
-tokio = { workspace = true, features = ["sync", "time"], optional = true }
+# must be able to jump (SDD §5.2.4), and the oneshot the camera's own thread replies over.
+# `rt` arrived with M1-T06: live view and the guide camera's free-running acquisition are
+# producer loops the *driver* owns (`start_continuous` hands back a stream and returns), and a
+# loop with nobody to await it is a spawned task. Still no runtime is started here — drivers run
+# on the caller's.
+tokio = { workspace = true, features = ["rt", "sync", "time"], optional = true }
+# Frame timestamps: `CaptureResult.started_at`, `LiveViewFrame.captured_at`, `DATE-OBS` in the
+# FITS header. The workspace pins it without `clock` (SDD §2 confines local time to the UI).
+chrono = { workspace = true, optional = true }
+# The 8-bit rendition beside every 16-bit frame, and every live-view frame. See the workspace
+# manifest for why this encoder and not `image` or `mozjpeg`.
+jpeg-encoder = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` is load-bearing rather than convenient: it is what makes `tokio::time::pause`
 # available, and without it every timing test in this crate would be a real-time sleep and a
 # source of CI flakes. `macros`/`rt` run the tests themselves.
 tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "time"] }
+# Independent readers for the two formats this crate writes — a round-trip through our own code
+# would prove only that it is self-consistent. See the workspace manifest.
+fitsrs = { workspace = true }
+zune-jpeg = { workspace = true }
 
 [lints]
 workspace = true

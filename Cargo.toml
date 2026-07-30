@@ -140,6 +140,24 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # of which should be anywhere near a security token. Already in the tree under `ring`.
 getrandom = { version = "0.2" }
 
+# --- added by M1-T06 (simulator camera: FITS + JPEG renditions) ---
+# The JPEG half of the simulator's RAW+JPEG pair and every live-view frame (CAM-05). Chosen over
+# `image` and over `mozjpeg`: `image` is a whole codec framework where one encoder is wanted, and
+# `mozjpeg` wraps a C library — a system dependency on the Pi for a file format the field node
+# writes several times a second. `jpeg-encoder` has **no dependencies at all**, which is the
+# property that matters most for something in the capture path.
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+# Test-only, both of them, and both deliberately *different implementations* from the ones under
+# test: a round-trip through the code that produced the bytes proves only self-consistency.
+#
+# `fitsrs` is what the M1-T06 acceptance criterion's `fitsio` read-back becomes when the system
+# cfitsio is not taken on (PRD §7 pins `fitsio` 0.21.10, which links `libcfitsio-dev`). Pure
+# Rust, from CDS — the group behind Aladin and SIMBAD — so "a standard tool opens it" is a claim
+# with an observatory's parser behind it rather than a second reading of our own writer.
+fitsrs = { version = "0.4.1" }
+# ...and the same argument for the JPEG side: `zune-jpeg` decodes what `jpeg-encoder` encoded.
+zune-jpeg = { version = "0.5.15" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
