@@ -250,6 +250,25 @@ export function cameraSettings(token: string | null): Promise<RequestResult<Came
 }
 
 /**
+ * Start the camera's live-view stream (CAM-05, SDD §5.7).
+ *
+ * Answers `202`: the stream having *started* is not something the reply can promise, and §5.9
+ * forbids the UI rendering a mutation from its own request anyway. The panel learns live view is
+ * running the only honest way — a frame arrives on `/ws/liveview`.
+ *
+ * Idempotent server-side, so a second tap while it is already running is success rather than an
+ * error the panel would have to explain.
+ */
+export function liveViewStart(token: string | null): Promise<RequestResult<null>> {
+  return postJson<never>('/api/camera/liveview/start', token) as Promise<RequestResult<null>>;
+}
+
+/** Stop it, and close the server-side work with it. Idempotent, like `liveViewStart`. */
+export function liveViewStop(token: string | null): Promise<RequestResult<null>> {
+  return postJson<never>('/api/camera/liveview/stop', token) as Promise<RequestResult<null>>;
+}
+
+/**
  * Change one or more settings. Absent fields are left alone.
  *
  * A partial update rather than a whole-object replace, because the panel changes one selector at a

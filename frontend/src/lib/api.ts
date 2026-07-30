@@ -60,8 +60,18 @@ export const STACK_HEALTH = '/stack/api/system/health';
 /** Single-use WebSocket ticket — SDD §4.5, §5.8.1. */
 export const WS_TICKET = '/api/auth/ws-ticket';
 
-/** The control/status socket — SDD §5.8.1. Binary frames live on `/ws/liveview` (M1-T09). */
+/** The control/status socket — SDD §5.8.1. Binary frames live on `/ws/liveview`. */
 export const WS_EVENTS = '/ws';
+
+/**
+ * The binary image socket — SDD §5.8.1, §8.3(5).
+ *
+ * A second socket rather than a second message type on the first, and the reason is TCP rather
+ * than tidiness: two streams multiplexed onto one connection share one retransmit queue, so a
+ * 500 KB JPEG that needs resending would hold up the position update and the stop command behind
+ * it. Separate connections cannot do that to each other.
+ */
+export const WS_LIVEVIEW = '/ws/liveview';
 
 /** `POST /api/auth/ws-ticket` → 200. */
 export interface WsTicket {
@@ -82,8 +92,27 @@ export interface WsTicket {
  * and therefore never reaches the node's access log.
  */
 export function eventSocketUrl(ticket: string, location: URL | Location = window.location): string {
+  return socketUrl(WS_EVENTS, ticket, location);
+}
+
+/**
+ * The live-view socket URL for one ticket.
+ *
+ * A separate ticket from the control socket's, always. §4.5 makes a ticket single-use and the
+ * *upgrade* is what consumes it, so sharing one would open whichever socket connected first and
+ * silently fail the other — and would then fail differently on every reconnect. `connection.ts`
+ * says the same thing about reuse: it is not an optimisation, it is a failure.
+ */
+export function liveviewSocketUrl(
+  ticket: string,
+  location: URL | Location = window.location,
+): string {
+  return socketUrl(WS_LIVEVIEW, ticket, location);
+}
+
+function socketUrl(path: string, ticket: string, location: URL | Location): string {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${location.host}${WS_EVENTS}?ticket=${encodeURIComponent(ticket)}`;
+  return `${scheme}//${location.host}${path}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function assertSameOrigin(path: string): void {
