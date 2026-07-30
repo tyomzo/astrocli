@@ -117,10 +117,13 @@ describe('frame kinds', () => {
 
 describe('the closed error vocabulary', () => {
   it('mirrors astroctl-core exactly, at the count that is the review checkpoint', () => {
-    // 24 → 25 is `ABORTED` (M1-T03). The number is here for the same reason it is in
-    // `ErrorCode::ALL`'s test: a frozen contract should not grow without someone noticing.
-    expect(ERROR_CODES).toHaveLength(25);
+    // 24 → 25 is `ABORTED` (M1-T03); 25 → 26 is `NODE_UNREACHABLE` (M1-T14), which §4.2 had
+    // specified with no producer while the proxy answered `DEVICE_TRANSPORT`. The number is here
+    // for the same reason it is in `ErrorCode::ALL`'s test: a frozen contract should not grow
+    // without someone noticing.
+    expect(ERROR_CODES).toHaveLength(26);
     expect(ERROR_CODES).toContain('ABORTED');
+    expect(ERROR_CODES).toContain('NODE_UNREACHABLE');
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 

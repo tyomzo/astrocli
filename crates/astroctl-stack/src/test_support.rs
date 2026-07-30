@@ -16,6 +16,7 @@ use crate::api::{AppState, LoggingInfo, RuntimeSizing, StatusCell};
 use crate::auth::AuthPolicy;
 use crate::ingest::Ingest;
 use crate::mirror::SessionMirror;
+use crate::preview::{PreviewHub, PreviewQueue};
 use crate::route_meta::RouteDecl;
 use crate::vitals::Uptime;
 
@@ -191,6 +192,9 @@ pub async fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
         .await
         .expect("the archive opens under a temporary directory");
 
+    let bus = EventBus::new();
+    let workers = astroctl_ipc::supervisor::spawn(&config.workers, &bus);
+
     AppState {
         runtime: RuntimeSizing {
             worker_threads: config.server.resolved_worker_threads(cores),
@@ -198,7 +202,7 @@ pub async fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
             available_cores: cores,
         },
         config,
-        bus: EventBus::new(),
+        bus,
         status: Arc::new(StatusCell::starting()),
         uptime: Uptime::started_now(),
         auth: Arc::new(auth),
@@ -208,5 +212,12 @@ pub async fn state_with(node: &TestNode, routes: Vec<RouteDecl>) -> AppState {
             error: None,
         },
         ingest: Arc::new(Ingest::new(mirror)),
+        previews: Arc::new(PreviewHub::new()),
+        preview_queue: Arc::new(PreviewQueue::new()),
+        // A real supervisor, because `spawn` starts no process: a test node has a supervisor in
+        // exactly the state a freshly started one has — `stopped`, no worker, no restarts. Only a
+        // test that submits a job would reach Python, and none do; the pipeline is driven through
+        // `preview_queue` instead, which is the seam the ingest handler actually uses.
+        workers,
     }
 }

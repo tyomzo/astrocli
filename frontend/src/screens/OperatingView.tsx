@@ -29,6 +29,20 @@ import { PanelGrid } from '../ui/PanelGrid';
  * wrong for one frame after every rotation, would need a resize listener on a device where every
  * wake-up is a resize, and would render two different component trees — so a D-pad hold started
  * on a phone-shaped viewport would be torn down by rotating the device mid-nudge.
+ *
+ * # The image surface belongs to two destinations, not one (M1-T14)
+ *
+ * §5.9 promotes the accumulating stack from a status readout to a **primary view**: "`FRAME` and
+ * `STACK` are two sources sharing one image surface, not two panels". So the surface is not inside
+ * the FRAME region — it is shown for *both* FRAME and STACK, and which picture it carries is
+ * `store/ui`'s `imageSource`. On a tablet it is simply always there, uninterrupted, which is the
+ * arrangement the second sketch draws.
+ *
+ * What stays destination-specific is what sits *under* it: the ISO/shutter/CAPTURE row belongs to
+ * FRAME, and the reserved stacking regions belong to STACK (they live inside `ImageSurface`,
+ * because the sketch puts them directly beneath the image). The stack *statistics* are in the left
+ * column with the target, deliberately — §5.9: "both answer 'what is this session doing', and
+ * keeping them together leaves the image surface uninterrupted".
  */
 export function OperatingView(): ReactNode {
   const destination = useUiStore((state) => state.destination);
@@ -42,11 +56,11 @@ export function OperatingView(): ReactNode {
 
       <PanelGrid layout="sidebar">
         <div className="flex flex-col gap-3">
-          <Region destination="target" current={destination}>
+          <Region on={['target']} current={destination}>
             <TargetRegion />
             <TrackingControl />
           </Region>
-          <Region destination="stack" current={destination}>
+          <Region on={['stack']} current={destination}>
             <StackPanel />
             {/*
               The frame list lives with STACK rather than with FRAME, and that follows §5.9's own
@@ -58,27 +72,37 @@ export function OperatingView(): ReactNode {
           </Region>
         </div>
 
-        <Region destination="frame" current={destination}>
-          <ImageSurface />
+        <div className="flex flex-col gap-3">
           {/*
-            Under the image, not beside it — §5.9's `ISO 1600  30s  RAW  [CAPTURE]` row. Settings
-            and framing are one decision, so the control and the thing it affects stay in one field
-            of view, which is the same argument that puts the D-pad on top of the image.
+            One surface, two destinations. On a phone it follows the operator between FRAME and
+            STACK rather than being duplicated, so the sockets behind it are never torn down by a
+            tab change — which is what makes switching to STACK instant rather than a reconnect.
           */}
-          <CaptureStrip />
-          <CameraVitals />
-        </Region>
+          <Region on={['frame', 'stack']} current={destination}>
+            <ImageSurface />
+          </Region>
+          <Region on={['frame']} current={destination}>
+            {/*
+              Under the image, not beside it — §5.9's `ISO 1600  30s  RAW  [CAPTURE]` row. Settings
+              and framing are one decision, so the control and the thing it affects stay in one
+              field of view, which is the same argument that puts the D-pad on top of the image.
+            */}
+            <CaptureStrip />
+            <CameraVitals />
+          </Region>
+        </div>
       </PanelGrid>
     </>
   );
 }
 
 function Region({
-  destination,
+  on,
   current,
   children,
 }: {
-  destination: Destination;
+  /** Destinations this region belongs to. More than one for the shared image surface. */
+  on: readonly Destination[];
   current: Destination;
   children: ReactNode;
 }): ReactNode {
@@ -86,7 +110,7 @@ function Region({
   // off the screen — a screen reader should not read three destinations when one is shown. The
   // components stay mounted, so switching destinations does not restart their subscriptions.
   return (
-    <div className={`flex-col gap-3 md:flex ${destination === current ? 'flex' : 'hidden'}`}>
+    <div className={`flex-col gap-3 md:flex ${on.includes(current) ? 'flex' : 'hidden'}`}>
       {children}
     </div>
   );

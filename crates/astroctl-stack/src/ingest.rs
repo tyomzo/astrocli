@@ -152,8 +152,11 @@ pub struct StatsResponse {
     /// When its last frame arrived.
     #[serde(with = "ts_rfc3339_millis_opt")]
     pub last_ingest_ts: Option<DateTime<Utc>>,
-    /// Always `null` until the preview pipeline exists (M1-T14, Phase 2b). Present and explicitly
-    /// null rather than absent — the same reasoning as `worker` in `/api/system/health`.
+    /// When this node last produced a preview; `null` on a node that has produced none.
+    ///
+    /// Filled by M1-T14's preview pipeline. It is deliberately **not** per-session: it answers
+    /// "is the stack still turning frames into pictures", which is a question about the node, and
+    /// the field node forwards it into `stack.status` for exactly that (§4.3, USB-06).
     #[serde(with = "ts_rfc3339_millis_opt")]
     pub last_preview_ts: Option<DateTime<Utc>>,
 }
@@ -354,6 +357,21 @@ pub async fn ingest(
                 frame_count = counts.frame_count,
                 "frame ingested"
             );
+            // The preview is submitted **here**: after the journal row, on the path that is about
+            // to ack. Two properties of that placement are load-bearing.
+            //
+            // *After the row*, because the row is REL-13's authority — the thing a field node
+            // deletes its only copy on the strength of — and a preview must never be able to
+            // reorder itself in front of it.
+            //
+            // *Infallibly*, because §5.12.3 is explicit that "ingest acks on durability, not on
+            // processing". `offer` cannot fail, cannot block and cannot await, so there is no
+            // path by which a sick worker turns a stored frame into a 5xx and a retransmission.
+            // A preview that never happens costs the operator an image they can get by capturing
+            // again; an ingest that fails over one costs 25 MB of a shaped link.
+            state
+                .preview_queue
+                .offer(&meta.session_id, &meta.frame_id, archive.frame_path(frame));
             Ok(Json(ack(&meta, false)))
         }
         Outcome::Duplicate(_) => {
@@ -374,7 +392,7 @@ pub async fn stats(State(state): State<AppState>) -> Result<Json<StatsResponse>,
         session_id: latest.as_ref().map(|s| s.session_id.clone()),
         frame_count: latest.as_ref().map_or(0, |s| s.frame_count),
         last_ingest_ts: latest.as_ref().map(|s| s.last_ingest_ts),
-        last_preview_ts: None,
+        last_preview_ts: state.previews.last_preview_ts(),
     }))
 }
 
@@ -881,6 +899,97 @@ mod tests {
     ) -> (StatusCode, Value) {
         let meta = wire_meta(session_id, frame_id, body).to_string();
         post_parts(app, &[(META_PART, meta.as_bytes()), (FRAME_PART, body)]).await
+    }
+
+    // --- the preview seam (M1-T14) ------------------------------------------------------------
+
+    /// A stored frame is offered to the preview pipeline, at the path the worker will be given.
+    ///
+    /// ADR-13 passes frames by filesystem path, so "the right path" is the whole contract between
+    /// this handler and the worker — a path that does not exist produces `NOT_FOUND` from Python
+    /// and a preview that silently never appears.
+    #[tokio::test]
+    async fn a_stored_frame_is_offered_for_preview_at_the_path_the_worker_will_read() {
+        let node = TestNode::authenticated(TOKEN);
+        let app = app_for(&node).await;
+
+        let (status, _) = upload(&app, "2026-07-29_m31", "light_00001", b"raw bytes").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let job = app
+            .state
+            .preview_queue
+            .take_for_test()
+            .expect("a stored frame is queued for preview");
+        assert!(
+            job.ends_with("2026-07-29_m31/frames/light_00001.cr3"),
+            "the worker is handed the archived frame, extension and all: {}",
+            job.display()
+        );
+        assert!(
+            tokio::fs::try_exists(&job).await.unwrap_or(false),
+            "the offered path must exist by the time it is offered — the journal row is written \
+             first, and the frame before that"
+        );
+    }
+
+    /// A re-upload of a frame this node already holds must not re-queue it. The dedup fast path
+    /// never touches the file, so previewing again would burn a worker slot to produce the
+    /// identical JPEG — and under a field node retrying a backlog, repeatedly.
+    #[tokio::test]
+    async fn a_duplicate_upload_does_not_queue_a_second_preview() {
+        let node = TestNode::authenticated(TOKEN);
+        let app = app_for(&node).await;
+
+        upload(&app, "2026-07-29_m31", "light_00001", b"raw bytes").await;
+        assert!(app.state.preview_queue.take_for_test().is_some());
+
+        let (status, body) = upload(&app, "2026-07-29_m31", "light_00001", b"raw bytes").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["duplicate"], true);
+        assert!(
+            app.state.preview_queue.take_for_test().is_none(),
+            "a duplicate is acked, not re-previewed"
+        );
+    }
+
+    /// A refused upload leaves nothing behind for the worker. The 507 short-circuits before a byte
+    /// of the frame is read, so there is no file to preview and queueing one would hand the worker
+    /// a path to nothing.
+    #[tokio::test]
+    async fn a_frame_refused_for_space_is_never_queued_for_preview() {
+        let node = TestNode::authenticated(TOKEN).with_disk_thresholds(100_000.0, 99_999.0);
+        let app = app_for(&node).await;
+
+        let (status, _) = upload(&app, "2026-07-29_m31", "light_00001", b"raw bytes").await;
+        assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+        assert!(app.state.preview_queue.take_for_test().is_none());
+    }
+
+    /// `/api/stacking/stats` reports the node's real last-preview time — the field node
+    /// republishes this into `stack.status` (§4.3, USB-06), so a hardcoded `null` here would make
+    /// the operator's panel say "no preview yet" all night.
+    #[tokio::test]
+    async fn stats_reports_the_last_preview_the_node_actually_produced() {
+        let node = TestNode::authenticated(TOKEN);
+        let app = app_for(&node).await;
+
+        upload(&app, "2026-07-29_m31", "light_00001", b"raw bytes").await;
+        let before = get(&app, "/api/stacking/stats").await;
+        assert_eq!(
+            before["last_preview_ts"],
+            Value::Null,
+            "ingest alone produces no preview — the worker does"
+        );
+
+        app.state.previews.publish(b"\xff\xd8jpeg", "light_00001");
+
+        let after = get(&app, "/api/stacking/stats").await;
+        assert!(
+            after["last_preview_ts"].is_string(),
+            "the timestamp must follow the preview: {after}"
+        );
+        assert_eq!(after["frame_count"], 1);
     }
 
     async fn get(app: &TestApp, path: &str) -> Value {

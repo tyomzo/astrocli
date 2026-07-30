@@ -322,6 +322,15 @@ export const selectMountPosition = (state: TelemetryState): Slot<MountPosition> 
 export const selectMountStatus = (state: TelemetryState): Slot<MountStatus> => state.mountStatus;
 export const selectCameraStatus = (state: TelemetryState): Slot<CameraStatus> => state.cameraStatus;
 export const selectStackStatus = (state: TelemetryState): Slot<StackStatus> => state.stackStatus;
+/**
+ * The upload queue (SDD §5.10.4).
+ *
+ * USB-06 asks the stack panel for queue depth, and the depth is the *field* node's — the frames
+ * waiting to leave here, not anything the stacking server knows. So the panel joins two topics,
+ * which is why this selector sits beside the stack one.
+ */
+export const selectTransferStatus = (state: TelemetryState): Slot<TransferStatus> =>
+  state.transferStatus;
 export const selectAlerts = (state: TelemetryState): ReceivedAlert[] => state.alerts;
 export const selectCaptureProgress = (state: TelemetryState): Slot<CaptureProgress> =>
   state.captureProgress;

@@ -10,11 +10,20 @@ publish.workspace = true
 
 [dependencies]
 astroctl-core = { workspace = true }
+# M1-T14: the worker supervisor of SDD §5.12.3. This is the binary that owns the Python child
+# processes, so it is the one crate that takes the `supervisor` feature — ADD §5.6 rule 6 keeps
+# process management out of the field node, and that rule is checkable by building rather than
+# by reading (see `astroctl-ipc`'s own module docs).
+astroctl-ipc = { workspace = true, features = ["supervisor"] }
 
 # M0-T05 (binary bootstrap). No `hyper-util`: only the field node proxies (ADR-07).
 # `multipart` (M1-T12): the ingest body of SDD §5.11.1. It brings `multer`, whose `Field::chunk`
 # is what lets a 25 MB raw stream to disk instead of through RAM (§5.11.2).
-axum = { workspace = true, features = ["multipart"] }
+# `ws` (M1-T14): `/ws/preview`, the binary preview socket of §5.11.1. Same RFC 6455 handshake
+# and framing the field node's `/ws/liveview` is built on, and equally not something to
+# hand-roll under an operator's telescope.
+axum = { workspace = true, features = ["multipart", "ws"] }
+futures-util = { workspace = true }
 tokio = { workspace = true, features = [
     "fs",
     "io-util",
@@ -43,6 +52,13 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
+# M1-T14: a real WebSocket client for `/ws/preview`. `oneshot` drives a `Service` and never gives
+# the connection back, so it cannot complete an upgrade — the bearer posture on an upgrade, the
+# frame already in the slot at connect time, and the fan-out to a second client are only testable
+# against a bound port with something that speaks RFC 6455. Same version and same reasoning as the
+# field node's dev-dependency on it.
+tokio-tungstenite = { version = "0.29" }
+futures-util = { workspace = true }
 
 [lints]
 workspace = true

@@ -93,6 +93,15 @@ export const WS_EVENTS = '/ws';
  */
 export const WS_LIVEVIEW = '/ws/liveview';
 
+/**
+ * The stacking server's preview socket, through the field node's proxy — SDD §5.11.1, ADR-07.
+ *
+ * A third socket for the same §8.3(5) reason as the second, one hop further out: the stack node's
+ * previews are the largest images in the system, and putting them on a connection shared with
+ * anything else would let one retransmit hold up everything behind it.
+ */
+export const WS_STACK_PREVIEW = '/stack/ws/preview';
+
 /** `POST /api/auth/ws-ticket` → 200. */
 export interface WsTicket {
   ticket: string;
@@ -128,6 +137,25 @@ export function liveviewSocketUrl(
   location: URL | Location = window.location,
 ): string {
   return socketUrl(WS_LIVEVIEW, ticket, location);
+}
+
+/**
+ * The **stacking server's** preview socket, reached through the field node (ADR-07, M1-T14).
+ *
+ * Still this origin. That is the whole point of the proxy: the browser has one origin, one token
+ * prompt, and works in the asymmetric VPN topologies STK-19 describes — so this URL is built the
+ * same way as the other two and there is deliberately no configuration key pointing at :8471.
+ * `assertSameOrigin` guards the REST side of the same rule.
+ *
+ * A ticket of its own, again. The upgrade consumes it (§4.5), and the field node spends this one
+ * before dialling the stacking server with its own bearer header — so a PWA showing live view and
+ * the stack preview at once holds two sockets and fetched two tickets.
+ */
+export function stackPreviewSocketUrl(
+  ticket: string,
+  location: URL | Location = window.location,
+): string {
+  return socketUrl(WS_STACK_PREVIEW, ticket, location);
 }
 
 function socketUrl(path: string, ticket: string, location: URL | Location): string {

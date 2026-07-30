@@ -97,6 +97,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "getrandom 0.2.17",
+ "hyper",
  "hyper-util",
  "include_dir",
  "rustix",
@@ -210,8 +211,10 @@ name = "astroctl-stack"
 version = "0.1.0"
 dependencies = [
  "astroctl-core",
+ "astroctl-ipc",
  "axum",
  "chrono",
+ "futures-util",
  "rusqlite",
  "rustix",
  "serde",
@@ -220,6 +223,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "tower",
  "tracing",
  "tracing-appender",

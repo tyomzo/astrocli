@@ -12,6 +12,8 @@ import failureNote from '../ui/FailureNote.tsx?raw';
 import linkBanner from '../panels/LinkBanner.tsx?raw';
 import manualTargetChooser from '../panels/ManualTargetChooser.tsx?raw';
 import sessionFrames from '../panels/SessionFrames.tsx?raw';
+import stackPanel from '../panels/StackPanel.tsx?raw';
+import stackSlots from '../panels/StackSlots.tsx?raw';
 import trackingControl from '../panels/TrackingControl.tsx?raw';
 import { nudgeAvailability } from './nudge';
 import nudgeSource from './nudge.ts?raw';
@@ -71,6 +73,14 @@ const OPERATOR_FACING: readonly [string, string][] = [
   ['panels/CaptureStrip.tsx', captureStrip],
   ['panels/SessionFrames.tsx', sessionFrames],
   ['panels/CameraVitals.tsx', cameraVitals],
+  // The stack panel is where an operator decides whether tonight is working, and every honest
+  // way to describe its failures names something on the other side of a network they cannot see.
+  // "The stacking server is not answering" is a fact about a machine; "the stack.status topic is
+  // stale" is a fact about this program.
+  ['panels/StackPanel.tsx', stackPanel],
+  // The reserved regions say what will fill them. They are read by someone wondering whether the
+  // empty box under the image is a bug, so they must not answer in the vocabulary of the build.
+  ['panels/StackSlots.tsx', stackSlots],
   ['ui/FailureNote.tsx', failureNote],
   ['lib/nudge.ts', nudgeSource],
 ];

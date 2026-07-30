@@ -203,6 +203,15 @@ pub enum ErrorCode {
     DeviceTransport,
     /// A device answered with something the driver could not parse.
     DeviceProtocol,
+    /// The *other node* is not answering — the `/stack/*` proxy (ADR-07) and the transfer agent
+    /// (SDD §5.10).
+    ///
+    /// §4.2 has defined this since change note 1.9.0 and nothing implemented it, so the proxy
+    /// answered `DEVICE_TRANSPORT` — precisely the conflation the row was added to prevent:
+    /// "conflating them tells the operator to check a cable when the problem is a tunnel". Found
+    /// by M1-T14, which needs the stack panel to distinguish "the stacking server is down" from
+    /// "a cable came out" while a capture is running.
+    NodeUnreachable,
     // --- rejected input (422) ---
     /// The device understood the command and refused it.
     DeviceRejected,
@@ -260,6 +269,7 @@ impl ErrorCode {
         ErrorCode::DeviceTimeout,
         ErrorCode::DeviceTransport,
         ErrorCode::DeviceProtocol,
+        ErrorCode::NodeUnreachable,
         ErrorCode::DeviceRejected,
         ErrorCode::Validation,
         ErrorCode::CommandStale,
@@ -291,6 +301,7 @@ impl ErrorCode {
             Self::DeviceTimeout => "DEVICE_TIMEOUT",
             Self::DeviceTransport => "DEVICE_TRANSPORT",
             Self::DeviceProtocol => "DEVICE_PROTOCOL",
+            Self::NodeUnreachable => "NODE_UNREACHABLE",
             Self::DeviceRejected => "DEVICE_REJECTED",
             Self::Validation => "VALIDATION",
             Self::CommandStale => "COMMAND_STALE",
@@ -326,7 +337,10 @@ impl ErrorCode {
             | Self::CameraTimeout
             | Self::DeviceTimeout
             | Self::DeviceTransport
-            | Self::DeviceProtocol => 502,
+            | Self::DeviceProtocol
+            // The other *node*, not a device — but the same 502: something upstream of this
+            // process did not answer, and the client's move is to retry, not to fix its request.
+            | Self::NodeUnreachable => 502,
             // Rejected / validation → 422.
             Self::DeviceRejected
             | Self::Validation
@@ -365,7 +379,11 @@ impl ErrorCode {
             Self::MountTimeout
             | Self::CameraTimeout
             | Self::DeviceTimeout
-            | Self::DeviceTransport => true,
+            | Self::DeviceTransport
+            // A tunnel that is down comes back — that is what REL-10 is about — and the
+            // transfer agent's whole design assumes a retryable "the other node is not
+            // answering" (§5.10.1 keeps such a frame queued rather than failing it).
+            | Self::NodeUnreachable => true,
             // The supervisor restarts a crashed or unavailable worker on its own (§5.12.3), so
             // the same request later is expected to succeed. A worker *timeout* is not retried:
             // the same job hitting the same ceiling repeats deterministically, like Protocol.
@@ -647,8 +665,12 @@ mod tests {
         // vocabulary (SDD §4.2 change note, 2026-07-30) — approved before M1-T04 builds the
         // PWA switch, i.e. while extending was still cheap. 24 → 25 is `ABORTED` (M1-T03,
         // SDD §4.2 change note): a goto stopped by an e-stop was answering 422 DEVICE_REJECTED,
-        // which blames the operator's request for their own safety action working.
-        assert_eq!(before, 25);
+        // which blames the operator's request for their own safety action working. 25 → 26 is
+        // `NODE_UNREACHABLE`, which §4.2 has specified since change note 1.9.0 with no producer
+        // — the `/stack/*` proxy was answering `DEVICE_TRANSPORT`, the exact conflation that row
+        // was written to prevent. Found by M1-T14 (the stack panel has to tell "the stacking
+        // server is down" from "a cable came out" while a capture is running).
+        assert_eq!(before, 26);
     }
 
     #[test]

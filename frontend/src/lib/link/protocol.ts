@@ -48,7 +48,7 @@ export type WorkerState = 'starting' | 'ready' | 'busy' | 'restarting' | 'failed
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 
 /**
- * The closed `ErrorCode` set of SDD §4.2 — 25 codes, the order of `ErrorCode::ALL`.
+ * The closed `ErrorCode` set of SDD §4.2 — 26 codes, the order of `ErrorCode::ALL`.
  *
  * Exported as a value as well as a type because the UI switches on these strings and a typo in a
  * `case` label is otherwise silent.
@@ -67,6 +67,11 @@ export const ERROR_CODES = [
   'DEVICE_TIMEOUT',
   'DEVICE_TRANSPORT',
   'DEVICE_PROTOCOL',
+  // The *other node* is not answering — the `/stack/*` proxy (ADR-07) and the transfer agent.
+  // §4.2 has specified this since change note 1.9.0 and nothing produced it, so the proxy
+  // answered `DEVICE_TRANSPORT`: the exact conflation the row exists to prevent, which tells the
+  // operator to check a cable when the problem is a tunnel. Added by M1-T14 (§4.2, 26 codes).
+  'NODE_UNREACHABLE',
   'DEVICE_REJECTED',
   'VALIDATION',
   'COMMAND_STALE',

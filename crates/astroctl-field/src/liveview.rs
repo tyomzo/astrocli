@@ -36,20 +36,9 @@
 //! them.
 //!
 //! Each binary frame therefore carries a fixed 8-byte header and a small JSON metadata block
-//! before the JPEG:
-//!
-//! ```text
-//! 0      4        5      6        8              8+meta_len
-//! +------+--------+------+--------+--------------+---------------------------+
-//! |"ACLV"| version| kind | meta_len (u16 BE)     | meta JSON | JPEG bytes    |
-//! +------+--------+------+--------+--------------+---------------------------+
-//! ```
-//!
-//! This is a convention the SDD does not state, in the same position §5.8.3's `type`-vs-`topic`
-//! split was for M1-T03: the document names the payload and leaves the framing open. `kind` is
-//! `0` for a live-view frame and `1` for a capture preview; the metadata carries `ts` always and
-//! `frame_id` on a preview, so a client that reconnects mid-session can label what it is showing
-//! without asking a second time.
+//! before the JPEG. The layout, and the encoder, are [`astroctl_core::image_frame`] — M1-T14 gave
+//! the stacking server's `/ws/preview` the same envelope, and one wire format the PWA decodes
+//! with one function must not be two encoders that can drift.
 //!
 //! # Expected gaps are not stalls (§5.7, §5.3.1)
 //!
@@ -66,6 +55,7 @@ use std::sync::{Arc, Mutex};
 use astroctl_core::bus::{EventBus, EventSubscriber, Recv};
 use astroctl_core::error::{ApiError, ErrorCode};
 use astroctl_core::event::CaptureProgress;
+use astroctl_core::image_frame::{encode, FrameKind};
 use astroctl_hal::stream::{FrameSink, FrameStream};
 use astroctl_pipeline::PreviewParams;
 use astroctl_session::FrameId;
@@ -76,81 +66,11 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
-use serde::Serialize;
 use tokio::sync::Notify;
 
 use crate::api::{ApiFailure, AppState};
 use crate::auth::unauthorized;
 use crate::ticket::TicketRejection;
-
-/// Marks a frame as this protocol's rather than a bare JPEG. A client reading `FF D8` here has
-/// found a node older than the envelope and should say so, not render half a header as pixels.
-const MAGIC: &[u8; 4] = b"ACLV";
-
-/// Envelope version. Bumped only for a change a v1 client could not skip.
-const PROTOCOL_VERSION: u8 = 1;
-
-/// Fixed header length: magic(4) + version(1) + kind(1) + meta length(2).
-const HEADER_LEN: usize = 8;
-
-// ---------------------------------------------------------------------------------------------
-// The wire frame
-// ---------------------------------------------------------------------------------------------
-
-/// Which of §5.7's two sources a frame came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameKind {
-    /// The camera's live-view stream (CAM-05). Superseded by the next one, seconds old at most.
-    Live,
-    /// A capture's rendered preview (CAM-06, IPP-04). Worth keeping on screen until the next
-    /// capture, which is why it is told apart from a live frame at all.
-    Preview,
-}
-
-impl FrameKind {
-    fn as_byte(self) -> u8 {
-        match self {
-            Self::Live => 0,
-            Self::Preview => 1,
-        }
-    }
-}
-
-/// What travels with the JPEG.
-#[derive(Debug, Serialize)]
-struct FrameMeta<'a> {
-    /// RFC 3339 with milliseconds — SDD §2's format, the same one every event carries, so a
-    /// client can compare a frame's age against its telemetry age without a second parser.
-    ts: String,
-    /// The frame this previews. Absent on a live-view frame, which is of nothing in particular.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    frame_id: Option<&'a str>,
-}
-
-/// Encode one binary WebSocket payload.
-///
-/// Encoded **once, when published**, not once per client: every subscriber receives the identical
-/// bytes, and re-serializing a 200 KB frame per connected phone is work the node does not have
-/// (SDD §7's runtime budget) for an answer that cannot differ.
-fn encode(kind: FrameKind, jpeg: &[u8], ts: DateTime<Utc>, frame_id: Option<&str>) -> Arc<[u8]> {
-    let meta = FrameMeta {
-        ts: ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        frame_id,
-    };
-    // Unreachable for a struct of a `String` and an `Option<&str>`; falling back to an empty
-    // object keeps a frame flowing rather than dropping an image over its label.
-    let meta = serde_json::to_vec(&meta).unwrap_or_else(|_| b"{}".to_vec());
-    let meta_len = u16::try_from(meta.len()).unwrap_or(u16::MAX);
-
-    let mut out = Vec::with_capacity(HEADER_LEN + meta.len() + jpeg.len());
-    out.extend_from_slice(MAGIC);
-    out.push(PROTOCOL_VERSION);
-    out.push(kind.as_byte());
-    out.extend_from_slice(&meta_len.to_be_bytes());
-    out.extend_from_slice(&meta);
-    out.extend_from_slice(jpeg);
-    out.into()
-}
 
 // ---------------------------------------------------------------------------------------------
 // The hub
@@ -775,6 +695,10 @@ pub async fn preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The envelope constants moved to `astroctl-core` with the encoder (M1-T14). These tests
+    // decode by hand rather than through a decoder, which is the point: they assert the bytes
+    // the PWA is written against, not that two functions in this file agree.
+    use astroctl_core::image_frame::{HEADER_LEN, MAGIC, PROTOCOL_VERSION};
 
     /// Connect the camera through the same route an operator uses, so a test cannot pass against
     /// a device the binary would have left disconnected.
@@ -989,6 +913,7 @@ mod e2e {
     use std::time::{Duration, Instant};
 
     use astroctl_core::event::{MountPosition, PierSide};
+    use astroctl_core::image_frame::{HEADER_LEN, MAGIC, PROTOCOL_VERSION};
     use futures_util::StreamExt;
     use tokio_tungstenite::tungstenite::Message as ClientMessage;
 

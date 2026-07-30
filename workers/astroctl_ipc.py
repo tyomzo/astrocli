@@ -51,6 +51,9 @@ ERROR_CODES = frozenset(
         "DEVICE_TIMEOUT",
         "DEVICE_TRANSPORT",
         "DEVICE_PROTOCOL",
+        # The other *node* is not answering — the /stack/* proxy and the transfer agent (M1-T14).
+        # Nothing a worker raises either; the set is shared and compared whole.
+        "NODE_UNREACHABLE",
         "DEVICE_REJECTED",
         "VALIDATION",
         "COMMAND_STALE",

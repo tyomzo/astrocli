@@ -4,7 +4,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { RequestFailure } from '../lib/api';
 import type { CameraSettings } from '../lib/commands';
 import { cameraSettings, liveViewStart, liveViewStop } from '../lib/commands';
-import { useLiveView } from '../lib/link/useLiveView';
+import { useLiveView, useStackPreview } from '../lib/link/useLiveView';
 import type { SurfacePhase } from '../lib/liveview';
 import { exposureSeconds, formatDuration, surfacePhase } from '../lib/liveview';
 import { nudgeAvailability } from '../lib/nudge';
@@ -17,18 +17,40 @@ import {
   useTelemetryStore,
 } from '../store/telemetry';
 import { useTokenStore } from '../store/token';
+import type { ImageSource } from '../store/ui';
+import { useUiStore } from '../store/ui';
 import { Button } from '../ui/Button';
 import { FailureNote } from '../ui/FailureNote';
 import { NudgeBadge } from './NudgeBadge';
 import { NudgeOverlay } from './NudgeOverlay';
+import { RebuildingSlot, StackControlsSlot } from './StackSlots';
 
 /**
  * The persistent centre of the app — SDD §5.9, filled in by M1-T09.
  *
  * §5.9 calls `FRAME` and `STACK` "two sources sharing one image surface", not two panels: live
- * view answers "is this framed and focused", the last frame answers "did that exposure work", and
- * they are the same rectangle at different times. **This component is that rectangle.** M1-T14
- * adds the stack as a third source; nothing about the surface has to change when it does.
+ * view answers "is this framed and focused", the last frame answers "did that exposure work", the
+ * stack answers "is this session working", and they are the same rectangle at different times.
+ * **This component is that rectangle**, and as of M1-T14 it serves all three.
+ *
+ * # Two sockets, one surface
+ *
+ * `FRAME` is the field node's `/ws/liveview`; `STACK` is the stacking server's `/ws/preview`
+ * through the proxy (ADR-07 — still this origin). Both are open whenever the link is, because the
+ * node holds its last preview in a slot and hands it over at connect time: a socket opened only
+ * when the operator switches to `STACK` would show an empty rectangle for one whole sub while the
+ * image it wanted sat on the other end of a connection it had not made.
+ *
+ * The toggle above the surface is the tablet sketch's `[ FRAME │ STACK ]`. On a phone the bottom
+ * navigation does the same job, which is why the source lives in `store/ui` rather than here —
+ * two controls, one piece of state.
+ *
+ * # What sits under it
+ *
+ * The sketch puts two reserved regions directly beneath the image, and they are `StackSlots`:
+ * Phase 2b's knobs (IPP-07) and the rebuilding indicator (IPP-16). Both are empty in M1 and
+ * present anyway, so 2b fills structure rather than moving every control the operator has learned
+ * the position of.
  *
  * # The pause that has to explain itself
  *
@@ -62,7 +84,14 @@ export function ImageSurface(): ReactNode {
   const linkLive = link.phase === 'live';
   const cameraConnected = camera.state === 'observed' && camera.value.connected;
 
+  const source = useUiStore((state) => state.imageSource);
+  const showImage = useUiStore((state) => state.showImage);
+  const captureStarted = useUiStore((state) => state.captureStarted);
+
+  // Both sockets follow the link, not the toggle — see the module docs on why.
   const images = useLiveView(token, linkLive);
+  const stack = useStackPreview(token, linkLive);
+
   const [streaming, setStreaming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<RequestFailure | null>(null);
@@ -86,6 +115,16 @@ export function ImageSurface(): ReactNode {
     if (!cameraConnected) setStreaming(false);
   }, [cameraConnected]);
 
+  // §5.9: "the app switches to `STACK` when a capture sequence starts, and the operator can
+  // switch back at will". The store owns "at will" — this only reports that a capture is running,
+  // and a pinned surface ignores it.
+  const capturing =
+    progress.state === 'observed' &&
+    (progress.value.state === 'exposing' || progress.value.state === 'downloading');
+  useEffect(() => {
+    if (capturing) captureStarted();
+  }, [capturing, captureStarted]);
+
   useEffect(() => {
     if (!cameraConnected) {
       setSettings(null);
@@ -100,7 +139,11 @@ export function ImageSurface(): ReactNode {
     };
   }, [cameraConnected, token]);
 
-  const phase = surfacePhase({
+  // The live-view phase machine is about the *camera's* stream — its pauses, its stalls, its
+  // countdown. None of that describes the stacking server, whose preview arrives when a frame
+  // finishes its trip and is not "stalled" in between. Applying it to STACK would put "live view
+  // has stalled" over a picture that is exactly as fresh as it should be.
+  const framePhase = surfacePhase({
     linkLive,
     streaming,
     lastFrameAt: images.live?.at ?? null,
@@ -110,17 +153,20 @@ export function ImageSurface(): ReactNode {
     now,
   });
 
-  // Whichever source spoke most recently. A capture's preview is therefore what the surface shows
-  // the moment it is pushed, and live view takes the surface back on its next frame — which is
-  // what "two sources sharing one surface" means in practice.
+  // Within FRAME, whichever of the two field-node images spoke most recently: a capture's preview
+  // is what the surface shows the moment it is pushed, and live view takes it back on the next
+  // frame. STACK has one image and no such contest.
   const preview = images.preview;
   const live = images.live;
-  const showing =
+  const framePicture =
     preview !== null && (live === null || preview.at >= live.at)
       ? { image: preview, source: 'preview' as const }
       : live !== null
         ? { image: live, source: 'live' as const }
         : null;
+  const stackPicture =
+    stack.preview === null ? null : { image: stack.preview, source: 'stack' as const };
+  const showing = source === 'stack' ? stackPicture : framePicture;
 
   async function toggle(next: boolean) {
     setBusy(true);
@@ -134,20 +180,25 @@ export function ImageSurface(): ReactNode {
     setBusy(false);
   }
 
+  const stackConnected = stack.connected;
+
   return (
     <section className="flex flex-col gap-2">
+      <SourceToggle source={source} onSelect={showImage} />
+
       <div className="relative overflow-hidden rounded-lg border border-edge bg-raised">
         <Zoomable>
           {showing === null ? (
-            <Placeholder phase={phase} />
+            <Placeholder
+              source={source}
+              phase={framePhase}
+              stackConnected={stackConnected}
+              linkLive={linkLive}
+            />
           ) : (
             <img
               src={showing.image.url}
-              alt={
-                showing.source === 'preview'
-                  ? `Preview of frame ${showing.image.frameId ?? ''}`.trim()
-                  : 'Live view from the camera'
-              }
+              alt={altFor(showing.source, showing.image.frameId)}
               className="h-full w-full object-contain"
               draggable={false}
             />
@@ -160,34 +211,62 @@ export function ImageSurface(): ReactNode {
           empty, where the placeholder is already saying it.
         */}
         {showing !== null && (
-          <StatusOverlay phase={phase} source={showing.source} frameId={showing.image.frameId} />
-        )}
-
-        {summoned ? (
-          <NudgeOverlay onDismiss={() => setSummoned(false)} />
-        ) : (
-          <NudgeBadge
-            availability={availability}
-            onSummon={() => {
-              setExplanation(null);
-              setSummoned(true);
-            }}
-            onExplain={() => setExplanation(availability.available ? null : availability.reason)}
+          <StatusOverlay
+            phase={showing.source === 'stack' ? null : framePhase}
+            source={showing.source}
+            frameId={showing.image.frameId}
           />
         )}
+
+        {/*
+          The nudge affordance belongs to framing, not to the accumulated stack: pointing while
+          looking at STACK would mean nudging by a picture that is minutes of integration old.
+          §5.9 puts the badge on the live image, and this is that distinction made literal.
+        */}
+        {source === 'frame' &&
+          (summoned ? (
+            <NudgeOverlay onDismiss={() => setSummoned(false)} />
+          ) : (
+            <NudgeBadge
+              availability={availability}
+              onSummon={() => {
+                setExplanation(null);
+                setSummoned(true);
+              }}
+              onExplain={() => setExplanation(availability.available ? null : availability.reason)}
+            />
+          ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          disabled={busy || !linkLive || !cameraConnected}
-          onClick={() => void toggle(!streaming)}
-        >
-          {streaming ? 'Stop live view' : 'Start live view'}
-        </Button>
-        {linkLive && !cameraConnected && (
-          <span className="text-sm text-muted">Connect the camera to use live view.</span>
-        )}
-      </div>
+      {/*
+        §5.9's tablet sketch puts both of these directly under the image, in this order. They are
+        reserved and empty in M1 — see `StackSlots` — and shown only on STACK, where the controls
+        they are reserving for will live.
+      */}
+      {source === 'stack' && (
+        <>
+          <StackControlsSlot />
+          {/*
+            `null` is everything M1 can pass: nothing on the wire reports a rebuild, because
+            nothing rebuilds. Phase 2b fills this from the stack node and changes nothing else.
+          */}
+          <RebuildingSlot progress={null} />
+        </>
+      )}
+
+      {source === 'frame' && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            disabled={busy || !linkLive || !cameraConnected}
+            onClick={() => void toggle(!streaming)}
+          >
+            {streaming ? 'Stop live view' : 'Start live view'}
+          </Button>
+          {linkLive && !cameraConnected && (
+            <span className="text-sm text-muted">Connect the camera to use live view.</span>
+          )}
+        </div>
+      )}
 
       {failure !== null && (
         <FailureNote
@@ -205,15 +284,108 @@ export function ImageSurface(): ReactNode {
   );
 }
 
-/** What the surface says when there is no image on it yet. */
-function Placeholder({ phase }: { phase: SurfacePhase }): ReactNode {
+/**
+ * The tablet sketch's `[ FRAME │ STACK ]`, above the surface.
+ *
+ * A radio group rather than two buttons: the two are mutually exclusive views of one surface, and
+ * `aria-checked` is what says so to a screen reader. On a phone the bottom navigation drives the
+ * same store, so this and it can never disagree.
+ */
+function SourceToggle({
+  source,
+  onSelect,
+}: {
+  source: ImageSource;
+  onSelect: (source: ImageSource) => void;
+}): ReactNode {
+  const options: readonly { id: ImageSource; label: string }[] = [
+    { id: 'frame', label: 'Frame' },
+    { id: 'stack', label: 'Stack' },
+  ];
+
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Image source"
+      className="flex self-center rounded-md border border-edge bg-raised p-0.5"
+    >
+      {options.map((option) => {
+        const current = source === option.id;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            role="radio"
+            aria-checked={current}
+            onClick={() => onSelect(option.id)}
+            className={`min-h-touch rounded px-5 py-1.5 text-sm tracking-wide uppercase ${
+              current ? 'bg-overlay text-accent' : 'text-muted'
+            }`}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The alt text for whichever source produced the picture on screen. */
+function altFor(source: 'live' | 'preview' | 'stack', frameId?: string): string {
+  switch (source) {
+    case 'stack':
+      return `Stacking server preview${frameId === undefined ? '' : ` of frame ${frameId}`}`;
+    case 'preview':
+      return `Preview of frame ${frameId ?? ''}`.trim();
+    default:
+      return 'Live view from the camera';
+  }
+}
+
+/**
+ * What the surface says when there is no image on it yet.
+ *
+ * The two sources are empty for entirely different reasons, so they must not share a sentence.
+ * FRAME's emptiness is the live-view phase machine's business (§5.7 — a pause during an exposure
+ * is normal and must not read as a fault). STACK's is a trip through two nodes: a frame has to be
+ * captured, uploaded, ingested and previewed before anything can arrive here, and "waiting for
+ * the first frame" over a working link would look like a stall when it is a sequence that has not
+ * started.
+ */
+function Placeholder({
+  source,
+  phase,
+  stackConnected,
+  linkLive,
+}: {
+  source: ImageSource;
+  phase: SurfacePhase;
+  stackConnected: boolean;
+  linkLive: boolean;
+}): ReactNode {
+  const message =
+    source === 'stack'
+      ? stackMessage(stackConnected, linkLive)
+      : 'message' in phase
+        ? phase.message
+        : 'Waiting for the first frame…';
+
   return (
     <div className="flex h-full w-full items-center justify-center p-6 text-center">
       <p role="status" className="text-sm text-faint">
-        {'message' in phase ? phase.message : 'Waiting for the first frame…'}
+        {message}
       </p>
     </div>
   );
+}
+
+function stackMessage(connected: boolean, linkLive: boolean): string {
+  if (!linkLive) return 'Not connected to the field node.';
+  // The socket being down and the stacking server being down are the same symptom here: no
+  // picture. The panel beside this one carries the diagnosis, and saying it twice in different
+  // words is how two parts of a screen come to disagree.
+  if (!connected) return 'Waiting for the stacking server’s preview link…';
+  return 'No stacked preview yet. The first one arrives after a frame reaches the stacking server.';
 }
 
 /**
@@ -228,14 +400,25 @@ function StatusOverlay({
   source,
   frameId,
 }: {
-  phase: SurfacePhase;
-  source: 'live' | 'preview';
+  /** `null` on the stack source: the live-view phase machine describes the camera, not the stack. */
+  phase: SurfacePhase | null;
+  source: 'live' | 'preview' | 'stack';
   frameId?: string | undefined;
 }): ReactNode {
   const label =
-    source === 'preview'
-      ? `Last frame${frameId === undefined ? '' : ` · ${frameId}`}`
-      : 'Live view';
+    source === 'stack'
+      ? `Stacked preview${frameId === undefined ? '' : ` · ${frameId}`}`
+      : source === 'preview'
+        ? `Last frame${frameId === undefined ? '' : ` · ${frameId}`}`
+        : 'Live view';
+
+  if (phase === null) {
+    return (
+      <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col gap-1 bg-gradient-to-b from-surface/80 to-transparent p-3">
+        <span className="font-mono text-xs tracking-wide text-muted uppercase">{label}</span>
+      </div>
+    );
+  }
 
   return (
     <div className="pointer-events-none absolute inset-x-0 top-0 flex flex-col gap-1 bg-gradient-to-b from-surface/80 to-transparent p-3">
