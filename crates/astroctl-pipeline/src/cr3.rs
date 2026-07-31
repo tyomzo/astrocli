@@ -124,9 +124,14 @@ pub(crate) fn decode_cr3(bytes: &[u8]) -> Result<DecodedFrame, DecodeError> {
                 + u32::from(plane[top + left + 1])
                 + u32::from(plane[bottom + left])
                 + u32::from(plane[bottom + left + 1]);
-            // Saturating, because the optical-black region genuinely reads below the nominal
-            // black level — that is what read noise looks like from underneath — and a preview
-            // has no use for negative light.
+            // Saturating, because read noise is two-sided: the black level is the *mean* of the
+            // dark signal, so about half the photosites in an unlit part of the frame sit below
+            // it. Those cells have no meaningful negative value to carry and clamp to zero.
+            //
+            // On a genuinely dark frame that costs the bottom half of the noise distribution,
+            // which is worth knowing before trusting a preview to judge a dark by — but the
+            // stretch downstream takes its black point from a percentile, so the visible result
+            // is the same either way.
             let above_black = cell.saturating_sub(black) / 4;
             // A 16-bit plane minus a non-negative black level cannot exceed `u16::MAX`, so this
             // narrowing is lossless. The fallback saturates rather than wrapping, because a raw
