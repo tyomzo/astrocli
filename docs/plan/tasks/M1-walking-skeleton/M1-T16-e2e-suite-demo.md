@@ -1,7 +1,7 @@
 # M1-T16 — E2E suite, fault injection, session log, demo script
 
 **Milestone:** M1 · **Track:** all · **Depends on:** all M1 tasks · **Crates:** tests/, scripts/
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** SDD §9 (T-E2E-1, T-HOL-1, T-DUR-1 full versions); IMP §2/M1 exit criteria, §5
 **Tests gated:** T-E2E-1, T-HOL-1 (shaped link), plus wiring T-SLW-1/T-STALE-1/T-DUR-1/T-XFER-1/T-ING-1/T-IPC-1/T-ISO-1 into one suite
 

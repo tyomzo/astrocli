@@ -79,6 +79,12 @@ COPY crates/astroctl-llm/Cargo.toml crates/astroctl-llm/
 COPY crates/astroctl-ipc/Cargo.toml crates/astroctl-ipc/
 COPY crates/astroctl-field/Cargo.toml crates/astroctl-field/
 COPY crates/astroctl-stack/Cargo.toml crates/astroctl-stack/
+# The stub tree has to satisfy *every* target cargo can see, not just `src/lib.rs` and
+# `src/main.rs`. A crate that declares `[[bin]] path = "testdata/…"` — which M1-T07 and M1-T11
+# both do, for the harnesses their durability tests SIGKILL — makes cargo fail at target
+# resolution before it compiles a line, and the error names a path rather than a cause. So the
+# `[[bin]]` paths are read back out of the manifests that were just copied in, rather than listed
+# here: a list would be a third place to remember, after the manifest and the test that spawns it.
 RUN set -eu; \
     for dir in crates/*/; do \
         mkdir -p "$dir/src"; \
@@ -87,6 +93,16 @@ RUN set -eu; \
     for bin in field stack; do \
         printf '//! placeholder for the dependency layer\nfn main() {}\n' \
             >"crates/astroctl-$bin/src/main.rs"; \
+    done; \
+    awk '/^\[\[bin\]\]/ { section = 1; next } \
+         /^\[/ { section = 0 } \
+         section && /^[[:space:]]*path[[:space:]]*=/ { \
+             gsub(/^[^"]*"|"[^"]*$/, ""); print FILENAME "|" $0 }' \
+        crates/*/Cargo.toml \
+    | while IFS='|' read -r manifest declared; do \
+        stub="$(dirname "$manifest")/$declared"; \
+        mkdir -p "$(dirname "$stub")"; \
+        printf '//! placeholder for the dependency layer\nfn main() {}\n' >"$stub"; \
     done; \
     cargo build --release --workspace --locked
 

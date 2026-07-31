@@ -15,6 +15,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # 02:00 UTC, for the flake soak below. A nightly is the only place a ×20 run belongs: it takes
+  # over an hour, and the thing it measures — whether the suite is *stable* — is a property of the
+  # suite over time rather than of the commit that triggered it.
+  schedule:
+    - cron: "0 2 * * *"
 
 # A second push to the same branch makes the first one's result irrelevant. Cancel it rather than
 # paying for an answer nobody will read — but never on main, where every commit's status is a
@@ -79,15 +84,84 @@ jobs:
           ruff format --check workers/
           python3 -m compileall -q workers/
 
-  # T-E2E-1 lands in M1-T16 against the M0-T08 container harness. The placeholder is deliberate:
-  # the task requires it be `continue-on-error: false` from the moment it exists, so nobody can
-  # introduce it as advisory and leave it that way.
+  # The end-to-end suite against the M0-T08 container pair: T-E2E-1, the three fault scenarios,
+  # T-ISO-1 and T-HOL-1, plus T-XFER-1/T-ING-1/T-IPC-1 invoked by name. `continue-on-error: false`
+  # from birth, as the placeholder this replaces insisted — an advisory e2e job stays advisory.
+  #
+  # ---------------------------------------------------------------------------------------------
+  # Per-push, not nightly, and the measurement that decided it
+  # ---------------------------------------------------------------------------------------------
+  #
+  # M1-T16 allowed the shaped-link test to be nightly-only if it was slow. It is not: T-HOL-1 runs
+  # in ~26 s, because `tc` costs nothing to apply and the windows are ten seconds each. Measured on
+  # the development machine, one full pass is ~3.5 minutes — crate members ~30 s, faults ~70 s,
+  # T-E2E-1 ~47 s, T-ISO-1 ~25 s, T-HOL-1 ~26 s — and the image build dominates everything.
+  # Splitting a 26-second test into a separate schedule would buy nothing and cost the thing that
+  # matters most about an e2e suite, which is that it runs on the change that broke it.
+  #
+  # What *is* nightly is the ×20 soak below. That is the split worth having: this job answers "does
+  # this commit work", the soak answers "is the suite stable", and only the second one needs an
+  # hour.
   e2e:
-    name: end-to-end (M1-T16)
+    name: end-to-end
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     continue-on-error: false
+    # A scheduled run does the soak instead; running both would build the images twice for the
+    # same answer.
+    if: github.event_name != 'schedule'
     steps:
       - uses: actions/checkout@v4
-      - name: Placeholder until M1-T16
-        run: echo "T-E2E-1 activates in M1-T16; deploy/compose.yaml is already the harness it will use."
+
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+
+      # Shared with the gate job: the suite invokes T-XFER-1/T-ING-1/T-IPC-1 through cargo on the
+      # host, so it needs the same workspace build the gate already paid for.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+
+      # The images bake the binaries and the configs in, so they must be rebuilt from this commit.
+      # buildx's GitHub cache keeps the ~250-crate dependency layer between runs, which is the
+      # difference between a four-minute job and a fifteen-minute one — and a slow e2e job is a
+      # switched-off e2e job.
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Run the end-to-end suite
+        run: ./scripts/e2e.sh
+
+      # The pair is torn down by the script, but a failure leaves logs that the assertion message
+      # alone cannot replace — which node died, and what it said on the way out.
+      - name: Container logs, if it failed
+        if: failure()
+        run: docker compose -f deploy/compose.yaml logs --no-color --tail 200 || true
+
+  # The flake gate, as a standing signal rather than a one-off.
+  #
+  # M1-T16's acceptance criterion is ×20 consecutive runs with zero flakes. That is a real number
+  # somebody had to produce once, and it decays the moment it is produced — a suite is stable until
+  # the next timing-dependent assertion lands in it. Running it nightly is what keeps the number
+  # true instead of historical.
+  #
+  # `--repeat` loops rather than retries, deliberately: a retry would hide exactly the number this
+  # job exists to report.
+  e2e-soak:
+    name: end-to-end soak (×20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    continue-on-error: false
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: gate
+      - uses: docker/setup-buildx-action@v3
+      - name: Twenty consecutive runs
+        run: ./scripts/e2e.sh --repeat 20
+      - name: Container logs, if it failed
+        if: failure()
+        run: docker compose -f deploy/compose.yaml logs --no-color --tail 500 || true

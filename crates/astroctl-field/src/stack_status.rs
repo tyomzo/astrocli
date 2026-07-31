@@ -43,7 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use astroctl_core::bus::EventBus;
-use astroctl_core::event::{Alert, StackStatus, WorkerState};
+use astroctl_core::event::{StackStatus, WorkerState};
 use chrono::{DateTime, Utc};
 
 use crate::proxy::StackProxy;
@@ -66,12 +66,39 @@ pub const REPUBLISH_INTERVAL: Duration = Duration::from_secs(30);
 /// minute after it stopped answering, which is the one thing this module exists to prevent.
 const POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// `alert` code for the stacking server becoming unreachable.
-///
-/// The T11 handoff's distinction, kept: a link that is down and a disk that is full both leave the
-/// transfer queue growing and look identical from the field node, so the *code* is what tells them
-/// apart. `STACK_DISK_FULL` is ingest's (published on the stack node); this is the other one.
-pub const ALERT_UNREACHABLE: &str = "STACK_UNREACHABLE";
+// -----------------------------------------------------------------------------------------
+// Why this module raises no alert (M1-T16, SDD change note 1.23.0)
+// -----------------------------------------------------------------------------------------
+//
+// It used to. An outage then produced *two* `STACK_UNREACHABLE` alerts — one from here on the
+// 5 s poll, one from the transfer agent on its first failed upload — each correctly fired once
+// per transition, and together giving the operator two banner rows for one cause. The transfer
+// agent is now the sole producer. Four reasons, in the order they mattered:
+//
+//   1. **An alert is about a consequence; a stateful topic is about a state.** `stack.status` is
+//      already the state, it already carries `offline` with the last known counts, and §5.8.3
+//      replays it to a reconnecting client. The alert this module raised said nothing the topic
+//      beside it did not — and said it *worse*, because an alert is a moment and a client that
+//      reconnects after it has missed it entirely.
+//   2. **The transfer agent's alert says the thing the topic cannot**: frames are queued and not
+//      being delivered. That is the operator-actionable half, and it is the half worth a banner.
+//   3. **The two producers did not agree on the vocabulary.** The agent announces recovery as
+//      `STACK_ONLINE` (M1-T11's documented contract). This module announced it as an *info*
+//      alert still coded `STACK_UNREACHABLE` — a code naming the opposite of what it announced,
+//      which no client could reasonably switch on.
+//   4. The coverage given up is bounded and benign: an outage that begins while the queue is
+//      empty now raises no alert. Nothing is at risk while nothing is queued, the panel shows
+//      `offline` throughout, and the first capture after that raises the agent's alert.
+//
+// The alternatives considered were one code with a `producer` field, and two distinct codes.
+// Both were rejected for the same reason: they solve the presentation of a duplicate rather than
+// the duplicate. A `producer` field is a §4.3 schema change — it moves the wire format, the PWA
+// mirror and the golden fixtures — to let a client dedupe something that should not have been
+// emitted twice; two codes leave both alerts firing during a capture outage, which is the case
+// the operator actually meets.
+//
+// The module still detects the outage: it logs it once per transition, and it publishes
+// `stack.status: offline`, which is what the stack panel renders.
 
 /// What the last successful poll saw, so an unreachable node can be reported honestly.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -121,10 +148,7 @@ async fn run(proxy: Arc<StackProxy>, bus: EventBus) {
             Ok(status) => {
                 if unreachable {
                     unreachable = false;
-                    bus.publish(Alert::info(
-                        ALERT_UNREACHABLE,
-                        "The stacking server is reachable again.".to_owned(),
-                    ));
+                    tracing::info!("the stacking server is answering again");
                 }
                 status
             }
@@ -132,13 +156,6 @@ async fn run(proxy: Arc<StackProxy>, bus: EventBus) {
                 if !unreachable {
                     unreachable = true;
                     tracing::warn!(%reason, "the stacking server is not answering");
-                    bus.publish(Alert::warning(
-                        ALERT_UNREACHABLE,
-                        format!(
-                            "The stacking server is not answering ({reason}). Frames are still \
-                             being captured and queued; they will upload when it returns."
-                        ),
-                    ));
                 }
                 StackStatus::offline(last_known.session_frame_count, last_known.last_preview_ts)
             }

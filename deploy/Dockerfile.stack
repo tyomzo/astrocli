@@ -14,10 +14,23 @@
 #     with no GPU or ML runtime and no worker process management; packaging the workers with it
 #     would make that rule unverifiable at the only place it can be checked, which is the image.
 #
-#   * python3 is installed. `workers.python_interpreter` has to name a real interpreter or M1-T13's
-#     first spawn becomes a puzzle. The production shape is the venv the example config names;
-#     the harness runs no worker code, so the system interpreter is the honest stand-in and the
-#     requirements.txt CUDA stack is deliberately not installed.
+#   * python3 **and workers/requirements.txt** are installed. `workers.python_interpreter` has to
+#     name a real interpreter or M1-T13's first spawn becomes a puzzle. M1-T13 stopped at a bare
+#     interpreter on purpose — the supervision half of T-IPC-1 (handshake, ping, version refusal,
+#     restart) runs without a single dependency, and the worker reports a missing one as a
+#     structured error rather than failing to start. That was right then and is wrong now: M1-T14
+#     put the preview job behind the same worker, and T-E2E-1 asserts the preview comes back
+#     through the proxy, so numpy and Pillow became load-bearing for the milestone's own exit
+#     criterion. A harness image without them fails M1-T16 with `the worker environment is
+#     incomplete`, which is the worker being exactly as honest as it was built to be about an
+#     image that is not.
+#
+#     `--break-system-packages` into the system interpreter, rather than the venv the example
+#     config names: the harness config names `/usr/bin/python3`, and a venv would put a second
+#     path in a file whose whole job is to differ from the example in as few places as possible.
+#     PEP 668 marks Debian's interpreter externally managed and this is the standard override for
+#     a container, where there is no system Python to break. The CUDA and ML stack stays out —
+#     it belongs to ml_worker.py, which nothing in M1 spawns.
 #
 #   * No PWA stage. The operator's browser never loads anything from this node — it talks to the
 #     field node and reaches this one through /stack/* (ADR-07).
@@ -57,6 +70,12 @@ COPY crates/astroctl-llm/Cargo.toml crates/astroctl-llm/
 COPY crates/astroctl-ipc/Cargo.toml crates/astroctl-ipc/
 COPY crates/astroctl-field/Cargo.toml crates/astroctl-field/
 COPY crates/astroctl-stack/Cargo.toml crates/astroctl-stack/
+# The stub tree has to satisfy *every* target cargo can see, not just `src/lib.rs` and
+# `src/main.rs`. A crate that declares `[[bin]] path = "testdata/…"` — which M1-T07 and M1-T11
+# both do, for the harnesses their durability tests SIGKILL — makes cargo fail at target
+# resolution before it compiles a line, and the error names a path rather than a cause. So the
+# `[[bin]]` paths are read back out of the manifests that were just copied in, rather than listed
+# here: a list would be a third place to remember, after the manifest and the test that spawns it.
 RUN set -eu; \
     for dir in crates/*/; do \
         mkdir -p "$dir/src"; \
@@ -65,6 +84,16 @@ RUN set -eu; \
     for bin in field stack; do \
         printf '//! placeholder for the dependency layer\nfn main() {}\n' \
             >"crates/astroctl-$bin/src/main.rs"; \
+    done; \
+    awk '/^\[\[bin\]\]/ { section = 1; next } \
+         /^\[/ { section = 0 } \
+         section && /^[[:space:]]*path[[:space:]]*=/ { \
+             gsub(/^[^"]*"|"[^"]*$/, ""); print FILENAME "|" $0 }' \
+        crates/*/Cargo.toml \
+    | while IFS='|' read -r manifest declared; do \
+        stub="$(dirname "$manifest")/$declared"; \
+        mkdir -p "$(dirname "$stub")"; \
+        printf '//! placeholder for the dependency layer\nfn main() {}\n' >"$stub"; \
     done; \
     cargo build --release --workspace --locked
 
@@ -92,7 +121,16 @@ RUN apt-get update \
         iproute2 \
         netcat-openbsd \
         python3 \
+        python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# The workers' dependencies, from the file that declares them rather than from a list repeated
+# here — the version constraints are argued in workers/requirements.txt and a second copy would be
+# free to drift from the first. Copied alone, before the rest of `workers/`, so editing a worker
+# does not re-resolve two wheels.
+COPY workers/requirements.txt /tmp/requirements.txt
+RUN pip install --break-system-packages --no-cache-dir -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
 RUN useradd --system --no-create-home --user-group --uid 10001 astroctl
 

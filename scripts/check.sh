@@ -60,6 +60,25 @@ gate() {
     fi
 }
 
+# The end-to-end suite (tests/e2e) is not a workspace member — it needs Docker and two built
+# images, and `cargo test --workspace` has to stay hermetic. That exclusion normally costs a crate
+# its linting, as it does spikes/, and this one must not pay it: the e2e suite is the permanent
+# health signal for every later milestone, so it is held to the same fmt and clippy bar as the
+# product. Hence a second manifest on those two gates, and only those two.
+E2E_MANIFEST="tests/e2e/Cargo.toml"
+
+fmt() {
+    cargo fmt --all --check || return 1
+    [[ -f "$E2E_MANIFEST" ]] || return 0
+    cargo fmt --manifest-path "$E2E_MANIFEST" --all --check
+}
+
+clippy() {
+    cargo clippy --workspace --all-targets --quiet -- -D warnings || return 1
+    [[ -f "$E2E_MANIFEST" ]] || return 0
+    cargo clippy --manifest-path "$E2E_MANIFEST" --all-targets --quiet -- -D warnings
+}
+
 frontend() {
     # `npm ci`, not `npm install`: the lockfile is the pinned input, and a gate that silently
     # resolves a different tree than CI is not a gate.
@@ -76,8 +95,8 @@ frontend() {
 echo "AstroCtl quality gate"
 echo
 
-gate fmt      cargo fmt --all --check
-gate clippy   cargo clippy --workspace --all-targets --quiet -- -D warnings
+gate fmt      fmt
+gate clippy   clippy
 gate deps     ./scripts/check-deps.sh
 gate async    ./scripts/check-async.sh
 gate test     cargo test --workspace --quiet

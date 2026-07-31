@@ -4,7 +4,25 @@ members = ["crates/*"]
 
 # `spikes/` holds throwaway hardware-spike code (M2-T01, M3-T01) with its own `[workspace]`
 # stanzas. It is deliberately never built by `cargo build --workspace`.
-exclude = ["spikes"]
+#
+# `tests/` holds the M1-T16 end-to-end suite, which is the opposite of throwaway and excluded for
+# different reasons. Three of them, and they are worth writing down because "why is the e2e suite
+# not a workspace member" is the first question anyone will have:
+#
+#   1. It cannot run without Docker and two built images. `cargo test --workspace` is the gate
+#      (scripts/check.sh) and has to stay hermetic and offline; a member whose tests need a
+#      container engine would make the gate's meaning depend on the machine it ran on.
+#   2. ADD §5.6 lists exactly fourteen crates and scripts/check-deps.sh asserts that set. A
+#      fifteenth member is a violation there by construction — correctly, because the e2e suite
+#      is not part of the architecture it tests.
+#   3. Membership would put reqwest and tokio-tungstenite into the root Cargo.lock, and both
+#      Dockerfiles build `--workspace` in their dependency layer from that lock. The product
+#      images would then compile the test client's dependency tree, and every Dockerfile would
+#      need a fifteenth `COPY … Cargo.toml` line to make the workspace load at all.
+#
+# The usual cost of exclusion — never being linted, as spikes/ is not — is paid off in
+# scripts/check.sh instead: the fmt and clippy gates name this manifest explicitly.
+exclude = ["spikes", "tests"]
 
 [workspace.package]
 version = "0.1.0"

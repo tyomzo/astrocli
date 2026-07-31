@@ -595,8 +595,46 @@ fn build_mount(
     // Fault and profile knobs live on the factory rather than in config (SDD §9): a failure
     // scenario is a value a test writes down, not something an operator can switch on in
     // production YAML.
+    //
+    // `ASTROCTL_SIM_FAULTS` does not weaken that, and the distinction is worth being precise
+    // about because it looks at first like the config key §9 forbids. It is still a constructor
+    // parameter — the plan is parsed once, here, and moved into the factory before any device
+    // exists; there is no setter and nothing can change it later. What the variable buys is a
+    // *process boundary*: M1-T16's end-to-end suite drives two containers over HTTP, so the only
+    // way it can say "give me a mount whose link dies two seconds after connect" is to say it to
+    // the thing that starts the container. An in-process test needs none of this and should keep
+    // using `with_faults` directly.
+    //
+    // It is an environment variable rather than a config key on purpose:
+    //
+    //   * `FieldConfig` is `deny_unknown_fields` at every level (SDD §4.4), so a fault key would
+    //     be a real schema extension shipped to every deployment — and `/api/system/info`
+    //     publishes the config, which would put fault injection in a production node's API.
+    //   * A node started with faults is a node whose behaviour is a lie, so it says so at WARN
+    //     on the way up. An operator who finds that line in a journal knows immediately why the
+    //     mount "broke".
+    //   * A malformed value is fatal. The failure mode this guards against is a scenario that
+    //     asks for a fault, silently gets a mount that behaves, and passes.
+    let faults = match std::env::var("ASTROCTL_SIM_FAULTS") {
+        Ok(spec) => {
+            let plan = astroctl_drivers::simulator::FaultPlan::from_spec(&spec)
+                .map_err(|e| format!("ASTROCTL_SIM_FAULTS is not a fault plan: {e}"))?;
+            if !plan.is_empty() {
+                tracing::warn!(
+                    %spec,
+                    faults = plan.len(),
+                    "ASTROCTL_SIM_FAULTS is set: the simulated mount will fail on purpose. \
+                     This node is a test harness, not a telescope."
+                );
+            }
+            plan
+        }
+        Err(_) => astroctl_drivers::simulator::FaultPlan::none(),
+    };
     registry
-        .register_mount(astroctl_drivers::simulator::SimulatorMountFactory::new())
+        .register_mount(
+            astroctl_drivers::simulator::SimulatorMountFactory::new().with_faults(faults),
+        )
         .map_err(|e| format!("cannot register the simulator mount driver: {e}"))?;
 
     let driver = registry
