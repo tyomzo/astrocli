@@ -1,7 +1,7 @@
 # M3-T02 — Serial task: lanes, timeout, heartbeat
 
 **Milestone:** M3 · **Depends on:** M3-T01 · **Crates:** astroctl-drivers
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §5.2.4 (two-lane queue, timings); PRD REL-02, PRF-12; MNT-01 (port autodetect)
 **Tests gated:** T-SER-1, T-SER-3
 

@@ -1,7 +1,7 @@
 # M1-T04 — PWA foundation: WS store, snapshot, mount panel
 
 **Milestone:** M1 · **Track:** C · **Depends on:** M1-T03 (contract; can develop against a mock server) · **Crates:** frontend/
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** SDD §5.9 — **read the layout sketches and the four-slot table before writing components**; the phone/tablet arrangement, the summoned-nudge interaction and the target-slot contract are all specified there. PRD USB-01/03/04/05/08/12
 
 ## Objective

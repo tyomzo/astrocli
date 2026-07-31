@@ -1,7 +1,7 @@
 # M2-T02 — Camera thread, command channel, connect/settings
 
 **Milestone:** M2 · **Depends on:** M2-T01 findings · **Crates:** astroctl-drivers
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done (settings round-trip evidence ran with M2-T03's hardware session)
 **Spec:** SDD §5.3.1 (thread model, CamCmd set); PRD CAM-01/02
 
 ## Objective

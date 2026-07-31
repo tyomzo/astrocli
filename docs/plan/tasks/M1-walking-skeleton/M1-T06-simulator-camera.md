@@ -1,7 +1,7 @@
 # M1-T06 — SimulatorCamera and SimulatorGuideCamera: synthetic star fields
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M1-T01 · **Crates:** astroctl-drivers
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** PRD §4.5 (SimulatorCamera), HAL-11; SDD §9
 
 ## Objective

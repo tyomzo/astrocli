@@ -1,7 +1,7 @@
 # M1-T01 — HAL traits, capabilities, registry
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M0 · **Crates:** astroctl-hal
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §5.1 (verbatim trait signatures); PRD §4.1, HAL-01..08; ADD ADR-02
 
 ## Objective

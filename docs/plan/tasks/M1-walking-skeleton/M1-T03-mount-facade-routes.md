@@ -1,7 +1,7 @@
 # M1-T03 — Mount facade, routes, position streaming
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M1-T02 · **Crates:** astroctl-field
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** SDD §5.8.1 route table (mount rows), §5.8.3 WS hub, §4.3 topics; PRD MNT-01..07
 
 ## Objective

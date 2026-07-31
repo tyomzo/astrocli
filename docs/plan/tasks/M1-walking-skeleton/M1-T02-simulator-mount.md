@@ -1,7 +1,7 @@
 # M1-T02 — SimulatorMount with fault injection
 
 **Milestone:** M1 · **Track:** A · **Depends on:** M1-T01 · **Crates:** astroctl-drivers
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** PRD §4.5 (SimulatorMount), HAL-11; SDD §9 (fault injection as constructor param)
 
 ## Objective

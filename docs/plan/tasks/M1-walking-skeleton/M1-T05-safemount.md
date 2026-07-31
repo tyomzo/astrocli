@@ -1,7 +1,7 @@
 # M1-T05 — SafeMount: limits, slew TTL, e-stop
 
 **Milestone:** M1 · **Track:** A+C · **Depends on:** M1-T03, M1-T04 (for the header e-stop button this task activates) · **Crates:** astroctl-safety, astroctl-field, frontend/
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done
 **Spec:** SDD §5.4, §5.8.1 (dead-man paragraph), §5.8.2; PRD MNT-08/15/16, REL-01, PRF-12; ADD ADR-11
 **Tests gated:** T-SLW-1
 

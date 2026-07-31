@@ -1,7 +1,7 @@
 # M1-T14 — Preview flow end-to-end + stack panel
 
 **Milestone:** M1 · **Track:** B+C · **Depends on:** M1-T11, T12, T13 · **Crates:** astroctl-stack, astroctl-field, frontend/
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** SDD §5.9 — the tablet sketch and the four-slot table define where the stack view sits, what M1 fills, and what 2b/2c drop into. ADD §5.2.2 (Preview + Export skeleton), ADR-07 (proxy); PRD STK-19, USB-06; SDD §8.3(5)
 
 ## Objective

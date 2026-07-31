@@ -1,7 +1,7 @@
 # M1-T08 — Capture flow, camera routes, PWA camera panel
 
 **Milestone:** M1 · **Track:** A+C · **Depends on:** M1-T06, M1-T07 · **Crates:** astroctl-field, frontend/
-**Size:** L · **Status:** not started
+**Size:** L · **Status:** done
 **Spec:** SDD §5.3.2 (flow, minus gphoto2 specifics), §5.6 (FSM skeleton), §5.8.1 camera rows; PRD CAM-01..04/08
 
 ## Objective
