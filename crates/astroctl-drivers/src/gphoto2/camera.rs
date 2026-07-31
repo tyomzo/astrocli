@@ -333,10 +333,12 @@ impl CanonGPhoto2Camera {
                     .await
             }
             Trigger::Bulb(duration) => {
+                let file_wait = OpClass::bulb_file_wait(duration, &self.timeouts);
                 link.request(OpClass::Capture(duration), move |reply| {
                     CamCmd::CaptureBulb {
                         duration,
                         since,
+                        file_wait,
                         reply,
                     }
                 })
@@ -1667,9 +1669,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_budget_is_the_exposure_plus_the_configured_allowance() {
+    async fn the_capture_budget_covers_the_exposure_twice_over_plus_the_allowance() {
         // A 300 s bulb frame is not a wedged camera. The budget has to track the exposure or it
-        // either abandons the thread mid-integration or never fires at all.
+        // either abandons the thread mid-integration or never fires at all — and it has to track
+        // it *twice*, because the body shoots a matching dark frame afterwards. Measured on the
+        // R10: a 30 s bulb completes in 62.9 s and a 60 s bulb in 123.0 s.
         let timeouts = CameraTimeouts {
             config_seconds: 5,
             capture_extra_seconds: 30,
@@ -1677,7 +1681,7 @@ mod tests {
         };
         assert_eq!(
             OpClass::Capture(Duration::from_secs(300)).budget(&timeouts),
-            Duration::from_secs(330)
+            Duration::from_secs(630)
         );
         assert_eq!(
             OpClass::Capture(Duration::ZERO).budget(&timeouts),
@@ -1687,6 +1691,48 @@ mod tests {
             OpClass::Download.budget(&timeouts),
             Duration::from_secs(120)
         );
+
+        // The two measured frames, against the example config's own allowance: the budget must
+        // clear the real figure with room, or the shipped default fails good frames. An earlier
+        // version budgeted `exposure + allowance` and did exactly that to a 30 s bulb.
+        assert!(
+            OpClass::Capture(Duration::from_secs(30)).budget(&timeouts)
+                > Duration::from_secs_f64(62.9),
+            "the shipped default must accommodate a measured 30 s bulb frame"
+        );
+        assert!(
+            OpClass::Capture(Duration::from_secs(60)).budget(&timeouts)
+                > Duration::from_secs_f64(123.0),
+            "the shipped default must accommodate a measured 60 s bulb frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bulb_file_wait_expires_before_the_budget_it_sits_inside() {
+        // The ordering that makes the driver's own diagnosis reachable. If this wait outlived the
+        // operation budget, "the camera had not announced a file" could never be returned — the
+        // wedge protocol would fire first and the operator would read a bare timeout instead.
+        let timeouts = CameraTimeouts {
+            config_seconds: 5,
+            capture_extra_seconds: 30,
+            download_seconds: 120,
+        };
+        for seconds in [1_u64, 10, 30, 60, 300] {
+            let exposure = Duration::from_secs(seconds);
+            let wait = OpClass::bulb_file_wait(exposure, &timeouts);
+            let budget = OpClass::Capture(exposure).budget(&timeouts);
+            // The thread holds the shutter and only then starts waiting.
+            assert!(
+                exposure + wait < budget,
+                "a {seconds} s exposure waits {wait:?} inside a {budget:?} budget, which the \
+                 wedge protocol would cut short"
+            );
+            // And it must still allow the body a full dark-frame pass.
+            assert!(
+                wait > exposure,
+                "a {seconds} s exposure must be allowed at least its own length of readout"
+            );
+        }
     }
 
     #[tokio::test]

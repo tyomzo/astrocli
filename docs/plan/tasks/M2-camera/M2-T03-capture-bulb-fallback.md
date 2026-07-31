@@ -19,19 +19,20 @@ frame store's begin/commit discipline, and the composable CLI fallback.
 
 ## Acceptance criteria
 
-- [~] 10 real captures incl. 2× bulb (30 s, 60 s): all CR3s open in libraw, durable, metadata correct exposure values
-  — **substantially met on real hardware, in both mode-dial positions.** With the dial on **Bulb**:
-  10 s holds land well-formed CR3s (1.5–1.6 MB dark, 23.5 MB lit) under the request's stem with no
-  temporary left behind, and the exposure recorded is the **camera's own** `BulbExposureTime` (9 s for
-  a 10 s hold), not the request echoed. With the dial on **M**: timed capture in 1.83–1.98 s giving
-  26.5–27.3 MB CR3s, `1/20` parsed to a 50 ms exposure, and **RAW+JPEG landing both files under one
-  stem** (15.5 MB CR3 + 3.7 MB JPEG) with a following capture getting exactly its own pair — which is
-  the check that the event queue was left clean. The suite passes in either dial position and asserts
-  the *refusal* for whichever mechanism the dial has taken away.
-  Outstanding: the 30 s/60 s bulb pair and a full 10-frame sequence run; `libraw`/`rawler` decoding
-  cannot run from this crate at all (ADD §5.6 rule 1 — `rawler` lives in `astroctl-pipeline`), so the
-  hardware tests check the CR3 and JPEG container headers instead and M2-T01's decode stands as the
-  decode evidence.
+- [x] 10 real captures incl. 2× bulb (30 s, 60 s): all CR3s open in libraw, durable, metadata correct exposure values
+  — **met on real hardware, in both mode-dial positions.** Dial on **M**: **10 consecutive timed
+  captures**, 287.3 MB, 1.86 s/frame (1.82–1.89 s), ten files under ten stems, no temporary and no
+  collision — which is the run that proves what only goes wrong the *second* time, since the body
+  reuses one camera-side filename. Plus RAW+JPEG landing both files under one stem (15.7 MB CR3 +
+  3.9 MB JPEG), raw first, with a following capture getting exactly its own pair. Dial on **Bulb**:
+  the **30 s and 60 s pair**, on the shipped default budget — 30 s → camera reports 29 s in 62.9 s
+  wall; 60 s → reports 59 s in 123.0 s wall. Every exposure figure is the body's own
+  `BulbExposureTime`, one second short of the request each time, not the request echoed. The suite
+  passes in either dial position and asserts the *refusal* for whichever mechanism the dial has
+  taken away.
+  Remaining gap: `libraw`/`rawler` decoding cannot run from this crate at all (ADD §5.6 rule 1 —
+  `rawler` lives in `astroctl-pipeline`), so the hardware tests check the CR3 and JPEG container
+  headers instead and M2-T01's decode stands as the decode evidence.
 - [x] Abort mid-bulb: shutter closes (audible/EXIF check), no partial frame, FSM recovers
   — **met on hardware.** Abort during a 60 s bulb returned in **846–919 ms**, `Aborted`, with the
   session directory empty (frames *and* temporaries), and the camera answering normally afterwards.
@@ -47,3 +48,30 @@ frame store's begin/commit discipline, and the composable CLI fallback.
 - [ ] T-DUR-1 rerun with real camera: kill during download → clean recovery
   — **not run.** Needs a session at the camera; the stale-temporary trap it targets is covered against
   the mock (`download.rs`), which reproduces libgphoto2's refusal to overwrite.
+
+## Open, needs a healthy body: abort → bulb
+
+The last hardware session ended with the camera dropping off USB (`lsusb` empty, probe finding
+nothing), and it left one question confounded rather than answered.
+
+**Observed:** after a single aborted bulb exposure, every subsequent bulb frame failed with "the
+shutter closed but the camera had not announced a file" — *including from a freshly started
+process*, which rules out driver-side state and points at the body. Run in isolation, both the
+10 s bulb and the 30 s/60 s pair pass; only the abort-then-bulb order fails.
+
+**Hypothesis:** with `capturetarget=Internal RAM` the body buffers one frame, and an aborted
+exposure's frame is never downloaded, so the buffer stays occupied and the next capture has
+nowhere to put its frame. The driver now waits for that orphan (scaled to how long the shutter was
+actually open) and deletes it camera-side.
+
+**Why it is not settled:** adding the delete did not fix the symptom, and the camera then vanished
+from USB — so a body that was already failing is an equally good explanation for the whole
+episode, including the original observation. The delete is kept because HAL-03 requires an aborted
+capture to leave nothing behind, which is true independently of what it fixes.
+
+**To settle it:** on a body known to be healthy (fresh battery, confirmed on `lsusb`), run
+`an_abort_mid_bulb_returns_promptly_and_leaves_nothing_on_disk` followed by
+`a_ten_second_bulb_exposure_lasts_ten_seconds`. If the second passes, the delete is the fix and
+this note becomes an obligation in SDD §5.3.2. If it fails, the buffer hypothesis is wrong and the
+next thing to check is whether `eosremoterelease` needs an explicit reset to `None` after an
+early release.

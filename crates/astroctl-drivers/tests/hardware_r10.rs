@@ -440,6 +440,178 @@ async fn a_raw_plus_jpeg_capture_lands_both_files_under_one_stem() {
     println!("=== run complete ===\n");
 }
 
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; FIRES THE SHUTTER 10 TIMES; run with --ignored --nocapture"]
+async fn ten_consecutive_captures_are_each_complete_and_none_collides() {
+    // The acceptance criterion's volume half. One capture working proves the mechanism; ten
+    // consecutive ones prove the things that only go wrong the *second* time — a stale temporary
+    // from the previous frame, an event left in the queue, a camera-side filename the body reuses
+    // (`capt0000.cr3` every time, with `capturetarget=Internal RAM`), a claim never released.
+    let camera: Arc<dyn Camera> = CanonGPhoto2CameraFactory::new()
+        .create(&config())
+        .expect("this build has the libgphoto2 backend");
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T03 · ten consecutive captures ===\n");
+    if camera
+        .settings()
+        .await
+        .expect("settings")
+        .shutter
+        .eq_ignore_ascii_case("bulb")
+    {
+        println!("dial is on Bulb, so no timed capture can run; skipping");
+        println!("--- move the mode dial to M and re-run ---");
+        camera.disconnect().await.expect("disconnect");
+        return;
+    }
+
+    const FRAMES: usize = 10;
+    let dir = scratch_dir("sequence");
+    let mut total_bytes = 0_u64;
+    let started = Instant::now();
+
+    for index in 0..FRAMES {
+        let stem = format!("light_{index:05}");
+        let frame = Instant::now();
+        let result = camera
+            .capture(&CaptureRequest::new(&dir, &stem))
+            .await
+            .unwrap_or_else(|error| panic!("capture {index} failed: {error}"));
+
+        let raw = result
+            .raw()
+            .unwrap_or_else(|| panic!("capture {index} produced no science file"));
+        assert_eq!(
+            raw.path,
+            dir.join(format!("{stem}.cr3")),
+            "frame {index} landed under the wrong name — the body reuses one camera-side \
+             filename, so a driver that echoed it would overwrite every frame with the next"
+        );
+        assert_is_a_cr3(&raw.path);
+        total_bytes += result.total_bytes();
+        println!(
+            "  {index:>2}: {} ({:.1} MB) in {:?}",
+            raw.path.file_name().expect("a name").to_string_lossy(),
+            raw.size_bytes as f64 / 1e6,
+            frame.elapsed()
+        );
+    }
+
+    let elapsed = started.elapsed();
+    println!(
+        "\n{FRAMES} frames, {:.1} MB total, {:?} ({:.2} s/frame)",
+        total_bytes as f64 / 1e6,
+        elapsed,
+        elapsed.as_secs_f64() / FRAMES as f64
+    );
+
+    // Ten frames, ten files, nothing else: no temporary survived and no frame overwrote another.
+    let entries = listing(&dir);
+    assert_eq!(
+        entries.len(),
+        FRAMES,
+        "expected exactly {FRAMES} frames, found {entries:?}"
+    );
+    assert!(
+        entries.iter().all(|name| !name.starts_with(".tmp_")),
+        "a temporary survived the sequence: {entries:?}"
+    );
+    for index in 0..FRAMES {
+        assert!(
+            entries.contains(&format!("light_{index:05}.cr3")),
+            "frame {index} is missing from {entries:?}"
+        );
+    }
+
+    // And the camera is still fully usable afterwards — the claim was released every time.
+    let battery = camera.battery().await.expect("battery after the sequence");
+    println!("battery after the sequence: {}%", battery.percent);
+
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB with the dial on Bulb; HOLDS THE SHUTTER 30 s THEN 60 s"]
+async fn the_thirty_and_sixty_second_bulb_pair() {
+    // The acceptance criterion's long half, and the one that actually exercises the budget
+    // arithmetic: `OpClass::Capture(d)` is `d + capture_extra_seconds`, so a 60 s exposure is
+    // only *not* a wedged camera because the exposure is carried inside the operation class. A
+    // fixed budget would have abandoned the thread at 30 s with the shutter open.
+    // **The example config's own 30 s allowance**, deliberately. The budget is
+    // `2 × exposure + capture_extra_seconds`, and the doubling is what makes the shipped default
+    // sufficient for a 60 s bulb frame on a body doing long-exposure noise reduction. An earlier
+    // version budgeted `exposure + allowance` and failed a perfectly good 30 s frame; running
+    // this against the real default is what stops that regressing quietly.
+    let camera: Arc<dyn Camera> = CanonGPhoto2CameraFactory::new()
+        .create(&config())
+        .expect("this build has the libgphoto2 backend");
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T03 · 30 s + 60 s bulb pair ===\n");
+    println!(
+        "capture_extra_seconds = {} (the example config's own value)",
+        config().timeouts.capture_extra_seconds
+    );
+    let dir = scratch_dir("bulbpair");
+    if !bulb_available(&camera, &dir).await {
+        camera.disconnect().await.expect("disconnect");
+        return;
+    }
+
+    for seconds in [30_u64, 60] {
+        let requested = Duration::from_secs(seconds);
+        let stem = format!("light_bulb_{seconds}s");
+        println!("--- {seconds} s exposure starting ---");
+
+        let started = Instant::now();
+        let result = camera
+            .capture_bulb(&CaptureRequest::new(&dir, &stem), requested)
+            .await
+            .unwrap_or_else(|error| panic!("the {seconds} s bulb exposure failed: {error}"));
+        let wall = started.elapsed();
+
+        let raw = result.raw().expect("a science file");
+        println!(
+            "  {seconds} s: wall {:?}, camera reports {:?}, {} ({:.1} MB)",
+            wall,
+            result.exposure,
+            raw.path.file_name().expect("a name").to_string_lossy(),
+            raw.size_bytes as f64 / 1e6
+        );
+
+        assert_eq!(raw.path, dir.join(format!("{stem}.cr3")));
+        assert_is_a_cr3(&raw.path);
+        assert!(
+            wall >= requested,
+            "the hold was shorter than asked: {wall:?} < {requested:?}"
+        );
+        // The body's own figure, which M2-T01 and M2-T03 both saw run one second short of the
+        // request. Two seconds of tolerance covers that without accepting an echoed request.
+        let reported = result.exposure.as_secs_f64();
+        assert!(
+            (reported - seconds as f64).abs() <= 2.0,
+            "the camera reports {reported} s for a {seconds} s hold, which is outside tolerance"
+        );
+        assert_eq!(result.settings.shutter, "bulb");
+    }
+
+    let entries = listing(&dir);
+    println!("\nsession directory: {entries:?}");
+    assert_eq!(
+        entries,
+        vec![
+            "light_bulb_30s.cr3".to_owned(),
+            "light_bulb_60s.cr3".to_owned()
+        ],
+        "both frames, no temporary"
+    );
+
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
 /// Whether the body currently offers a bulb mechanism, asserting the refusal when it does not.
 ///
 /// The mirror of the timed path's dial check, and it exists for the same reason: **the physical

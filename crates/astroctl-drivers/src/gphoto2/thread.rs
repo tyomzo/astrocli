@@ -82,13 +82,25 @@ pub(crate) enum OpClass {
     /// **Measured**: 0.4–10 ms per read, 11 ms per write. The budget exists for the pathological
     /// case, not the normal one.
     Config,
-    /// One exposure of the carried duration, plus the trigger and the wire.
+    /// One exposure of the carried duration, plus the body's post-processing and the wire.
     ///
-    /// The budget is `exposure + capture_extra_seconds` because the exposure is the one part of
-    /// the cost that is *known in advance and unbounded*: a 300 s bulb frame is not a wedged
-    /// camera, and a fixed budget would either abandon the thread mid-integration or be so large
-    /// it never fires. The allowance on top covers everything that is not the exposure —
-    /// M2-T01 measured 2.08 s of it for a timed capture, against a 30 s default.
+    /// The budget is **`2 × exposure + capture_extra_seconds`**, and the factor of two is
+    /// measured rather than defensive. With long-exposure noise reduction on — the default on
+    /// this body — a Canon shoots a *matching dark frame* after the real one and only then
+    /// announces a file. M2-T03 measured a 30 s bulb completing end to end in 62.9 s and a 60 s
+    /// bulb in 123.0 s: twice the exposure, to within the wire time. A budget of
+    /// `exposure + allowance` fits neither, and the first version of this failed a perfectly good
+    /// 30 s frame because of it.
+    ///
+    /// The exposure has to be in the budget at all because it is the one part of the cost that is
+    /// *known in advance and unbounded*: a 300 s bulb frame is not a wedged camera, and a fixed
+    /// budget would either abandon the thread mid-integration or be so large it never fires. The
+    /// allowance on top covers what scales with neither — M2-T01 measured 2.08 s of trigger and
+    /// transfer for a timed capture, against a 30 s default.
+    ///
+    /// Generous for a body with noise reduction *off*, and that is the right way round: this is a
+    /// ceiling, not a wait, and the cost of it being too large is a late diagnosis while the cost
+    /// of it being too small is a destroyed frame.
     ///
     /// **The exposure is part of the class, not of the command**, so the budget cannot drift from
     /// the exposure it is meant to cover: there is one place that knows both.
@@ -104,13 +116,32 @@ pub(crate) enum OpClass {
 }
 
 impl OpClass {
+    /// How long a bulb exposure may wait for the body to announce its frame.
+    ///
+    /// **One whole exposure, plus most of the allowance**, because the shutter closing is not the
+    /// end of the work: a Canon with long-exposure noise reduction on then takes a matching dark
+    /// frame, so the file appears roughly one exposure-length after the shutter closes. See
+    /// [`Capture`](Self::Capture) for the measurement. M2-T03 found this by budgeting a flat 20 s
+    /// and watching a 30 s bulb fail with "the camera never announced a file" on a body that was
+    /// working perfectly — so the wait scales *with the exposure* rather than being a constant.
+    ///
+    /// Three quarters of the allowance rather than all of it, so this expires *before* the
+    /// operation budget does and the operator reads the driver's own "the camera had not
+    /// announced a file" instead of the wedge protocol's bare "timeout". The thread's total is
+    /// `exposure + file_wait` = `2 × exposure + 0.75 × allowance`, against a budget of
+    /// `2 × exposure + allowance`.
+    pub(crate) fn bulb_file_wait(exposure: Duration, timeouts: &CameraTimeouts) -> Duration {
+        exposure.saturating_add(Duration::from_secs(timeouts.capture_extra_seconds).mul_f64(0.75))
+    }
+
     /// The budget for this class, from configuration.
     pub(crate) fn budget(self, timeouts: &CameraTimeouts) -> Duration {
         match self {
             Self::Connect | Self::Config => Duration::from_secs(timeouts.config_seconds),
-            Self::Capture(exposure) => {
-                exposure.saturating_add(Duration::from_secs(timeouts.capture_extra_seconds))
-            }
+            // Twice the exposure: the body's dark-frame pass takes about as long as the frame.
+            Self::Capture(exposure) => exposure
+                .saturating_mul(2)
+                .saturating_add(Duration::from_secs(timeouts.capture_extra_seconds)),
             Self::Download => Duration::from_secs(timeouts.download_seconds),
         }
     }
@@ -154,6 +185,13 @@ pub(crate) enum CamCmd {
         duration: Duration,
         /// The abort generation this exposure started at — movement away from it ends the hold.
         since: u64,
+        /// How long to wait for the body to announce the frame once the shutter has closed.
+        ///
+        /// Derived from the operation budget rather than fixed in the backend, because the two
+        /// have to be ordered: this wait must expire *first*, or the driver's own "the camera
+        /// never announced a file" is unreachable and a slow body wedges the thread instead. See
+        /// [`OpClass::bulb_file_wait`].
+        file_wait: Duration,
         /// Where the outcome goes.
         reply: Reply<RawCapture>,
     },
@@ -578,8 +616,10 @@ fn dispatch(
         CamCmd::CaptureBulb {
             duration,
             since,
+            file_wait,
             reply,
-        } => answer!(reply, |ops| ops.capture_bulb(duration, abort, since)),
+        } => answer!(reply, |ops| ops
+            .capture_bulb(duration, abort, since, file_wait)),
         CamCmd::Download {
             file,
             dir,

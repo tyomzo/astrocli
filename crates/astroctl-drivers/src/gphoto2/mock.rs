@@ -452,6 +452,7 @@ impl CamOps for MockOps {
         duration: Duration,
         abort: &AbortSignal,
         since: u64,
+        _file_wait: Duration,
     ) -> Result<RawCapture, DeviceError> {
         self.state.enter("capture_bulb");
         if let Some(message) = self.state.bulb_failure.lock().expect("mock state").clone() {

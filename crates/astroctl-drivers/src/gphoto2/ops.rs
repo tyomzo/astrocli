@@ -363,6 +363,11 @@ pub(crate) trait CamOps {
     /// integrating with nothing to stop it, which is the one failure here that damages the
     /// session rather than the frame.
     ///
+    /// `file_wait` is how long to wait for the body to announce the frame *after* the shutter
+    /// closes, which on a Canon with long-exposure noise reduction on is roughly another whole
+    /// exposure — the body shoots a matching dark frame. It is passed in rather than fixed here
+    /// because it has to stay under the operation budget the facade is timing against.
+    ///
     /// # Errors
     /// `Aborted` if the signal was raised during the hold — with the shutter closed and the
     /// resulting frame left on the camera, never downloaded. `Unsupported` if the body exposes no
@@ -372,6 +377,7 @@ pub(crate) trait CamOps {
         duration: Duration,
         abort: &AbortSignal,
         since: u64,
+        file_wait: Duration,
     ) -> Result<RawCapture, DeviceError>;
 
     /// Copies one camera-side file to `destination`, returning the bytes written.
