@@ -215,6 +215,25 @@ gphoto2 = { version = "3.4.1" }
 # on the operator's own desk raises nothing; shipping an image does. See the M2-T05 task notes.
 rawler = { version = "0.7.2" }
 
+# --- added by M3-T02 (the Sky-Watcher serial task) ---
+# The cable. Version from `docs/evidence/dependency-survey-2026-07-29.md`, which checked it in an
+# isolated project and found the thing the crate's own metadata does not say: **it needs `libudev`
+# at build time**, through `libudev-sys` 0.1.4. That is why PRD §7's system-package list gained
+# `libudev-dev`, and it is the single fact that shapes how this dependency is wired up.
+#
+# Keeping udev is a decision, not an oversight. `default-features = false` builds without it and
+# in exchange removes port enumeration by USB VID/PID — which is exactly what MNT-01's autodetect
+# and this task's `/dev/serial/by-id/*` scan are made of, so the featureless build would buy a
+# smaller system-dependency list by deleting the requirement it exists to serve.
+#
+# The consequence is the same one `gphoto2` has: a build-time C library that CI does not have. So
+# `astroctl-drivers` puts it behind a non-default `serialport` feature, exactly as `libgphoto2`
+# sits behind its own — and, exactly as there, everything above the seam (lanes, timeouts, retry,
+# heartbeat, the exchange loop) is pure Rust on the default feature and is what the six gates
+# actually compile, lint and test. What CI cannot reach is the `Wire` implementation that talks to
+# a real fd, which no CI machine could exercise anyway for want of a mount.
+serialport = { version = "4.9" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 

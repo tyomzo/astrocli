@@ -3,10 +3,12 @@
 //! | Submodule | Contents | Task |
 //! |-----------|----------|------|
 //! | [`codec`] | the wire protocol: framing, hex widths, typed commands, the goto program | M3-T01 |
+//! | [`port`] | the cable: the `Wire` seam, the exchange loop, the write gate, autodetect | M3-T02 |
+//! | [`serial`] | the task that owns the cable: two lanes, timeout, retry, heartbeat | M3-T02 |
+//! | [`mock_port`] | the scriptable port double the gated tests and M3-T04 run against | M3-T02 |
 //!
-//! The serial task (M3-T02), the motor controller (M3-T03) and the `MountDevice`
-//! implementation (M3-T04) join it here, in that order, each one layered on the one before
-//! per SDD §5.2.1:
+//! The motor controller (M3-T03) and the `MountDevice` implementation (M3-T04) join them here,
+//! in that order, each one layered on the one before per SDD §5.2.1:
 //!
 //! ```text
 //! SkywatcherMount (impl MountDevice)          — coordinates, modes, goto logic
@@ -22,3 +24,8 @@
 //! unreachable from above is what turns that into a compile error.
 
 pub mod codec;
+pub mod mock_port;
+pub mod port;
+pub mod serial;
+
+pub use serial::{watchdog_channel, Heartbeat, SerialLink, SerialTimings, WatchdogSink};
