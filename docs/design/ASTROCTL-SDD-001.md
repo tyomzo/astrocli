@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.24.0
+**Version:** 1.25.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -163,6 +163,29 @@ unmodified" a requirement on every backend; and **`DeviceError` has no variant m
 driver does not implement that yet"**, so unimplemented operations use `Protocol` with a message
 naming their task, recorded so the choice is made once rather than per operation. Landed by
 M2-T02.
+
+**Change note (1.25.0):** §5.3.2 gains the six obligations M2-T03 met building capture, bulb,
+download and abort, and **§5.3.3's fallback table is populated and the fallback is not built**.
+Every operation is `bindings`, on evidence from M2-T01 and from M2-T03's own runs against the same
+R10 — so a `GPhoto2Cli` would be a second implementation of every operation that nothing selects
+and no hardware test exercises, and the mechanism stays designed and unbuilt; `camera.ops_via_cli`
+is refused rather than ignored so a set key cannot look like it took effect. Four of the
+obligations are corrections, and one is a hazard this task *created*: **once an operation can hold
+the thread for minutes, the shared 5 s config budget becomes a way to destroy a capture** — a
+routine status poll during a bulb exposure times out, and a timed-out command is by definition a
+wedged thread, so one health tick would abandon the camera and lose the frame. Config commands
+therefore no longer queue behind an exposure; they are refused with `Busy`, checked inside the
+sender lock so the check cannot race the send. **An abort cannot be a `CamCmd`** — one queue means a queued abort is
+serviced after the exposure it was meant to stop, so it is shared memory the blocking thread polls
+(measured: 846–919 ms out of a 60 s bulb hold). **`BulbExposureTime` is an event, not a config
+key**, and reading for the key fails *invisibly* by falling back to the requested duration — the
+first M2-T03 implementation echoed the request through a full hardware run before M2-T01's recorded
+`9` gave it away; re-measured, a 10 s hold reports 9 s. And **the inferred exposing→downloading
+transition that 1.19.0 left "until the real driver can observe it" cannot be improved on this
+body**: with `capturetarget=Internal RAM` the transfer happens inside `capture_image()`, so there
+is no observable moment between the two, and on the bulb path the facade's timer is already exact.
+That verdict is conditional on the capture target and is worth re-asking if it ever changes.
+Landed by M2-T03.
 
 ---
 
@@ -712,9 +735,41 @@ measured, not the ~25 MB the PRD once assumed) is resident inside libgphoto2 bef
 step begins. That is affordable against PRF-05's 512 MB but must be counted, and it means the
 "streamed to disk" wording describes the disk write, not the wire transfer. Bulb: driven via the `eosremoterelease` PTP config — `Press Full`, hold, `Release Full`. **Verified on the R10**: a 10 s hold produced a camera-reported `BulbExposureTime 9` and a CR3 via the `NewFile` event. This was the highest-risk item in the plan (ADD §10) and is now closed.
 
+**Obligations found by implementing this (M2-T03).** The flow above is accurate and silent about four things that decide whether it can be built. Each was a defect until it was fixed:
+
+1. **An abort cannot be a `CamCmd`.** §5.3.1's message set lists `AbortCapture` beside the others, but there is one queue and one context — so an abort sent during a 300 s bulb exposure is serviced 300 seconds later, which is a report rather than an abort. The abort is therefore *shared memory*: a generation counter behind a condvar that the camera thread reads at the points where it is not inside a libgphoto2 call. What that can interrupt is a property of where the thread is, and the driver says so rather than implying uniformity — the bulb hold is the driver's own sleep and ends within a condvar wakeup (**measured: 846–919 ms out of a 60 s exposure on the R10**), while `capture_image()` and `download_to()` are C calls with no cancellation, so an abort landing inside one takes effect when it returns. The resolution matches the simulator exactly: raised before the exposure or before the download, `Aborted` with nothing on disk; raised once the bytes are going to disk, the write wins and the capture succeeds.
+
+2. **An aborted bulb exposure still produces a frame, and it must be drained.** The body has been exposing; closing the shutter early does not discard what it integrated, and it announces the frame over the event queue regardless. Leaving that event queued means the *next* capture reads it and downloads the previous exposure under the next frame's name. So the abort path drains the event and discards the frame — "nothing on disk" is achieved by not downloading, not by not exposing.
+
+3. **`BulbExposureTime` is an event, not a config key.** §5.3.2 records that the R10 reports it, and the natural reading is that it is a config value to be read after the exposure. It is not: libgphoto2 surfaces the body's PTP property change as an untyped `CameraEvent::Unknown(String)`, so it has to be parsed out of the event drain or missed entirely. Missing it is *invisible* rather than loud — the driver falls back to the requested duration, so the metadata reads exactly what was asked for and looks perfect. M2-T03's first implementation looked for a config key, found none, and echoed the request back through a full hardware run; the discrepancy with M2-T01's recorded `BulbExposureTime 9` is the only thing that gave it away. **Re-measured on the R10: a 10 s hold reports 9 s**, confirming the spike and the parse.
+
+4. **The exposure belongs to the operation class, not to the command.** A capture's budget is `exposure + capture_extra_seconds`, and the exposure is the one component known in advance and unbounded — a 300 s bulb frame is not a wedged camera. Carrying the exposure inside `OpClass::Capture(Duration)` rather than alongside it means there is exactly one place that knows both the budget and the exposure it covers, so they cannot drift.
+
+5. **Long operations make the shared config budget dangerous, so config commands no longer queue behind an exposure.** This is the sharpest consequence of the task and it is a *new* hazard rather than a pre-existing one. §5.3.1 gives config get/set a 5 s budget and treats any timeout as a wedged thread — correct while nothing could occupy the thread for longer than a config operation, which was true until capture and bulb arrived. Afterwards, a routine `get_battery` issued during a 300 s bulb exposure is serviced 300 seconds later, blows `config_seconds`, and is therefore *by definition* a wedged thread: the link drops its sender, abandons the thread, and the running exposure fails its download with `NotConnected`. **One health tick would cost the frame and the camera**, and the field node polls status on a timer. The fix is that every operation which is not part of an exposure asks through a gated request that answers `Busy` immediately instead of taking a place in a queue it cannot afford to wait in. The gate is tested *inside the sender lock*, because a check anywhere else races a capture starting between the check and the send — and the cost of losing that race is a wedged camera, not a slow reply. `Busy` consequently joins the documented error set of `settings`, `available_settings`, `battery` and `storage`, which HAL-03 lists only for the setters.
+
+6. **The inferred `exposing`→`downloading` transition cannot be improved, and the reason is a measurement rather than an omission.** Change note 1.19.0 recorded the facade's transition as inferred "until the real driver can observe it", and M2-T03 is that driver — so the question was asked directly and the answer is no, for two independent reasons. On the *timed* path, `capturetarget=Internal RAM` puts the USB transfer **inside** `capture_image()`: M2-T01 measured 2.08 s for the capture and 2.67 ms to write 32 MB to disk, which is memory bandwidth. There is no observable moment between exposing and downloading, because by the time the driver regains control both have happened; a driver-reported transition would fire 2.67 ms before `saved` and tell the operator nothing. On the *bulb* path the transition is exactly observable — the driver closes the shutter itself — but the facade's timer is already exact there by construction, since the same duration drives both. So a progress channel through the HAL would add a parameter to `CaptureRequest` (breaking its `PartialEq`), a field to every driver, and a select arm to the facade, in exchange for no additional truth. **The inferred transition is not a dishonesty on this body; it is the best available fact.** This changes if `capturetarget=Memory card` is ever adopted, which moves the 32 MB transfer into `download_to` where it *is* separately observable — and that is the version of this question worth re-asking when the sequencer arrives.
+
 #### 5.3.3 CLI fallback
 
-`GPhoto2Cli` implements the same internal `CamOps` trait by shelling out to the `gphoto2` binary per operation (`--capture-image-and-download`, `--set-config`, `--wait-event`). The concrete driver is composed per-operation from a coverage table in config, so a binding gap on one operation doesn't force the whole driver onto the CLI. **For the R10 the table is empty** — the spike found every operation covered by the bindings, bulb included, so `camera.ops_via_cli: []`. This path exists for future bodies, not for the reference camera.
+`GPhoto2Cli` would implement the same internal `CamOps` trait by shelling out to the `gphoto2` binary per operation (`--capture-image-and-download`, `--set-config`, `--wait-event`), composed per-operation from a coverage table in config so that a binding gap on one operation does not force the whole driver onto the CLI.
+
+**The table is empty, and M2-T03 therefore did not build the fallback.** The per-operation evidence, from M2-T01's spike and M2-T03's own hardware runs against the same Canon EOS R10:
+
+| Operation | Path | Evidence |
+|---|---|---|
+| Connect / autodetect | bindings | M2-T01: 190–210 ms. M2-T03: 414–489 ms over four runs |
+| Read settings / choices | bindings | M2-T01: 0.4–10 ms per key; 27 ISOs, 23 apertures, 3 formats enumerated |
+| Write setting | bindings | M2-T01: 11 ms per write. M2-T03: ISO 400 → 100 → 400 read back from the body |
+| Timed capture | bindings | M2-T01: `capture_image()`, 2.08 s trigger→file-ready |
+| **Bulb** | **bindings** | M2-T01: `eosremoterelease` Press/Release Full, `BulbExposureTime 9` for a 10 s hold. M2-T03: re-run, 10 s hold → **camera reports 9 s**, 1.5 MB CR3 via `NewFile` |
+| Download | bindings | M2-T01: 32.0 MB full RAW. M2-T03: 1.5 MB and 23.5 MB CR3s landed durably |
+| Abort | bindings | M2-T03: abort mid-bulb returned in 846–919 ms of a 60 s exposure, nothing on disk |
+| Live view | bindings | M2-T01: 58.5 fps, 133 KB/frame |
+| Battery / storage | bindings | M2-T01 and M2-T03: 100 %, 66 265 MB free of 121 910 MB |
+
+Every row is `bindings`. **No operation has ever failed on the reference body through the crate**, so a `GPhoto2Cli` would be a second implementation of every operation — its own subprocess handling, output parsing and timeouts — that no configuration selects and no hardware test exercises. The one thing worse than not having a fallback is having one that has never been run, so the mechanism stays designed and unbuilt.
+
+`camera.ops_via_cli` is nonetheless **refused rather than ignored**: the key is real, validated and documented, so an operator can set it, and a driver that silently did nothing would let `ops_via_cli: ["bulb"]` look like it had taken effect. Construction fails with a message naming the evidence and the key to change. When a body arrives that needs the fallback, that refusal is what gets deleted.
 
 ### 5.4 Safety monitor (`astroctl-safety`)
 

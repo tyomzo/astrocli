@@ -9,7 +9,8 @@
 //! It records **the OS thread every call ran on**, which is what turns "all blocking gphoto2
 //! calls are on the camera thread" from a claim in a design document into an assertion.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,8 +18,8 @@ use astroctl_core::error::DeviceError;
 use astroctl_core::types::{BatteryStatus, DeviceInfo, ImageFormat, StorageInfo};
 
 use super::ops::{
-    format_from_token, format_token, CamOps, CamOpsFactory, CfgKey, RawChoices, RawIdentity,
-    RawSettings,
+    format_from_token, format_token, AbortSignal, CamOps, CamOpsFactory, CfgKey, RawCapture,
+    RawChoices, RawFileRef, RawIdentity, RawSettings,
 };
 
 /// One call, and where it ran.
@@ -55,6 +56,37 @@ pub(crate) struct MockState {
     drops: AtomicUsize,
     /// The thread each `CamOps` was dropped on.
     drop_threads: Mutex<Vec<String>>,
+
+    // --- capture, bulb and download ----------------------------------------------------------
+    /// What the body hands back from a trigger.
+    capture_files: Mutex<Vec<RawFileRef>>,
+    /// What the body claims the exposure was, if anything.
+    reported_exposure: Mutex<Option<f64>>,
+    /// If set, `capture` fails with this rejection.
+    capture_failure: Mutex<Option<String>>,
+    /// If set, `capture_bulb` refuses before opening the shutter — a body whose mode dial forbids
+    /// it, which is the R10's own behaviour with the dial away from Bulb.
+    bulb_failure: Mutex<Option<String>>,
+    /// If set, `download` fails with this transport error.
+    download_failure: Mutex<Option<String>>,
+    /// How many downloads succeed before `download_failure` starts applying.
+    download_failure_after: AtomicUsize,
+    /// Extra time `capture` blocks the thread for, on top of any global block.
+    capture_block: Mutex<Duration>,
+    /// Extra time `download` blocks the thread for. The knob that blows `download_seconds`.
+    download_block: Mutex<Duration>,
+    /// Every path `download` was asked to write to, in order.
+    download_destinations: Mutex<Vec<PathBuf>>,
+    /// Whether every `download` so far found its destination absent — the unlink-first check.
+    download_path_was_clear: AtomicBool,
+    /// How many bytes each downloaded file claims to be.
+    download_size: Mutex<u64>,
+    /// How many times the shutter has been opened and closed, and whether it is open now.
+    shutter_open: AtomicBool,
+    /// Every open/close in order, so a test can prove the shutter was released on the abort path.
+    shutter_log: Mutex<Vec<&'static str>>,
+    /// Raised by `abort()`, so a test can see the safety-net release happen.
+    aborts: AtomicUsize,
 }
 
 impl Default for MockState {
@@ -84,6 +116,26 @@ impl Default for MockState {
             builds: AtomicUsize::new(0),
             drops: AtomicUsize::new(0),
             drop_threads: Mutex::new(Vec::new()),
+            // The R10 with `capturetarget=Internal RAM` reuses this one name (M2-T01).
+            capture_files: Mutex::new(vec![RawFileRef {
+                folder: "/".to_owned(),
+                name: "capt0000.cr3".to_owned(),
+            }]),
+            reported_exposure: Mutex::new(None),
+            capture_failure: Mutex::new(None),
+            bulb_failure: Mutex::new(None),
+            download_failure: Mutex::new(None),
+            download_failure_after: AtomicUsize::new(0),
+            capture_block: Mutex::new(Duration::ZERO),
+            download_block: Mutex::new(Duration::ZERO),
+            download_destinations: Mutex::new(Vec::new()),
+            download_path_was_clear: AtomicBool::new(true),
+            // Not 32 MB: the tests write this many real bytes, and the size that matters to them
+            // is that it is reported faithfully, not that it is large.
+            download_size: Mutex::new(2048),
+            shutter_open: AtomicBool::new(false),
+            shutter_log: Mutex::new(Vec::new()),
+            aborts: AtomicUsize::new(0),
         }
     }
 }
@@ -147,6 +199,97 @@ impl MockState {
         self.drop_threads.lock().expect("mock state").clone()
     }
 
+    // --- capture, bulb and download scripting -------------------------------------------------
+
+    /// Makes the body hand back these files from the next trigger.
+    ///
+    /// Two of them is the RAW+JPEG case, where the second file reaches the driver as a separate
+    /// event rather than from the trigger call itself.
+    pub(crate) fn capture_yields(&self, names: &[&str]) {
+        *self.capture_files.lock().expect("mock state") = names
+            .iter()
+            .map(|name| RawFileRef {
+                folder: "/".to_owned(),
+                name: (*name).to_owned(),
+            })
+            .collect();
+    }
+
+    /// Makes the body volunteer an exposure figure, as the R10 does after a bulb hold.
+    pub(crate) fn reports_exposure(&self, seconds: f64) {
+        *self.reported_exposure.lock().expect("mock state") = Some(seconds);
+    }
+
+    /// Makes `capture` refuse — no card, autofocus failure, a mode dial that forbids it.
+    pub(crate) fn fail_capture_with(&self, message: &str) {
+        *self.capture_failure.lock().expect("mock state") = Some(message.to_owned());
+    }
+
+    /// Makes `capture_bulb` refuse before the shutter opens.
+    pub(crate) fn fail_bulb_with(&self, message: &str) {
+        *self.bulb_failure.lock().expect("mock state") = Some(message.to_owned());
+    }
+
+    /// Makes `download` fail with a transport error.
+    pub(crate) fn fail_download_with(&self, message: &str) {
+        *self.download_failure.lock().expect("mock state") = Some(message.to_owned());
+    }
+
+    /// Lets `after` downloads succeed, then fails every one after that.
+    ///
+    /// The RAW+JPEG half-failure: the raw lands and the JPEG does not, which is the case where
+    /// a driver that only cleaned up its temporaries would leave a complete-looking frame with
+    /// half its files.
+    pub(crate) fn fail_download_after(&self, after: usize, message: &str) {
+        self.download_failure_after.store(after, Ordering::SeqCst);
+        *self.download_failure.lock().expect("mock state") = Some(message.to_owned());
+    }
+
+    /// Removes `bulb` from the body's shutter list — a body with no bulb mode.
+    pub(crate) fn remove_bulb_shutter(&self) {
+        self.choices
+            .lock()
+            .expect("mock state")
+            .shutters
+            .retain(|token| !token.eq_ignore_ascii_case("bulb"));
+    }
+
+    /// Makes the download block the camera thread for `duration` — a slow card, or the wire.
+    pub(crate) fn download_takes(&self, duration: Duration) {
+        *self.download_block.lock().expect("mock state") = duration;
+    }
+
+    /// Makes the trigger block the camera thread for `duration`.
+    ///
+    /// This is the wedge-shaped silence: a `capture` that never returns is a thread inside a C
+    /// call that cannot be interrupted, which is the state the whole wedge protocol exists for.
+    pub(crate) fn capture_takes(&self, duration: Duration) {
+        *self.capture_block.lock().expect("mock state") = duration;
+    }
+
+    /// Every path `download` was asked to write to.
+    pub(crate) fn download_destinations(&self) -> Vec<PathBuf> {
+        self.download_destinations
+            .lock()
+            .expect("mock state")
+            .clone()
+    }
+
+    /// Whether every download found its destination absent — i.e. the unlink happened first.
+    pub(crate) fn download_saw_a_clear_path(&self) -> bool {
+        self.download_path_was_clear.load(Ordering::SeqCst)
+    }
+
+    /// The shutter's open/close history, e.g. `["open", "close"]`.
+    pub(crate) fn shutter_log(&self) -> Vec<&'static str> {
+        self.shutter_log.lock().expect("mock state").clone()
+    }
+
+    /// Whether the shutter is open right now. Must be false after every capture, aborted or not.
+    pub(crate) fn shutter_is_open(&self) -> bool {
+        self.shutter_open.load(Ordering::SeqCst)
+    }
+
     /// Records a call and applies the scripted block.
     fn enter(&self, op: &'static str) {
         self.calls.lock().expect("mock state").push(CallRecord {
@@ -159,6 +302,16 @@ impl MockState {
             // wedge protocol is that this thread cannot be interrupted, and an `await` here
             // would be a thread that could be.
             std::thread::sleep(block);
+        }
+    }
+}
+
+impl MockState {
+    /// What a trigger hands back.
+    fn raw_capture(&self) -> RawCapture {
+        RawCapture {
+            files: self.capture_files.lock().expect("mock state").clone(),
+            exposure_seconds: *self.reported_exposure.lock().expect("mock state"),
         }
     }
 }
@@ -273,6 +426,130 @@ impl CamOps for MockOps {
             free_mb: 69_500,
             total_mb: 127_800,
         })
+    }
+
+    fn capture(&mut self) -> Result<RawCapture, DeviceError> {
+        self.state.enter("capture");
+        // A real trigger blocks the thread for the exposure *and*, on this body, the transfer.
+        let block = *self.state.capture_block.lock().expect("mock state");
+        if !block.is_zero() {
+            std::thread::sleep(block);
+        }
+        if let Some(message) = self
+            .state
+            .capture_failure
+            .lock()
+            .expect("mock state")
+            .clone()
+        {
+            return Err(DeviceError::Rejected(message));
+        }
+        Ok(self.state.raw_capture())
+    }
+
+    fn capture_bulb(
+        &mut self,
+        duration: Duration,
+        abort: &AbortSignal,
+        since: u64,
+    ) -> Result<RawCapture, DeviceError> {
+        self.state.enter("capture_bulb");
+        if let Some(message) = self.state.bulb_failure.lock().expect("mock state").clone() {
+            // Refused before the shutter opens, so there is nothing to release.
+            return Err(DeviceError::Rejected(message));
+        }
+
+        self.state.shutter_open.store(true, Ordering::SeqCst);
+        self.state
+            .shutter_log
+            .lock()
+            .expect("mock state")
+            .push("open");
+
+        let aborted = abort.hold(duration, since);
+
+        // Released on every path, exactly as the real backend must.
+        self.state.shutter_open.store(false, Ordering::SeqCst);
+        self.state
+            .shutter_log
+            .lock()
+            .expect("mock state")
+            .push("close");
+
+        if aborted {
+            return Err(DeviceError::Aborted(
+                "the capture was aborted by the operator".to_owned(),
+            ));
+        }
+        Ok(self.state.raw_capture())
+    }
+
+    fn download(&mut self, file: &RawFileRef, destination: &Path) -> Result<u64, DeviceError> {
+        self.state.enter("download");
+
+        // The trap, modelled: libgphoto2's `download_to` returns `File exists` rather than
+        // truncating (M2-T01 finding 1). A driver that stopped unlinking first would pass every
+        // test that used a fresh directory and fail on the first retry after a crash — so the
+        // mock refuses too, and records the fact for a test to assert directly.
+        if destination.exists() {
+            self.state
+                .download_path_was_clear
+                .store(false, Ordering::SeqCst);
+            return Err(DeviceError::Transport(format!(
+                "File exists: {}",
+                destination.display()
+            )));
+        }
+        self.state
+            .download_destinations
+            .lock()
+            .expect("mock state")
+            .push(destination.to_path_buf());
+
+        let block = *self.state.download_block.lock().expect("mock state");
+        if !block.is_zero() {
+            std::thread::sleep(block);
+        }
+        if let Some(message) = self
+            .state
+            .download_failure
+            .lock()
+            .expect("mock state")
+            .clone()
+        {
+            // `fail_download_after(n, …)` lets the first `n` through, which is how the RAW+JPEG
+            // half-failure is scripted.
+            let remaining = self.state.download_failure_after.load(Ordering::SeqCst);
+            if remaining == 0 {
+                return Err(DeviceError::Transport(message));
+            }
+            self.state
+                .download_failure_after
+                .store(remaining - 1, Ordering::SeqCst);
+        }
+
+        // Real bytes, because the caller fsyncs and renames them and a test that asserts a frame
+        // exists should be asserting about a file that does.
+        let size = *self.state.download_size.lock().expect("mock state");
+        let bytes = vec![0xA5_u8; usize::try_from(size).unwrap_or(0)];
+        std::fs::write(destination, &bytes)
+            .map_err(|error| DeviceError::Transport(format!("mock download: {error}")))?;
+        let _ = file;
+        Ok(size)
+    }
+
+    fn abort(&mut self) -> Result<(), DeviceError> {
+        self.state.enter("abort");
+        self.state.aborts.fetch_add(1, Ordering::SeqCst);
+        // The safety-net release: if the shutter is somehow still open, close it.
+        if self.state.shutter_open.swap(false, Ordering::SeqCst) {
+            self.state
+                .shutter_log
+                .lock()
+                .expect("mock state")
+                .push("close");
+        }
+        Ok(())
     }
 }
 

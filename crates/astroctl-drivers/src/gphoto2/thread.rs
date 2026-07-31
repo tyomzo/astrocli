@@ -34,6 +34,8 @@
 //! respawn (fresh thread, fresh context, USB reset, `camera.status` reconnecting event) is M2-T04
 //! and is marked `TODO(M2-T04)` at the one place it attaches.
 
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -44,8 +46,12 @@ use astroctl_core::error::DeviceError;
 use astroctl_core::types::{BatteryStatus, StorageInfo};
 use tokio::sync::oneshot;
 
+use super::download::{self, LandedFile};
 use super::gvfs;
-use super::ops::{CamOps, CamOpsFactory, CfgKey, RawChoices, RawIdentity, RawSettings};
+use super::ops::{
+    AbortSignal, CamOps, CamOpsFactory, CfgKey, RawCapture, RawChoices, RawFileRef, RawIdentity,
+    RawSettings,
+};
 
 /// The OS thread name every blocking libgphoto2 call runs under.
 ///
@@ -61,11 +67,6 @@ pub(crate) const CAMERA_THREAD_NAME: &str = "astroctl-camera";
 /// The classes are the operation's *shape*, not its name: everything that is one config-tree
 /// touch shares a budget because they share a cost profile, and a new command joins an existing
 /// class rather than bringing its own number.
-///
-/// M2-T03 adds `Capture(exposure)` — budget `exposure + capture_extra_seconds` — and `Download`,
-/// budget `download_seconds`. Both figures are already in [`CameraTimeouts`] and validated by
-/// config; they are absent here only because M2-T02 has no operation of either shape, and a
-/// variant nothing constructs is a variant nothing checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpClass {
     /// Autodetect, open, read the abilities and walk the config tree.
@@ -81,6 +82,25 @@ pub(crate) enum OpClass {
     /// **Measured**: 0.4–10 ms per read, 11 ms per write. The budget exists for the pathological
     /// case, not the normal one.
     Config,
+    /// One exposure of the carried duration, plus the trigger and the wire.
+    ///
+    /// The budget is `exposure + capture_extra_seconds` because the exposure is the one part of
+    /// the cost that is *known in advance and unbounded*: a 300 s bulb frame is not a wedged
+    /// camera, and a fixed budget would either abandon the thread mid-integration or be so large
+    /// it never fires. The allowance on top covers everything that is not the exposure —
+    /// M2-T01 measured 2.08 s of it for a timed capture, against a 30 s default.
+    ///
+    /// **The exposure is part of the class, not of the command**, so the budget cannot drift from
+    /// the exposure it is meant to cover: there is one place that knows both.
+    Capture(Duration),
+    /// One file off the camera and onto the disk.
+    ///
+    /// `download_seconds`, defaulting to 120. Generous against the measured cost because the
+    /// measured cost is not the interesting case: with `capturetarget=Internal RAM` the frame is
+    /// already in libgphoto2's memory and the write took 2.67 ms (M2-T01), but a body set to
+    /// `Memory card` transfers 32 MB over USB inside this call, and that is the case the number
+    /// is for.
+    Download,
 }
 
 impl OpClass {
@@ -88,6 +108,10 @@ impl OpClass {
     pub(crate) fn budget(self, timeouts: &CameraTimeouts) -> Duration {
         match self {
             Self::Connect | Self::Config => Duration::from_secs(timeouts.config_seconds),
+            Self::Capture(exposure) => {
+                exposure.saturating_add(Duration::from_secs(timeouts.capture_extra_seconds))
+            }
+            Self::Download => Duration::from_secs(timeouts.download_seconds),
         }
     }
 }
@@ -122,7 +146,48 @@ pub(crate) enum CamCmd {
     GetBattery(Reply<BatteryStatus>),
     /// Card space.
     GetStorage(Reply<StorageInfo>),
-    // M2-T03: Capture, StartBulb, AbortCapture, Download.
+    /// Take one exposure at the settings in force.
+    Capture(Reply<RawCapture>),
+    /// Hold the shutter open for `duration`.
+    CaptureBulb {
+        /// How long to hold it.
+        duration: Duration,
+        /// The abort generation this exposure started at — movement away from it ends the hold.
+        since: u64,
+        /// Where the outcome goes.
+        reply: Reply<RawCapture>,
+    },
+    /// Land one camera-side file in `dir` under `stem`, durably.
+    Download {
+        /// The file the body is holding.
+        file: RawFileRef,
+        /// The session directory the frame store created.
+        dir: PathBuf,
+        /// The filename stem, without extension.
+        stem: String,
+        /// Where the outcome goes.
+        reply: Reply<LandedFile>,
+    },
+    /// Release the shutter if the body might still be holding it.
+    ///
+    /// The *queued* half of aborting, and deliberately not the part that does the work: a command
+    /// sent while a capture is running would be serviced after it, so promptness comes from
+    /// [`AbortSignal`] instead. This is the safety net that runs once the thread is free again.
+    Abort(Reply<()>),
+    /// Remove the temporaries an abandoned capture would have written.
+    ///
+    /// On the camera thread rather than the caller's because it must not race the download it is
+    /// cleaning up after, and the queue is what guarantees that.
+    Sweep {
+        /// The session directory.
+        dir: PathBuf,
+        /// The filename stem.
+        stem: String,
+        /// The files whose temporaries to remove.
+        files: Vec<RawFileRef>,
+        /// Where the outcome goes.
+        reply: Reply<()>,
+    },
     // M2-T04: LiveViewStart, LiveViewStop.
 }
 
@@ -137,6 +202,11 @@ impl CamCmd {
             Self::SetSetting { .. } => "set_setting",
             Self::GetBattery(_) => "get_battery",
             Self::GetStorage(_) => "get_storage",
+            Self::Capture(_) => "capture",
+            Self::CaptureBulb { .. } => "capture_bulb",
+            Self::Download { .. } => "download",
+            Self::Abort(_) => "abort",
+            Self::Sweep { .. } => "sweep",
         }
     }
 }
@@ -156,6 +226,29 @@ pub(crate) struct CameraLink {
     handle: Mutex<Option<JoinHandle<()>>>,
     /// Per-operation-class budgets, from config.
     timeouts: CameraTimeouts,
+    /// The out-of-band route to a busy thread. See [`AbortSignal`] for why a command cannot be
+    /// one.
+    abort: Arc<AbortSignal>,
+    /// Whether an exposure is in flight.
+    ///
+    /// Lives here, beside the sender, so that
+    /// [`request_unless_capturing`](Self::request_unless_capturing) can test it under the same
+    /// lock that sends. A flag held one layer up would be readable but not *atomic with the
+    /// send*, which is the property that matters.
+    capturing: AtomicBool,
+}
+
+/// Holds the imaging path for one exposure, and releases it however the exposure ends.
+///
+/// RAII rather than a matched pair of stores because a capture has six ways out — refused,
+/// aborted, timed out, failed to download, wedged, or successful — and the fifth one to forget
+/// the release is the one that leaves the camera permanently `Busy` with nothing running.
+pub(crate) struct CaptureClaim<'a>(&'a AtomicBool);
+
+impl Drop for CaptureClaim<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl CameraLink {
@@ -173,9 +266,11 @@ impl CameraLink {
         timeouts: CameraTimeouts,
     ) -> Result<Self, DeviceError> {
         let (sender, receiver) = mpsc::channel();
+        let abort = Arc::new(AbortSignal::default());
+        let thread_abort = Arc::clone(&abort);
         let handle = std::thread::Builder::new()
             .name(CAMERA_THREAD_NAME.to_owned())
-            .spawn(move || run(&*factory, &receiver))
+            .spawn(move || run(&*factory, &receiver, &thread_abort))
             .map_err(|error| {
                 DeviceError::Transport(format!("could not start the camera thread: {error}"))
             })?;
@@ -184,7 +279,37 @@ impl CameraLink {
             sender: Mutex::new(Some(sender)),
             handle: Mutex::new(Some(handle)),
             timeouts,
+            abort,
+            capturing: AtomicBool::new(false),
         })
+    }
+
+    /// The abort generation a capture should record before it starts.
+    pub(crate) fn abort_generation(&self) -> u64 {
+        self.abort.generation()
+    }
+
+    /// Raises an abort, reaching the thread even while it is mid-exposure.
+    pub(crate) fn raise_abort(&self) {
+        self.abort.raise();
+    }
+
+    /// Whether an abort has been raised since `since`.
+    pub(crate) fn aborted_since(&self, since: u64) -> bool {
+        self.abort.raised_since(since)
+    }
+
+    /// Claims the imaging path for one exposure, or reports what is using it.
+    ///
+    /// Held by the link rather than by the driver because
+    /// [`request_unless_capturing`](Self::request_unless_capturing) has to consult it *under the
+    /// sender lock* — see there for why a check anywhere else is a race with a wedge on the
+    /// losing side.
+    pub(crate) fn claim_capture(&self) -> Result<CaptureClaim<'_>, DeviceError> {
+        self.capturing
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| CaptureClaim(&self.capturing))
+            .map_err(|_| DeviceError::Busy("the camera is already exposing"))
     }
 
     /// Sends a command and waits for its reply, bounded by the class budget.
@@ -193,6 +318,52 @@ impl CameraLink {
     /// Whatever the camera returned; `NotConnected` if the link is already down; `Timeout` if the
     /// budget expired, in which case the thread has been abandoned.
     pub(crate) async fn request<T, F>(&self, class: OpClass, build: F) -> Result<T, DeviceError>
+    where
+        F: FnOnce(Reply<T>) -> CamCmd,
+    {
+        self.send_and_wait(class, build, false).await
+    }
+
+    /// As [`request`](Self::request), but refuses rather than queueing behind an exposure.
+    ///
+    /// **This is what stops a routine status poll from destroying a capture**, and the failure it
+    /// prevents is not exotic. There is one queue, so a `get_battery` issued during a 300 s bulb
+    /// exposure is serviced 300 seconds later — but its budget is `config_seconds`, five. It
+    /// therefore times out, and a timed-out command is by definition a wedged thread (SDD
+    /// §5.3.1): the link drops its sender and abandons the thread, and the *running* exposure
+    /// then fails to download with `NotConnected`. One health tick would cost the frame and the
+    /// camera.
+    ///
+    /// Before M2-T03 nothing could occupy the thread for longer than a config operation, so the
+    /// shared budget was safe. Capture and bulb are what made this reachable, so this is where it
+    /// is closed: every operation that is *not* part of an exposure asks through here and gets an
+    /// immediate `Busy` instead of a place in a queue it cannot afford to wait in.
+    ///
+    /// # Errors
+    /// `Busy` while an exposure is in flight, otherwise as [`request`](Self::request).
+    pub(crate) async fn request_unless_capturing<T, F>(
+        &self,
+        class: OpClass,
+        build: F,
+    ) -> Result<T, DeviceError>
+    where
+        F: FnOnce(Reply<T>) -> CamCmd,
+    {
+        self.send_and_wait(class, build, true).await
+    }
+
+    /// The body of both request forms.
+    ///
+    /// `refuse_while_capturing` is tested *inside* the sender lock, which is what makes the gate
+    /// airtight rather than advisory: checking the flag before calling would leave a window in
+    /// which a capture starts between the check and the send, putting the command on the queue
+    /// after all — and the consequence of losing that race is a wedged camera, not a slow reply.
+    async fn send_and_wait<T, F>(
+        &self,
+        class: OpClass,
+        build: F,
+        refuse_while_capturing: bool,
+    ) -> Result<T, DeviceError>
     where
         F: FnOnce(Reply<T>) -> CamCmd,
     {
@@ -210,6 +381,10 @@ impl CameraLink {
                 .sender
                 .lock()
                 .expect("the camera link's sender is never poisoned");
+            // Under the lock, so a capture cannot start between this and the send.
+            if refuse_while_capturing && self.capturing.load(Ordering::SeqCst) {
+                return Err(DeviceError::Busy("the camera is exposing"));
+            }
             let Some(sender) = sender.as_ref() else {
                 return Err(DeviceError::NotConnected);
             };
@@ -321,7 +496,7 @@ impl Drop for CameraLink {
 /// channel closes. That last part is the reason the ops object is built inside this function
 /// rather than passed in: construction *and* destruction of the gphoto2 context both happen on
 /// the thread that uses it, with no window in which another thread holds it.
-fn run(factory: &dyn CamOpsFactory, receiver: &Receiver<CamCmd>) {
+fn run(factory: &dyn CamOpsFactory, receiver: &Receiver<CamCmd>, abort: &AbortSignal) {
     let mut ops: Option<Box<dyn CamOps>> = None;
 
     // `recv` blocks until a command arrives or every sender is gone. The second case is the exit:
@@ -345,7 +520,7 @@ fn run(factory: &dyn CamOpsFactory, receiver: &Receiver<CamCmd>) {
         }
         let _entered = span.enter();
 
-        dispatch(factory, &mut ops, command);
+        dispatch(factory, &mut ops, command, abort);
     }
 
     // Channel closed. Dropping `ops` runs the gphoto2 teardown on this thread and releases the
@@ -362,7 +537,12 @@ fn run(factory: &dyn CamOpsFactory, receiver: &Receiver<CamCmd>) {
 /// A dropped reply channel is not an error: the caller timed out and stopped listening, which is
 /// exactly the wedge case. The work still had to finish — it was already in flight — and the
 /// result is discarded rather than logged as a failure, because it is not one.
-fn dispatch(factory: &dyn CamOpsFactory, ops: &mut Option<Box<dyn CamOps>>, command: CamCmd) {
+fn dispatch(
+    factory: &dyn CamOpsFactory,
+    ops: &mut Option<Box<dyn CamOps>>,
+    command: CamCmd,
+    abort: &AbortSignal,
+) {
     /// Runs `$call` against the open camera, or answers `NotConnected`, and replies.
     macro_rules! answer {
         ($reply:expr, |$ops:ident| $call:expr) => {{
@@ -394,6 +574,45 @@ fn dispatch(factory: &dyn CamOpsFactory, ops: &mut Option<Box<dyn CamOps>>, comm
         }
         CamCmd::GetBattery(reply) => answer!(reply, |ops| ops.battery()),
         CamCmd::GetStorage(reply) => answer!(reply, |ops| ops.storage()),
+        CamCmd::Capture(reply) => answer!(reply, |ops| ops.capture()),
+        CamCmd::CaptureBulb {
+            duration,
+            since,
+            reply,
+        } => answer!(reply, |ops| ops.capture_bulb(duration, abort, since)),
+        CamCmd::Download {
+            file,
+            dir,
+            stem,
+            reply,
+        } => answer!(reply, |ops| download::land(
+            ops.as_mut(),
+            &file,
+            &dir,
+            &stem
+        )),
+        CamCmd::Abort(reply) => {
+            // Not `answer!`: aborting a camera that is not open is `Ok(())`, never
+            // `NotConnected`. A stopping command may not fail for want of something to stop
+            // (SDD §5.8.1), and "there is no camera" is the strongest possible guarantee that
+            // the shutter is closed.
+            let result = match ops.as_mut() {
+                Some(ops) => ops.abort(),
+                None => Ok(()),
+            };
+            let _ = reply.send(result);
+        }
+        CamCmd::Sweep {
+            dir,
+            stem,
+            files,
+            reply,
+        } => {
+            // Filesystem only, so it needs no camera and must work without one — the capture
+            // whose debris this is may have ended by losing the camera.
+            download::sweep(&dir, &stem, &files);
+            let _ = reply.send(Ok(()));
+        }
     }
 }
 
