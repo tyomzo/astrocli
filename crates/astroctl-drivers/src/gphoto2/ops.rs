@@ -24,11 +24,16 @@
 //! a design that constructed one on the caller's thread and sent it over would be relying on the
 //! binding's `Send` impl to be more generous than the C library it wraps.
 
+use std::path::Path;
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
+
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
     AvailableSettings, BatteryStatus, CameraCapabilities, CameraSettings, DeviceInfo, ImageFormat,
     StorageInfo,
 };
+use astroctl_hal::camera::CapturedFileKind;
 
 /// A camera configuration key, as libgphoto2 spells it.
 ///
@@ -108,6 +113,138 @@ pub(crate) struct RawIdentity {
     pub(crate) has_live_view: bool,
 }
 
+/// A file the body is holding, named the way the body names it.
+///
+/// Two strings rather than a `PathBuf` because this is not a filesystem path — it is a PTP
+/// folder and filename inside the camera (`/`, `capt0000.cr3`), and joining them into something
+/// that looks like a host path is how a driver ends up trying to open one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawFileRef {
+    /// The camera-side folder, e.g. `/`.
+    pub(crate) folder: String,
+    /// The camera-side filename, e.g. `capt0000.cr3`. Its extension is the only thing that says
+    /// what the body actually produced, which is why the driver takes the extension from here
+    /// rather than assuming `cr3`.
+    pub(crate) name: String,
+}
+
+impl RawFileRef {
+    /// The filename's extension, lowercased, or `None` for a name that has none.
+    ///
+    /// Interpretation, so it lives above the trait: the body reports `CAPT0001.CR3` or
+    /// `capt0000.cr3` depending on the path that produced it, and a session directory holding
+    /// both spellings for the same kind of file is a needless thing to explain.
+    pub(crate) fn extension(&self) -> Option<String> {
+        let (_, extension) = self.name.rsplit_once('.')?;
+        (!extension.is_empty()).then(|| extension.to_ascii_lowercase())
+    }
+
+    /// What this file is for, from its extension.
+    ///
+    /// Anything that is not a JPEG is the science file: a body shooting RAW+JPEG names its raw
+    /// `.cr3` here and `.nef`/`.arw` on other makes, and enumerating raw extensions would mean
+    /// this driver refusing to carry a frame off a body it otherwise drives perfectly.
+    pub(crate) fn kind(&self) -> CapturedFileKind {
+        match self.extension().as_deref() {
+            Some("jpg" | "jpeg") => CapturedFileKind::Jpeg,
+            _ => CapturedFileKind::Raw,
+        }
+    }
+}
+
+/// What one trigger produced, uninterpreted.
+// No `Eq`: `exposure_seconds` is what the camera said, and a float has no equality worth
+// deriving. Nothing compares two captures for identity.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RawCapture {
+    /// The files the body is holding, in the order it reported them. One for RAW, two for
+    /// RAW+JPEG — and the second arrives as a separate event rather than from the trigger call,
+    /// which is why this is a list and not an `Option` of a second field.
+    pub(crate) files: Vec<RawFileRef>,
+    /// The exposure the camera reports, if it reports one at all.
+    ///
+    /// `None` is the ordinary answer. It is `Some` only where the body volunteers the figure —
+    /// the R10 reports `BulbExposureTime` after a bulb hold (M2-T01 saw `9` for a 10 s hold) —
+    /// and the caller falls back to the duration it asked for. Recording the camera's own number
+    /// where there is one matters because that one-second discrepancy is the real integration
+    /// time, and the frame metadata should say what the sensor did.
+    pub(crate) exposure_seconds: Option<f64>,
+}
+
+/// The one signal that reaches the camera thread while it is busy.
+///
+/// A command cannot. There is one queue and one context (SDD §5.3.1), so a `CamCmd::Abort` sent
+/// during a five-minute bulb exposure would be serviced five minutes later — which is not an
+/// abort, it is a report. This is shared memory instead: a generation counter behind a condvar,
+/// which the blocking thread reads at the points where it is *not* inside a libgphoto2 call.
+///
+/// **What it can interrupt is a property of where the thread is, and the driver does not pretend
+/// otherwise.** The bulb hold is this driver's own sleep, so it ends within a condvar wakeup of
+/// the abort. `capture_image()` and `download_to()` are C calls with no cancellation, so an abort
+/// landing inside one takes effect when it returns. That is the same race the simulator
+/// documents and it resolves the same way: raised before the exposure or before the download,
+/// `Aborted` with nothing on disk; raised once the bytes are going to disk, the write wins and
+/// the capture succeeds. A caller that sees `Ok` after aborting has a frame, not a lie.
+#[derive(Debug, Default)]
+pub(crate) struct AbortSignal {
+    /// Bumped once per abort. A counter rather than a flag so that an abort raised and observed
+    /// cannot arm the *next* capture: each capture records the generation it started at and only
+    /// reacts to movement away from it.
+    generation: Mutex<u64>,
+    /// Wakes the bulb hold. Without it the hold would have to poll, and a poll interval is a
+    /// choice between a busy loop and an abort that is late by up to that interval.
+    changed: Condvar,
+}
+
+impl AbortSignal {
+    /// The generation a capture should record before it starts.
+    pub(crate) fn generation(&self) -> u64 {
+        *self
+            .generation
+            .lock()
+            .expect("the abort generation is never poisoned")
+    }
+
+    /// Raises an abort. Idempotent in effect and never fails — it is a stopping command
+    /// (SDD §5.8.1), and a stop that can be refused is not one.
+    pub(crate) fn raise(&self) {
+        let mut generation = self
+            .generation
+            .lock()
+            .expect("the abort generation is never poisoned");
+        *generation = generation.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    /// Whether an abort has been raised since `since`.
+    pub(crate) fn raised_since(&self, since: u64) -> bool {
+        self.generation() != since
+    }
+
+    /// Sleeps for `span`, returning early if an abort is raised. `true` if one was.
+    ///
+    /// This is the bulb hold. It is a real blocking wait because it runs on the camera thread,
+    /// between the shutter opening and the shutter closing, where there is no runtime to await
+    /// on and nothing else this thread may do.
+    ///
+    /// Compiled where there is a [`CamOps`] to call it — the mock and the real backend — for the
+    /// same reason [`super::camera::CanonGPhoto2Camera::new`] is: a default build has the trait
+    /// and no implementation of it, so this is the one method with no caller there. The rest of
+    /// `AbortSignal` is used by the thread and is always compiled.
+    #[cfg(any(test, feature = "libgphoto2"))]
+    pub(crate) fn hold(&self, span: Duration, since: u64) -> bool {
+        let generation = self
+            .generation
+            .lock()
+            .expect("the abort generation is never poisoned");
+        let (generation, _timed_out) = self
+            .changed
+            .wait_timeout_while(generation, span, |generation| *generation == since)
+            .expect("the abort generation is never poisoned");
+        *generation != since
+    }
+}
+
 /// What opening the camera establishes about it, interpreted.
 ///
 /// Produced by [`interpret_identity`] from a [`RawIdentity`], as one value because opening is one
@@ -134,9 +271,9 @@ pub(crate) struct CameraIdentity {
 
 /// The blocking camera operations. One implementation per transport; see the module docs.
 ///
-/// Scope note: this is M2-T02's set — connect, disconnect and settings. M2-T03 adds `capture`,
-/// `capture_bulb`, `download` and `abort`; M2-T04 adds the live-view pair. They belong here for
-/// the same reason these do, and the thread dispatches them the same way.
+/// Scope note: M2-T02 delivered connect, disconnect and settings; M2-T03 added `capture`,
+/// `capture_bulb`, `download` and `abort`. M2-T04 adds the live-view pair, which belongs here for
+/// the same reason these do and which the thread will dispatch the same way.
 pub(crate) trait CamOps {
     /// Autodetects, opens and interrogates the camera.
     ///
@@ -193,6 +330,70 @@ pub(crate) trait CamOps {
     /// # Errors
     /// As [`battery`](Self::battery).
     fn storage(&mut self) -> Result<StorageInfo, DeviceError>;
+
+    /// Takes one exposure at the settings already in force and returns what the body is holding.
+    ///
+    /// **Blocks for the whole exposure and, on this body, the whole USB transfer too.** M2-T01
+    /// measured 2.08 s for a capture and then 2.67 ms to write the 32 MB to disk — roughly
+    /// 12 GB/s, which is memory bandwidth, not USB. With `capturetarget=Internal RAM` libgphoto2
+    /// has the entire frame buffered before [`download`](Self::download) is called at all. That
+    /// is the PRF-05 consequence worth knowing here: one full frame is resident inside the C
+    /// library for the duration, against a 512 MB budget.
+    ///
+    /// It follows that there is no exposing→downloading transition to observe *inside* this
+    /// call, which is why the driver adds no progress channel — see the module docs of
+    /// [`super::camera`].
+    ///
+    /// Does not set the shutter: the caller has already put the body where it wants it, and a
+    /// capture that quietly rewrote settings would produce a frame nobody asked for.
+    ///
+    /// # Errors
+    /// `Rejected` if the body refuses to fire (no card, autofocus failure, a mode dial that
+    /// forbids it), `NotConnected`, `Transport`.
+    fn capture(&mut self) -> Result<RawCapture, DeviceError>;
+
+    /// Holds the shutter open for `duration` and returns what the body is holding (CAM-04).
+    ///
+    /// Duration-driven: the driver opens the shutter, waits, and closes it. The wait is
+    /// [`AbortSignal::hold`], so an abort ends the exposure within a condvar wakeup rather than
+    /// at the end of a five-minute integration.
+    ///
+    /// **The shutter is released on every path out of this method**, including the aborted one
+    /// and the failed one. A bulb exposure whose release is skipped leaves the sensor
+    /// integrating with nothing to stop it, which is the one failure here that damages the
+    /// session rather than the frame.
+    ///
+    /// # Errors
+    /// `Aborted` if the signal was raised during the hold — with the shutter closed and the
+    /// resulting frame left on the camera, never downloaded. `Unsupported` if the body exposes no
+    /// bulb mechanism, otherwise as [`capture`](Self::capture).
+    fn capture_bulb(
+        &mut self,
+        duration: Duration,
+        abort: &AbortSignal,
+        since: u64,
+    ) -> Result<RawCapture, DeviceError>;
+
+    /// Copies one camera-side file to `destination`, returning the bytes written.
+    ///
+    /// `destination` is a temporary path the caller has already unlinked — see
+    /// [`super::download`], which is where that unconditional unlink lives and why.
+    ///
+    /// # Errors
+    /// `Transport` if the transfer fails or the device disappears, `NotConnected`.
+    fn download(&mut self, file: &RawFileRef, destination: &Path) -> Result<u64, DeviceError>;
+
+    /// Releases the shutter if this body might be holding it open. Idempotent.
+    ///
+    /// The safety net behind [`capture_bulb`](Self::capture_bulb)'s own release: if the release
+    /// itself failed — the one case the spike flagged as *"SHUTTER MAY STILL BE OPEN"* — this is
+    /// what a later abort uses to try again. On a body with no bulb mechanism it is a no-op
+    /// rather than an error, because refusing to stop something is never the right answer to a
+    /// stopping command.
+    ///
+    /// # Errors
+    /// Transport-level failures only.
+    fn abort(&mut self) -> Result<(), DeviceError>;
 }
 
 /// Builds a [`CamOps`] on the thread that will use it.
@@ -324,6 +525,15 @@ pub(crate) fn capabilities_from(
         .iter()
         .filter_map(|token| shutter_seconds(token))
         .collect();
+    // See the bounds below: an empty list must report 0..0, not inf..0.
+    let (min_shutter_s, max_shutter_s) = if shutters.is_empty() {
+        (0.0, 0.0)
+    } else {
+        (
+            shutters.iter().copied().fold(f64::INFINITY, f64::min),
+            shutters.iter().copied().fold(0.0, f64::max),
+        )
+    };
 
     CameraCapabilities {
         // `bulb` in the shutter list is the body telling us it has a bulb mode. Derived rather
@@ -343,8 +553,14 @@ pub(crate) fn capabilities_from(
         supported_formats: available.formats.clone(),
         min_iso: isos.iter().copied().min().unwrap_or(0),
         max_iso: isos.iter().copied().max().unwrap_or(0),
-        min_shutter_s: shutters.iter().copied().fold(f64::INFINITY, f64::min),
-        max_shutter_s: shutters.iter().copied().fold(0.0, f64::max),
+        // Zero, not infinity, when the body enumerates no timed shutter at all. That case is not
+        // hypothetical: with the physical mode dial on Bulb the R10 offers only `bulb` and
+        // `Unknown value df00`, neither of which names a duration, and folding the resulting
+        // empty list from `f64::INFINITY` printed `shutter infs..0.0s` at an operator on real
+        // hardware (M2-T03). `0..0` reads as "the body is telling us nothing", which is true;
+        // `inf` reads as a defect in the reader.
+        min_shutter_s,
+        max_shutter_s,
     }
 }
 
@@ -467,6 +683,27 @@ mod tests {
         assert_eq!(caps.sensor_width_px, 6000);
         assert!((caps.pixel_size_um - 3.72).abs() < f64::EPSILON);
         assert_eq!(caps.supported_formats, available.formats);
+    }
+
+    #[test]
+    fn a_body_that_enumerates_no_timed_shutter_reports_zero_bounds_rather_than_infinity() {
+        // The R10 with its physical mode dial on Bulb, which is how it was found on the bench:
+        // neither token names a duration, so there is no bound to report. Folding the empty list
+        // from `f64::INFINITY` printed `shutter infs..0.0s` at an operator (M2-T03).
+        let available = AvailableSettings {
+            isos: vec!["1600".to_owned()],
+            shutters: vec!["Unknown value df00".to_owned(), "bulb".to_owned()],
+            apertures: vec!["1.8".to_owned()],
+            formats: vec![ImageFormat::Raw],
+        };
+
+        let caps = capabilities_from(&available, BodyGeometry::R10, true);
+
+        assert_eq!(caps.min_shutter_s, 0.0, "not infinity");
+        assert_eq!(caps.max_shutter_s, 0.0);
+        assert!(caps.min_shutter_s.is_finite() && caps.max_shutter_s.is_finite());
+        // The body still has a bulb mode; it is only the *timed* bounds that are empty.
+        assert!(caps.has_bulb);
     }
 
     #[test]

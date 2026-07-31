@@ -30,10 +30,19 @@
 //!
 //! # What this driver does *not* do yet
 //!
-//! M2-T02 delivers connect, disconnect, settings and status. Capture, bulb and download are
-//! M2-T03; live view and the recovery half of the wedge protocol are M2-T04. Each unimplemented
-//! operation returns an error that names its task rather than pretending the body cannot do it —
-//! see `not_yet_implemented` in [`camera`].
+//! M2-T02 delivered connect, disconnect, settings and status; M2-T03 added capture, bulb,
+//! download and abort. Live view and the recovery half of the wedge protocol are M2-T04. Each
+//! unimplemented operation returns an error that names its task rather than pretending the body
+//! cannot do it — see `not_yet_implemented` in [`camera`].
+//!
+//! # No CLI fallback, deliberately
+//!
+//! SDD §5.3.3 designs a `GPhoto2Cli` behind the same [`ops::CamOps`] seam. It is not built.
+//! M2-T01 measured every operation working through the bindings on the reference body and M2-T03
+//! re-measured capture, bulb, download and abort on the same camera; the populated table is in
+//! §5.3.3 and every row reads `bindings`. A second implementation of every operation that no
+//! configuration selects and no hardware test exercises is not insurance. `camera.ops_via_cli` is
+//! therefore *refused* rather than ignored — see `no_cli_fallback` in [`camera`].
 //!
 //! # The gvfs steal
 //!
@@ -42,6 +51,7 @@
 //! everything is plugged in and switched on, and libgphoto2's own message for it points nowhere.
 
 mod camera;
+mod download;
 mod gvfs;
 mod ops;
 mod thread;
