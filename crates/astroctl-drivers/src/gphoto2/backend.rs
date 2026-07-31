@@ -24,7 +24,7 @@ use astroctl_core::error::DeviceError;
 use astroctl_core::types::{BatteryStatus, DeviceInfo, DeviceKind, StorageInfo};
 use astroctl_hal::registry::DetectedDevice;
 use gphoto2::camera::CameraEvent;
-use gphoto2::widget::{RadioWidget, TextWidget};
+use gphoto2::widget::{RadioWidget, TextWidget, ToggleWidget};
 use gphoto2::{Camera, Context};
 
 use super::camera::DRIVER_NAME;
@@ -397,12 +397,47 @@ impl CamOps for LibGphoto2Ops {
 
     fn read_settings(&mut self) -> Result<RawSettings, DeviceError> {
         self.camera()?;
-        Ok(self.settings())
+        let settings = self.settings();
+        // **A camera that answers nothing at all has not answered.** [`Self::radio`] deliberately
+        // turns a missing key into an empty value, because that is the honest report for a
+        // *particular* control the body does not have — `aperture` behind a fully manual lens.
+        // But it cannot tell that apart from every key failing, and M2-T04 measured what that
+        // looks like: after a bus-level reset the R10 stayed enumerated and `read_settings`
+        // returned `Ok` with `iso=""`, `shutter=""`, `format=""`. A success carrying nothing is
+        // worse than a failure — the facade published it as the camera's settings, and the
+        // operator would have read an empty panel as a camera with no ISO rather than as a camera
+        // that is gone.
+        //
+        // Aperture is excluded from the test for exactly the reason it is allowed to be empty.
+        if settings.iso.is_empty() && settings.shutter.is_empty() && settings.format.is_empty() {
+            return Err(DeviceError::Transport(
+                "the camera accepted the request and reported no ISO, no shutter speed and no \
+                 image format. A body answers at least one of those, so the session is dead even \
+                 though the device is still on the bus."
+                    .to_owned(),
+            ));
+        }
+        Ok(settings)
     }
 
     fn read_choices(&mut self) -> Result<RawChoices, DeviceError> {
         self.camera()?;
-        Ok(self.choices())
+        let choices = self.choices();
+        // The same claim about the choice lists. `capabilities_from` already copes with an empty
+        // shutter list (the mode dial on Bulb produces one), so emptiness alone is not the signal
+        // — all four being empty is.
+        if choices.isos.is_empty()
+            && choices.shutters.is_empty()
+            && choices.apertures.is_empty()
+            && choices.formats.is_empty()
+        {
+            return Err(DeviceError::Transport(
+                "the camera enumerated no settings at all — no ISOs, shutters, apertures or \
+                 formats. The session is dead even though the device is still on the bus."
+                    .to_owned(),
+            ));
+        }
+        Ok(choices)
     }
 
     fn write_setting(&mut self, key: CfgKey, value: &str) -> Result<(), DeviceError> {
@@ -652,6 +687,51 @@ impl CamOps for LibGphoto2Ops {
             return Ok(());
         };
         self.commit(&widget, &release)
+    }
+
+    fn preview(&mut self) -> Result<Vec<u8>, DeviceError> {
+        let camera = self.camera()?;
+
+        // `capture_preview` *is* the start of live view on this body — there is no separate
+        // start call, and the first invocation costs 390 ms because that one spins the sensor up
+        // (M2-T01 measured it, then 58.5 fps sustained afterwards). The pacing loop above is what
+        // decides how often this happens; here it is one frame.
+        let file = camera.capture_preview().wait().map_err(transport)?;
+
+        // Handed to the caller exactly as the body produced it. No decode and no re-encode: the
+        // bytes go on the wire to the PWA unmodified (SDD §5.7 source 1), and re-encoding 133 KB
+        // several times a second on a Pi would be the most expensive thing in the preview path
+        // and would buy nothing — the body already produces JPEG.
+        let data = file.get_data(&self.context).wait().map_err(transport)?;
+        Ok(data.to_vec())
+    }
+
+    fn stop_preview(&mut self) -> Result<(), DeviceError> {
+        let Ok(camera) = self.camera() else {
+            // No camera is the strongest possible guarantee that its sensor is not being held
+            // awake.
+            return Ok(());
+        };
+
+        // `viewfinder` is the R10's own toggle for the mirror/sensor state live view puts it in.
+        // A body that does not expose it has no live-view mode to leave, which is `Ok(())` rather
+        // than an error — a stopping command may not fail for want of something to stop
+        // (SDD §5.8.1), and simply not calling `capture_preview` again has already stopped the
+        // traffic. The round trip is worth making where the key exists: a mirrorless body left in
+        // live view keeps its sensor powered and its screen lit, and this driver also reports the
+        // battery that pays for it.
+        let Ok(widget) = camera.config_key::<ToggleWidget>("viewfinder").wait() else {
+            tracing::debug!("the camera exposes no `viewfinder` control; nothing to switch off");
+            return Ok(());
+        };
+        widget.set_toggled(false);
+        if let Err(error) = camera.set_config(&widget).wait() {
+            // Best effort, and logged rather than returned: the operator asked for live view to
+            // stop, the frames have stopped, and failing their request over the body's own power
+            // management would be answering a stop with a refusal.
+            tracing::warn!(%error, "the camera would not leave live view");
+        }
+        Ok(())
     }
 }
 

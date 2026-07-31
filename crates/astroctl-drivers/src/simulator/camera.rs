@@ -1015,6 +1015,7 @@ fn default_config() -> CameraConfig {
             capture_extra_seconds: 30,
             download_seconds: 120,
         },
+        live_view_fps: 5,
         indi_device: None,
     }
 }

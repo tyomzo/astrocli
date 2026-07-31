@@ -87,6 +87,18 @@ pub(crate) struct MockState {
     shutter_log: Mutex<Vec<&'static str>>,
     /// Raised by `abort()`, so a test can see the safety-net release happen.
     aborts: AtomicUsize,
+
+    // --- live view -----------------------------------------------------------------------------
+    /// How many preview frames have been pulled. The fps evidence, without a camera.
+    previews: AtomicUsize,
+    /// How many times the body was told to leave live view.
+    stop_previews: AtomicUsize,
+    /// If set, `preview` fails with this transport error — a camera that left mid-stream.
+    preview_failure: Mutex<Option<String>>,
+    /// How many bytes each preview frame claims to be. 133 KB on the reference body.
+    preview_size: Mutex<usize>,
+    /// What the body's abilities say about a preview operation.
+    has_live_view: AtomicBool,
 }
 
 impl Default for MockState {
@@ -136,6 +148,14 @@ impl Default for MockState {
             shutter_open: AtomicBool::new(false),
             shutter_log: Mutex::new(Vec::new()),
             aborts: AtomicUsize::new(0),
+            previews: AtomicUsize::new(0),
+            stop_previews: AtomicUsize::new(0),
+            preview_failure: Mutex::new(None),
+            // Small, not the measured 133 KB: these tests count frames and assert bytes are
+            // carried through unmodified, and allocating 133 KB several hundred times over a soak
+            // test would measure the allocator rather than the driver.
+            preview_size: Mutex::new(64),
+            has_live_view: AtomicBool::new(true),
         }
     }
 }
@@ -290,6 +310,34 @@ impl MockState {
         self.shutter_open.load(Ordering::SeqCst)
     }
 
+    // --- live view scripting -----------------------------------------------------------------
+
+    /// How many preview frames the body has been asked for.
+    pub(crate) fn previews(&self) -> usize {
+        self.previews.load(Ordering::SeqCst)
+    }
+
+    /// How many times the body was told to leave live view.
+    pub(crate) fn stop_previews(&self) -> usize {
+        self.stop_previews.load(Ordering::SeqCst)
+    }
+
+    /// Makes `preview` fail — the camera left mid-stream, which is how the spike's cable pull
+    /// presented itself.
+    pub(crate) fn fail_preview_with(&self, message: &str) {
+        *self.preview_failure.lock().expect("mock state") = Some(message.to_owned());
+    }
+
+    /// Stops `preview` failing — the camera came back.
+    pub(crate) fn succeed_preview(&self) {
+        *self.preview_failure.lock().expect("mock state") = None;
+    }
+
+    /// Makes the body report no preview operation in its abilities — a camera with no live view.
+    pub(crate) fn remove_live_view(&self) {
+        self.has_live_view.store(false, Ordering::SeqCst);
+    }
+
     /// Records a call and applies the scripted block.
     fn enter(&self, op: &'static str) {
         self.calls.lock().expect("mock state").push(CallRecord {
@@ -372,7 +420,7 @@ impl CamOps for MockOps {
             },
             settings: self.state.settings.lock().expect("mock state").clone(),
             choices: self.state.choices.lock().expect("mock state").clone(),
-            has_live_view: true,
+            has_live_view: self.state.has_live_view.load(Ordering::SeqCst),
         })
     }
 
@@ -552,6 +600,42 @@ impl CamOps for MockOps {
         }
         Ok(())
     }
+
+    fn preview(&mut self) -> Result<Vec<u8>, DeviceError> {
+        self.state.enter("preview");
+        if let Some(message) = self
+            .state
+            .preview_failure
+            .lock()
+            .expect("mock state")
+            .clone()
+        {
+            return Err(DeviceError::Transport(message));
+        }
+        let n = self.state.previews.fetch_add(1, Ordering::SeqCst);
+        let size = *self.state.preview_size.lock().expect("mock state");
+
+        // Real JPEG-shaped bytes with the frame number written into them, so a test can prove
+        // that what arrived at the sink is the frame the body produced rather than a repeat of an
+        // earlier one — which is the failure a `watch` channel makes easy to miss, since a stalled
+        // producer and a working one both leave *a* frame in the slot.
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        jpeg.extend_from_slice(&(n as u32).to_be_bytes());
+        jpeg.resize(size.max(8), 0x5A);
+        Ok(jpeg)
+    }
+
+    fn stop_preview(&mut self) -> Result<(), DeviceError> {
+        self.state.enter("stop_preview");
+        self.state.stop_previews.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// The frame number a mock preview carries, for a test asserting frames are fresh.
+pub(crate) fn mock_preview_sequence(jpeg: &[u8]) -> Option<u32> {
+    let bytes: [u8; 4] = jpeg.get(4..8)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
 }
 
 /// The token the mock's body uses for a format, for tests that assert a round trip.

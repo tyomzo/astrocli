@@ -883,9 +883,31 @@ pub struct CameraConfig {
     pub ops_via_cli: Vec<CameraOp>,
     /// Operation-class timeouts; a breach declares the camera thread wedged (REL-03).
     pub timeouts: CameraTimeouts,
+    /// Live-view frames per second to pull off the camera (PRF-02, USB-11).
+    ///
+    /// **A ceiling to throttle down to, not a target.** M2-T01 measured the R10 sustaining
+    /// **58.5 fps** at 133 KB per frame — 7.8 MB/s of USB and of link, for a preview whose
+    /// requirement (PRF-02) is *at least* 5 fps. Chasing the hardware's rate would spend the
+    /// wire, the CPU and the Pi's memory bandwidth on frames no operator can see, and USB-11
+    /// asks for the opposite: degrade gracefully on a thin link. So the driver paces itself and
+    /// this is the knob.
+    ///
+    /// Defaulted rather than required, because `CameraConfig` is `deny_unknown_fields` and every
+    /// deployed `field-node.yaml` predates this key: a required field would refuse to load a
+    /// config that is otherwise correct.
+    #[serde(default = "default_live_view_fps")]
+    pub live_view_fps: u32,
     /// INDI device name; required when `driver: indi`.
     #[serde(default)]
     pub indi_device: Option<String>,
+}
+
+/// PRF-02's floor, which is also the right ceiling. See [`CameraConfig::live_view_fps`].
+///
+/// The same 5 fps the simulator's `CameraProfile` has defaulted to since M1-T06, so the two
+/// drivers pace identically and a panel tuned against one is not surprised by the other.
+fn default_live_view_fps() -> u32 {
+    5
 }
 
 impl CameraConfig {
@@ -894,6 +916,11 @@ impl CameraConfig {
         c.non_empty("default_shutter", &self.default_shutter);
         c.non_empty("default_format", &self.default_format);
         c.section("timeouts", |c| self.timeouts.validate(c));
+        // The upper bound is the measured hardware rate: a number above it cannot be delivered
+        // and would only mean "as fast as possible", which is what the key exists to prevent
+        // someone asking for by accident. The lower bound is one frame a second, USB-11's own
+        // floor for a degraded link.
+        c.range("live_view_fps", self.live_view_fps, 1, 60);
 
         let mut seen = BTreeSet::new();
         for op in &self.ops_via_cli {

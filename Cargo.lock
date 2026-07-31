@@ -79,6 +79,7 @@ dependencies = [
  "fitsrs",
  "gphoto2",
  "jpeg-encoder",
+ "rustix 1.1.4",
  "tokio",
  "tracing",
  "zune-jpeg",
