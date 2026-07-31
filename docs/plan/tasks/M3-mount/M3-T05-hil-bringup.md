@@ -1,7 +1,7 @@
 # M3-T05 — HIL bring-up (hardware, operator present)
 
 **Milestone:** M3 · **Depends on:** M3-T04, M2 complete · **Crates:** scripts/, docs/evidence/
-**Size:** L · **Status:** step 2 done read-only (2026-07-29, `spikes/skywatcher-heq5/FINDINGS.md`); steps 1, 3–6 outstanding
+**Size:** L · **Status:** step 2 done read-only — twice: 2026-07-29 (spike, `FINDINGS.md`) and **2026-07-31 re-run against the M3-T01 codec's golden vectors** — every handshake byte the mount sent (`a b e f g j s`, both the 2000-poll latency profile p50 15.8/p99 16.9 ms and the malformed-frame recovery) matched the `verified` vector rows exactly; counters pinned at `0x800000` throughout, motion check PASS. Steps 1, 3–6 outstanding
 **Spec:** SDD §9 T-HIL-1 (six-step sequence); IMP §2/M3; PRD §4.2 verification note
 **Tests gated:** T-HIL-1
 
