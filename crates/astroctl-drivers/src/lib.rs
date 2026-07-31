@@ -8,8 +8,17 @@
 //! | Module | Contents | Feature | Task |
 //! |--------|----------|---------|------|
 //! | [`simulator`] | `SimulatorMount`, `SimulatorCamera`, `SimulatorGuideCamera` and their fault injection (HAL-11) | `simulator` | M1-T02, M1-T06 |
+//! | [`gphoto2`] | `CanonGPhoto2Camera` — camera thread, command channel, timeouts, gvfs diagnosis | `gphoto2` | M2-T02 |
+//! | `gphoto2::backend` | the libgphoto2 calls themselves | `libgphoto2` | M2-T02 |
 //!
-//! The Sky-Watcher driver (M3-T02) and the gPhoto2 camera (M2) join them here.
+//! The Sky-Watcher driver (M3-T02) joins them here.
+//!
+//! **Two features for one camera driver.** `gphoto2` is the driver and is on by default;
+//! `libgphoto2` adds the binding that talks to the hardware and is off by default, because
+//! `libgphoto2_sys` runs `pkg-config` and `bindgen` in its build script and CI has no
+//! libgphoto2 — a machine without it cannot *compile* the crate, let alone link it. The manifest
+//! argues this at length; the consequence for a reader here is that everything in
+//! [`gphoto2`] except `backend` is compiled, linted and tested by every gate.
 //!
 //! # What a driver in this crate may and may not do
 //!
@@ -30,6 +39,9 @@
 //!
 //! ADD §5.6 is authoritative for the crate layout and the allowed-dependency matrix;
 //! `scripts/check-deps.sh` enforces it.
+
+#[cfg(feature = "gphoto2")]
+pub mod gphoto2;
 
 #[cfg(feature = "simulator")]
 pub mod simulator;

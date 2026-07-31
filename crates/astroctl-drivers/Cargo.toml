@@ -15,9 +15,32 @@ publish.workspace = true
 #
 # On by default for the reason astroctl-ipc's `supervisor` is: `scripts/check.sh` compiles, lints
 # and tests default features only, and a driver no gate ever looks at is the worse failure.
+#
+# `gphoto2` and `libgphoto2` are two features for one driver, and the split is the whole reason
+# the driver is testable. M2-T02 found that `libgphoto2_sys` 1.2.3 runs `pkg-config` **and
+# `bindgen`** in its build script: on a machine without `libgphoto2-dev` the crate does not fail
+# to link, it fails to *compile*. A single feature that pulled in the binding would therefore
+# have to be off by default (CI has no libgphoto2) — and `scripts/check.sh` builds default
+# features only, so the entire camera driver would be invisible to all six gates. That is the
+# failure the `simulator` note above already calls the worse one.
+#
+# So the split is by what needs the C library, not by what is "the driver":
+#
+#   `gphoto2`    the driver — camera thread, command channel, per-operation timeouts, the wedge
+#                protocol, the gvfs claim diagnosis, and the `CamOps` seam. Pure Rust, no system
+#                library, **on by default**, so every gate compiles, lints and tests it.
+#   `libgphoto2` the `CamOps` implementation that talks to the real camera. Needs
+#                `libgphoto2-dev` at build time, so it is **off by default** and the field node
+#                enables it (ADD §5.6 rule 1: only the binaries may name this crate, so the
+#                deployable is the only thing that can make that choice).
+#
+# What is untested on CI is therefore exactly the PTP call layer, which no CI machine could
+# exercise anyway for want of a camera. Everything above it runs against a mock `CamOps`.
 [features]
-default = ["simulator"]
+default = ["simulator", "gphoto2"]
 simulator = ["dep:async-trait", "dep:chrono", "dep:jpeg-encoder", "dep:tokio"]
+gphoto2 = ["dep:async-trait", "dep:chrono", "dep:tokio", "dep:tracing"]
+libgphoto2 = ["gphoto2", "dep:gphoto2"]
 
 [dependencies]
 # ADD §5.6 rule 1: these two, and nothing else internal, ever.
@@ -41,6 +64,14 @@ chrono = { workspace = true, optional = true }
 # The 8-bit rendition beside every 16-bit frame, and every live-view frame. See the workspace
 # manifest for why this encoder and not `image` or `mozjpeg`.
 jpeg-encoder = { workspace = true, optional = true }
+# The camera driver's spans carry the OS thread the libgphoto2 call ran on — which is how
+# "no blocking call escapes the camera thread" (SDD §5.3.1, T-ISO-1) is observable in a log
+# rather than only in a test. First `tracing` dependency in this crate; the simulators need none
+# because nothing they do is invisible from the outside.
+tracing = { workspace = true, optional = true }
+# The libgphoto2 binding itself — see `[features]` above for why it is optional and why that is
+# not merely a size optimisation.
+gphoto2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` is load-bearing rather than convenient: it is what makes `tokio::time::pause`
