@@ -14,7 +14,8 @@
 #                acceptance criterion is ×20 consecutive runs with zero flakes, and it is spelled
 #                as a loop rather than as a retry on purpose — a retry hides the number this is
 #                supposed to produce.
-#   --test NAME  run one scenario file (t_e2e_1, faults, t_iso_1, t_hol_1, crate_suites).
+#   --test NAME  run one scenario file; --list prints the names rather than repeating them here,
+#                where they would go stale the first time one is added.
 #   --list       print the scenario files and exit.
 #
 # ---------------------------------------------------------------------------------------------
@@ -165,6 +166,73 @@ cargo build --manifest-path "$MANIFEST" --tests --quiet || {
     echo "e2e: the suite does not compile" >&2
     exit 1
 }
+
+# ---------------------------------------------------------------------------------------
+# The crate-level suite members: T-XFER-1, T-ING-1, T-IPC-1.
+#
+# All three already exist as crate tests, written by the tasks that built what they test, and
+# M1-T16's job is to make "run the suite" mean "run everything M1 stands on" rather than to write
+# them again. A second T-ING-1 out here would assert *less* — it cannot bit-flip an upload from
+# the far side of an HTTP API — and would drift from the first within a milestone.
+#
+# What this guards against is not the tests failing; `cargo test --workspace` in the quality gate
+# catches that first. It guards against them **disappearing**: a target renamed, emptied or
+# quietly `#[ignore]`d still leaves the gate green while the ID it carried stops being verified.
+# So each is named explicitly — cargo fails on an unknown `--test` — and each must report a
+# non-zero number of passing tests.
+#
+# In the shell rather than as a fifth scenario file, which is where it was first written. A
+# `cargo test` invoked *from inside* a cargo test binary inherits an environment built for that
+# binary, and two of those variables break the child in ways that look like compiler bugs:
+# `LD_LIBRARY_PATH` points at the suite's own `deps/`, so the child's rustc loads mismatched
+# proc-macro dylibs and fails inside `syn`; and the target-directory variables send the workspace
+# build somewhere it then cannot link against. Here the environment is the shell's and none of it
+# arises.
+#
+# Run once per invocation, not once per `--repeat`: these are deterministic and hermetic, and the
+# flake gate is a question about the container scenarios.
+crate_target() { # crate_target <package> <test-target|--bins> <id>
+    local package="$1" target="$2" id="$3" selector output passed
+    if [[ "$target" == "--bins" ]]; then
+        selector=(--bins)
+    else
+        selector=(--test "$target")
+    fi
+    printf -- '-- %-9s %s::%s ' "$id" "$package" "$target"
+    if ! output="$(cargo test --manifest-path "$HARNESS_ROOT/Cargo.toml" \
+        -p "$package" "${selector[@]}" 2>&1)"; then
+        printf 'FAILED\n'
+        printf '%s\n' "$output" | sed 's/^/      | /' >&2
+        return 1
+    fi
+    passed="$(grep -E '^test result: ok\.' <<<"$output" | awk '{ s += $4 } END { print s + 0 }')"
+    if [[ "$passed" -eq 0 ]]; then
+        printf 'FAILED\n'
+        echo "      | ran zero tests — the target exists but no longer verifies anything" >&2
+        return 1
+    fi
+    printf 'ok  (%s tests)\n' "$passed"
+}
+
+echo "-- crate suite members"
+CRATE_FAILURES=0
+# T-XFER-1's crate half: the journal's own crash behaviour, and the upload contract against a
+# mock receiver. The two-node half — kill the stacking server, kill the field node — is the
+# `faults` scenario below, because it needs two nodes and these do not.
+crate_target astroctl-transfer durability T-XFER-1 || CRATE_FAILURES=$((CRATE_FAILURES + 1))
+crate_target astroctl-transfer wire T-XFER-1 || CRATE_FAILURES=$((CRATE_FAILURES + 1))
+# T-ING-1 lives in the stacking server's unit tests: it is a binary crate and the ingest cases
+# reach into the archive and the journal, neither of which is public.
+crate_target astroctl-stack --bins T-ING-1 || CRATE_FAILURES=$((CRATE_FAILURES + 1))
+# T-IPC-1's two halves verify different things: `golden_messages` asserts one fixture against both
+# the Rust enums and workers/astroctl_ipc.py, which is the only thing keeping the two language
+# bindings in agreement; `supervision` covers the version refusal and the kill-9 restart.
+crate_target astroctl-ipc golden_messages T-IPC-1 || CRATE_FAILURES=$((CRATE_FAILURES + 1))
+crate_target astroctl-ipc supervision T-IPC-1 || CRATE_FAILURES=$((CRATE_FAILURES + 1))
+if [[ "$CRATE_FAILURES" -gt 0 ]]; then
+    echo "e2e: $CRATE_FAILURES crate suite member(s) failed" >&2
+    exit 1
+fi
 
 PASSED=0
 FAILED=0

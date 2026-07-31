@@ -75,6 +75,86 @@ impl MountCommand {
             Self::EmergencyStop => "emergency stop",
         }
     }
+
+    /// Every variant, in declaration order.
+    ///
+    /// A list rather than a derive, and kept honest by [`Self::ordinal`]: that function's match is
+    /// exhaustive, so adding a variant to the enum fails to compile there, and
+    /// `every_command_is_listed_and_round_trips` then fails unless the variant was added here too.
+    /// Between them a new command cannot quietly become unspellable in a fault spec.
+    pub const ALL: &'static [Self] = &[
+        Self::Connect,
+        Self::Disconnect,
+        Self::Position,
+        Self::Status,
+        Self::Goto,
+        Self::Sync,
+        Self::StartTracking,
+        Self::StopTracking,
+        Self::Slew,
+        Self::StopSlew,
+        Self::GuidePulse,
+        Self::Park,
+        Self::Unpark,
+        Self::EmergencyStop,
+    ];
+
+    /// This command's position in [`Self::ALL`].
+    ///
+    /// Its only job is to be exhaustive: it exists so that adding a variant is a compile error in
+    /// this file rather than a silent gap in [`Self::ALL`]. `cfg(test)` because that is the only
+    /// caller and the only place the guard needs to bite — every path that matters (`cargo test`,
+    /// `cargo clippy --all-targets`, CI) compiles the test target.
+    #[cfg(test)]
+    #[must_use]
+    const fn ordinal(self) -> usize {
+        match self {
+            Self::Connect => 0,
+            Self::Disconnect => 1,
+            Self::Position => 2,
+            Self::Status => 3,
+            Self::Goto => 4,
+            Self::Sync => 5,
+            Self::StartTracking => 6,
+            Self::StopTracking => 7,
+            Self::Slew => 8,
+            Self::StopSlew => 9,
+            Self::GuidePulse => 10,
+            Self::Park => 11,
+            Self::Unpark => 12,
+            Self::EmergencyStop => 13,
+        }
+    }
+
+    /// How this command is written in a fault spec: [`as_str`](Self::as_str) with underscores.
+    #[must_use]
+    pub fn spec_name(self) -> String {
+        self.as_str().replace(' ', "_")
+    }
+
+    /// The inverse of [`spec_name`](Self::spec_name).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message listing every accepted name, because the cost of a typo is a scenario
+    /// that runs against a mount which behaves and passes for the wrong reason.
+    pub fn from_spec(name: &str) -> Result<Self, String> {
+        let wanted = name.trim().to_ascii_lowercase();
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|command| command.spec_name() == wanted)
+            .ok_or_else(|| {
+                format!(
+                    "`{name}` is not a mount command; expected one of {}",
+                    Self::ALL
+                        .iter()
+                        .map(|command| command.spec_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    }
 }
 
 /// One scripted failure.
@@ -107,10 +187,16 @@ pub enum Fault {
 
     /// The link dies this long after [`connect`](astroctl_hal::mount::MountDevice::connect).
     ///
-    /// The call that discovers it gets [`DeviceError::Transport`]; every call after that gets
-    /// [`DeviceError::NotConnected`] until the operator reconnects, which succeeds. **Motion
-    /// does not stop** — an unplugged mount keeps slewing, which is the whole reason REL-02's
-    /// watchdog exists and is the scenario the safety layer must be tested against.
+    /// The call that discovers it gets [`DeviceError::Transport`], and so does **every call after
+    /// it**, until the operator reconnects — which succeeds, because the fault is spent. (This
+    /// said `NotConnected` for the later calls until M1-T16 drove the scenario end to end and
+    /// found the code had always returned `Transport`: `State::connected` maps `Link::Faulted`
+    /// through the same `link_lost()` as the discovering call. `Transport` is also the better
+    /// answer — it is retryable and `NotConnected` is not, and a link that fell out *is* worth
+    /// retrying — so the text moved to the code rather than the other way round.)
+    ///
+    /// **Motion does not stop** — an unplugged mount keeps slewing, which is the whole reason
+    /// REL-02's watchdog exists and is the scenario the safety layer must be tested against.
     DisconnectAfter(Duration),
 
     /// The next slew stops dead partway and never reaches its target.
@@ -173,6 +259,94 @@ impl FaultPlan {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.faults.is_empty()
+    }
+
+    /// Parse a plan from a comma-separated textual spec.
+    ///
+    /// # Why a string form exists at all
+    ///
+    /// SDD §9 puts fault injection on the constructor precisely so it cannot become an operator
+    /// switch, and nothing here weakens that: this is still a constructor parameter, and no YAML
+    /// key reaches it. What it adds is a way for a fault plan to cross a **process boundary**,
+    /// which M1-T16's end-to-end suite needs and no in-process test does — the suite drives two
+    /// containers over HTTP, so "construct the mount with `DisconnectAfter(2s)`" has to be
+    /// expressible as something the container can be *started with*. The field binary reads it
+    /// from an environment variable and passes the result straight to
+    /// [`SimulatorMountFactory::with_faults`](super::SimulatorMountFactory::with_faults).
+    ///
+    /// The parser lives beside the enum rather than in that binary because [`MountCommand`] is
+    /// closed and [`MountCommand::as_str`] is right here: a new variant that nobody teaches this
+    /// function about fails to compile, which is not true of a parser one crate away.
+    ///
+    /// # The grammar
+    ///
+    /// | spec | fault |
+    /// |------|-------|
+    /// | `timeout_once=<command>` | [`Fault::TimeoutOnce`] — the command names are [`MountCommand::as_str`]'s, with spaces written as underscores (`read_position`, `start_tracking`) |
+    /// | `garbled=<n>` | [`Fault::GarbledResponse`] at the n-th exchange |
+    /// | `disconnect_after=<ms>` | [`Fault::DisconnectAfter`], in whole milliseconds |
+    /// | `stall_slew` | [`Fault::StallDuringSlew`] |
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use astroctl_drivers::simulator::{Fault, FaultPlan, MountCommand};
+    ///
+    /// let plan = FaultPlan::from_spec("disconnect_after=2500,timeout_once=goto").expect("parses");
+    /// assert_eq!(
+    ///     plan,
+    ///     FaultPlan::new([
+    ///         Fault::DisconnectAfter(Duration::from_millis(2500)),
+    ///         Fault::TimeoutOnce(MountCommand::Goto),
+    ///     ])
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the term that could not be read. A misspelt fault is a scenario
+    /// that would otherwise run against a mount that behaves perfectly and pass for the wrong
+    /// reason, so the caller is expected to treat this as fatal.
+    pub fn from_spec(spec: &str) -> Result<Self, String> {
+        let mut faults = Vec::new();
+        for term in spec.split(',') {
+            let term = term.trim();
+            if term.is_empty() {
+                continue;
+            }
+            let (key, value) = match term.split_once('=') {
+                Some((key, value)) => (key.trim(), Some(value.trim())),
+                None => (term, None),
+            };
+            let number = |what: &str| -> Result<u64, String> {
+                value
+                    .ok_or_else(|| format!("`{key}` needs a value, as `{key}=<{what}>`"))?
+                    .parse::<u64>()
+                    .map_err(|error| format!("`{term}` does not name a number: {error}"))
+            };
+            let fault = match key {
+                "timeout_once" => {
+                    let name =
+                        value.ok_or_else(|| "`timeout_once` needs a command name".to_owned())?;
+                    Fault::TimeoutOnce(MountCommand::from_spec(name)?)
+                }
+                "garbled" => {
+                    let nth = number("nth exchange")?;
+                    Fault::GarbledResponse(
+                        u32::try_from(nth).map_err(|_| format!("`{term}` is too large"))?,
+                    )
+                }
+                "disconnect_after" => Fault::DisconnectAfter(Duration::from_millis(number("ms")?)),
+                "stall_slew" => Fault::StallDuringSlew,
+                other => {
+                    return Err(format!(
+                        "`{other}` is not a fault; expected one of timeout_once, garbled, \
+                         disconnect_after, stall_slew"
+                    ))
+                }
+            };
+            faults.push(fault);
+        }
+        Ok(Self { faults })
     }
 
     /// Arms the plan against a live device.
@@ -433,6 +607,89 @@ pub(super) fn garbled_error(command: MountCommand) -> DeviceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`MountCommand::ALL`] really is all of them, and every one is spellable in a fault spec.
+    ///
+    /// The two halves work together: [`MountCommand::ordinal`] is an exhaustive match, so a new
+    /// variant is a compile error there; this test is what then catches the variant having been
+    /// added to the enum and the `ordinal` match but not to `ALL`. Without it a new command would
+    /// be silently unspellable, and a spec naming it would fail at startup with "not a mount
+    /// command" — pointing at the caller rather than at this file.
+    #[test]
+    fn every_command_is_listed_and_round_trips_through_a_spec_name() {
+        for (index, command) in MountCommand::ALL.iter().enumerate() {
+            assert_eq!(
+                command.ordinal(),
+                index,
+                "{} is at the wrong index in ALL",
+                command.as_str()
+            );
+            assert_eq!(
+                MountCommand::from_spec(&command.spec_name()),
+                Ok(*command),
+                "{} does not round-trip through its spec name",
+                command.as_str()
+            );
+        }
+        // The exhaustive match's highest arm, so a variant added there but not to ALL is caught.
+        assert_eq!(
+            MountCommand::ALL.len(),
+            MountCommand::EmergencyStop.ordinal() + 1,
+            "ALL is missing a variant that `ordinal` knows about"
+        );
+    }
+
+    /// A spec is read left to right into the plan a test would have written by hand.
+    #[test]
+    fn a_spec_parses_into_the_plan_it_names() {
+        let plan = FaultPlan::from_spec(
+            "disconnect_after=2500, timeout_once=read_position ,garbled=3,stall_slew",
+        )
+        .expect("the spec parses");
+        assert_eq!(
+            plan,
+            FaultPlan::new([
+                Fault::DisconnectAfter(Duration::from_millis(2500)),
+                Fault::TimeoutOnce(MountCommand::Position),
+                Fault::GarbledResponse(3),
+                Fault::StallDuringSlew,
+            ])
+        );
+    }
+
+    /// An empty or whitespace-only spec is a mount that behaves, not an error.
+    ///
+    /// The environment variable that carries these is unset on every node that is not running a
+    /// scenario, and an empty string is what a compose file with no override interpolates to —
+    /// so "nothing to inject" has to be the quiet case.
+    #[test]
+    fn an_empty_spec_is_a_mount_that_behaves() {
+        for spec in ["", "   ", ",,"] {
+            assert_eq!(
+                FaultPlan::from_spec(spec),
+                Ok(FaultPlan::none()),
+                "{spec:?}"
+            );
+        }
+    }
+
+    /// A misspelt term is refused rather than ignored.
+    ///
+    /// The whole risk of a textual fault plan is a scenario that asks for a failure, gets a mount
+    /// that works perfectly, and passes. Refusing loudly at startup is what makes that impossible.
+    #[test]
+    fn a_term_that_is_not_a_fault_is_refused_by_name() {
+        let error = FaultPlan::from_spec("disconect_after=100").expect_err("refused");
+        assert!(error.contains("disconect_after"), "{error}");
+        assert!(error.contains("disconnect_after"), "{error}");
+
+        let error = FaultPlan::from_spec("timeout_once=postion").expect_err("refused");
+        assert!(error.contains("postion"), "{error}");
+        assert!(error.contains("read_position"), "{error}");
+
+        let error = FaultPlan::from_spec("garbled=soon").expect_err("refused");
+        assert!(error.contains("garbled=soon"), "{error}");
+    }
 
     #[test]
     fn a_timeout_fires_on_its_command_and_only_once() {

@@ -113,6 +113,38 @@ than slower and the operator is entitled to see that; and **telemetry age must b
 via §5.8.1's estimate, or a device forty seconds fast reports every event as forty seconds stale —
 §8.3's 3 s amber, thirteen times over, on a link that is working. Landed by M1-T15.
 
+**Change note (1.23.0):** **`STACK_UNREACHABLE` has exactly one producer.** M1-T16's fault
+scenario found that a single outage raised the alert twice — once from the field node's
+`stack.status` republisher on its 5 s poll, once from the transfer agent on its first failed
+upload — each fired correctly once per transition and together giving the operator two banner rows
+for one cause, in a system that elsewhere goes to some length to raise one alert and not thousands
+(§5.10.2). The transfer agent keeps it; the republisher now raises none. The rule the split
+records, and the one to apply to the next pair of producers that collide: **an alert is about a
+consequence, a stateful topic is about a state.** `stack.status` already carries `offline` with
+the last known counts and §5.8.3 replays it to a reconnecting client, so the republisher's alert
+duplicated the topic beside it and did so worse — an alert is a moment, and a client that
+reconnects after it has missed it entirely. The transfer agent's says the thing no topic can: the
+queue is growing and frames are not being delivered. The two producers had also drifted apart on
+vocabulary, which is how the duplication stayed invisible: the agent announces recovery as
+`STACK_ONLINE`, while the republisher announced it as an *info* alert still coded
+`STACK_UNREACHABLE` — a code naming the opposite of what it announced. Two alternatives were
+weighed and rejected for the same reason, that both dress a duplicate rather than remove it: an
+`alert.producer` field is a §4.3 wire change (payload, PWA mirror, golden fixtures) bought to let
+clients dedupe something that should not be sent twice, and two distinct codes leave both firing
+during a capture outage, which is the case the operator actually meets. What is given up is
+bounded: an outage beginning while the queue is empty now raises no alert. Nothing is at risk
+while nothing is queued, the stack panel shows `offline` throughout, and the first capture after
+that raises the agent's. Also recorded here because M1-T16 needed it and §9 did not say how:
+**a fault plan reaches a containerised node through the environment, not through config.** §9's
+"fault injection is a constructor parameter" is kept literally — the field binary parses
+`ASTROCTL_SIM_FAULTS` once at startup and moves the plan into the factory, with no setter and
+nothing mutable afterwards — but an end-to-end suite driving two containers over HTTP has no other
+way to reach a constructor. It is deliberately not a config key: `FieldConfig` is
+`deny_unknown_fields` and `/api/system/info` publishes it, so a key would ship fault injection to
+every deployment and put it in a production node's API. A malformed value is fatal at startup and
+a non-empty plan logs at WARN, because the failure this guards against is a scenario that asks for
+a fault, quietly gets a mount that behaves, and passes. Landed by M1-T16.
+
 ---
 
 ## 1. Introduction

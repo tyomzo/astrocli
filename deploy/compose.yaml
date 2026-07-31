@@ -43,6 +43,17 @@ services:
       # a non-loopback bind unauthenticated (SEC-01) — which is the correct failure, but dev-up.sh
       # gets you a token before you meet it.
       ASTROCTL_TOKEN: ${ASTROCTL_TOKEN:-}
+      # A scripted mount failure, for M1-T16's fault scenarios — e.g. `disconnect_after=2000` for
+      # a link that dies two seconds after the operator connects. Empty on every ordinary run,
+      # which the binary reads as "no faults".
+      #
+      # It is here rather than in deploy/config/field-node.yaml on purpose. SDD §9 puts fault
+      # injection on the *constructor* so a failure is a property of the device rather than a
+      # switch, and the config is `deny_unknown_fields` and published by /api/system/info — a key
+      # there would ship fault injection to every deployment and put it in a production node's
+      # API. An environment variable crosses the one boundary a container needs it to cross and
+      # touches nothing else. See build_mount() in crates/astroctl-field/src/main.rs.
+      ASTROCTL_SIM_FAULTS: ${ASTROCTL_SIM_FAULTS:-}
     ports:
       # The only published port in the harness. 18470 rather than 8470 so a node already running
       # on the workstation keeps its port; override with ASTROCTL_FIELD_HOST_PORT.
