@@ -1,0 +1,168 @@
+# Synta wire-protocol golden vectors — T-COD-1, SDD §5.2.2, task M3-T01.
+#
+# One line per exchange. `tests/synta_codec.rs` builds the command named in column 2, asserts its
+# frame equals column 3, decodes column 4's reply, renders the result, and asserts it equals
+# column 5. Editing a byte here without editing the codec is a failing test, which is the point:
+# this file is the protocol written down as data, not as a comment.
+#
+#   label    | command | request | reply | decoded | source
+#
+# Trailing `\r` is implied on every request and every reply and is not written, because a file
+# full of escaped carriage returns is a file nobody proof-reads. The test appends it.
+#
+# ---------------------------------------------------------------------------------------------
+# THE LABEL DESCRIBES THE BYTE PAIR IN COLUMNS 3 AND 4, and nothing else.
+#
+#   verified   these exact bytes were seen on the operator's own HEQ5 Pro and are quoted in
+#              spikes/skywatcher-heq5/FINDINGS.md.
+#   derived    read from the vendor protocol or from indi-eqmod, or reconstructed from a value
+#              the mount reported in decimal rather than a byte string it was seen to send.
+#
+# Column 5 — what the codec makes of the reply — is an *interpretation* and is under test
+# whatever the label says. Where the interpretation itself is unconfirmed (the firmware version
+# split, the unprovoked error codes), the source column says so.
+#
+# M3-T05 step 2 upgrades `derived` rows by capturing them. A row that moves from derived to
+# verified should change only its label and its source; if its bytes change too, something the
+# design believed was wrong, and that is worth a paragraph in the bring-up findings.
+#
+# Tally at the time of writing: 26 verified, 52 derived.
+# ---------------------------------------------------------------------------------------------
+#
+# A command of `-` means the request could not be built by this codec and only the reply is under
+# test. Those rows are evidence, deliberately preserved: four of them are undocumented inquiries
+# the driver does not use, three are the real error frames, and one is `:j9` — the frame that
+# proves the mount answers for an axis that does not exist, which is the entire reason the axis
+# digit is validated here instead of trusted to the device.
+
+# =============================================================================================
+# HANDSHAKE — the nine pairs read from the mount on 2026-07-29 (FINDINGS, T-HIL-1 step 2)
+# =============================================================================================
+verified | get-firmware ra           | :e1       | =020401 | firmware=02.04 model=HEQ5                       | FINDINGS T-HIL-1; the 02.04/HEQ5 split is derived (indi-eqmod), see hex.rs
+verified | get-cpr ra                | :a1       | =00B289 | cpr=9024000                                     | FINDINGS T-HIL-1; exact match to PRD §4.2, which is what licenses the byte-swap rule
+verified | get-timer-frequency ra    | :b1       | =A7FD00 | timer-hz=64935                                  | FINDINGS T-HIL-1; corrects PRD §4.2's 460,800 by 7.0963×
+verified | get-position ra           | :j1       | =000080 | counts=8388608                                  | FINDINGS T-HIL-1; dead on mechanical home
+verified | get-status ra             | :f1       | =100    | status=slew,forward,low,stopped,uninitialised   | FINDINGS T-HIL-1; `F` had never been sent
+verified | get-cpr dec               | :a2       | =00B289 | cpr=9024000                                     | FINDINGS T-HIL-1
+verified | get-timer-frequency dec   | :b2       | =A7FD00 | timer-hz=64935                                  | FINDINGS T-HIL-1
+verified | get-position dec          | :j2       | =000080 | counts=8388608                                  | FINDINGS T-HIL-1
+verified | get-status dec            | :f2       | =100    | status=slew,forward,low,stopped,uninitialised   | FINDINGS T-HIL-1
+
+# =============================================================================================
+# THE READ-ONLY SURVEY (FINDINGS, T-SER-4) — including the widths that are not six
+# =============================================================================================
+verified | get-high-speed-ratio ra   | :g1       | =10     | ratio=16                                        | FINDINGS T-SER-4; two characters, no byte swap — confirms PRD §4.2's assumed ~16×
+verified | get-high-speed-ratio dec  | :g2       | =10     | ratio=16                                        | FINDINGS T-SER-4
+verified | get-goto-target ra        | :h1       | =000080 | counts=8388608                                  | FINDINGS T-SER-4; at rest the goto target register reads home
+verified | get-break-point ra        | :m1       | =66C59F | counts=10470758                                 | FINDINGS T-SER-4; stale from before the survey, hence not home
+verified | get-step-period ra        | :i1       | =A787F6 | period=16156583                                 | FINDINGS T-SER-4; the power-on step period, i.e. effectively stopped
+verified | -                         | :c1       | =008800 | raw=008800                                      | FINDINGS T-SER-4; undocumented, unused by this design, decodes to 34,816
+verified | -                         | :d1       | =000080 | raw=000080                                      | FINDINGS T-SER-4; undocumented, reads home
+verified | -                         | :r1       | =AE0080 | raw=AE0080                                      | FINDINGS T-SER-4; undocumented, home + 174, braking-related and unresolved
+verified | -                         | :s1       | =1C0501 | raw=1C0501                                      | FINDINGS T-SER-4; PEC period per the vendor wiki, 66,844
+
+# The frame this codec cannot produce, and the reason it cannot. Axis 9 does not exist; the mount
+# answers anyway, with a well-formed position. Nothing downstream could tell this from the truth.
+verified | -                         | :j9       | =000080 | raw=000080                                      | FINDINGS T-SER-4; **the mount does not validate the axis digit** — see frame.rs
+
+# =============================================================================================
+# ERROR FRAMES — provoked deliberately (FINDINGS, T-SER-4)
+# =============================================================================================
+verified | -                         | :z1       | !0      | error=unknown-command                           | FINDINGS T-SER-4; `:y1` gave the same
+verified | -                         | :j        | !1      | error=invalid-parameter                         | FINDINGS T-SER-4; axis digit omitted
+verified | -                         | :         | !3      | error=malformed-frame                           | FINDINGS T-SER-4; bare colon, no opcode
+derived  | -                         | -         | !2      | error=motor-not-stopped                         | vendor wiki (S1); the refusal a goto during a slew earns — **T05: provoke it**
+derived  | -                         | -         | !4      | error=not-initialised                           | vendor wiki (S1); `F` not yet sent — **T05: provoke it before `F`**
+derived  | -                         | -         | !5      | error=driver-sleeping                           | vendor wiki (S1)
+derived  | -                         | -         | !7      | error=pec-training-running                      | vendor wiki (S1)
+derived  | -                         | -         | !8      | error=no-valid-pec-data                         | vendor wiki (S1)
+derived  | -                         | -         | !6      | error=unrecognised(6)                           | unassigned in S1; a refusal we cannot name is still a refusal, not a framing fault
+derived  | -                         | -         | !9      | error=unrecognised(9)                           | unassigned in S1
+
+# =============================================================================================
+# INITIALISE — E1 of the motion experiments, the only action whose reply bytes are quoted
+# =============================================================================================
+verified | initialise ra             | :F1       | =       | ack                                             | FINDINGS MOTION E1; a bare `=`, and zero counter movement
+verified | initialise dec            | :F2       | =       | ack                                             | FINDINGS MOTION E1
+verified | get-status ra             | :f1       | =101    | status=slew,forward,low,stopped,initialised     | FINDINGS MOTION E1; one bit moved and it is the one the table predicts
+verified | get-status dec            | :f2       | =101    | status=slew,forward,low,stopped,initialised     | FINDINGS MOTION E1
+
+# =============================================================================================
+# MOTION MODE `G` — all eight combinations against the reference (ENCODINGS, S1+S2+S3)
+#
+# The counterintuitive part, and the reason this is a table rather than arithmetic: bit 1 of the
+# mode digit means *high* speed when bit 0 is clear and *low* speed when it is set.
+# =============================================================================================
+derived  | set-motion-mode ra goto high forward     | :G100 | = | ack                              | ENCODINGS S1/S2/S3 agree; untried on hardware — **T05: high-speed classes are unrun**
+derived  | set-motion-mode ra goto high backward    | :G101 | = | ack                              | ENCODINGS S1/S2/S3
+derived  | set-motion-mode ra slew low forward      | :G110 | = | ack                              | ENCODINGS S1/S2/S3; sent by motion.py E10 and accepted, reply body not quoted
+derived  | set-motion-mode ra slew low backward     | :G111 | = | ack                              | ENCODINGS S1/S2/S3
+derived  | set-motion-mode ra goto low forward      | :G120 | = | ack                              | ENCODINGS S1/S2/S3; sent by motion.py E3/E13/E14 and accepted, reply body not quoted
+derived  | set-motion-mode ra goto low backward     | :G121 | = | ack                              | ENCODINGS S1/S2/S3; E13 ran backward gotos with zero error
+derived  | set-motion-mode ra slew high forward     | :G130 | = | ack                              | ENCODINGS S1/S2/S3
+derived  | set-motion-mode ra slew high backward    | :G131 | = | ack                              | ENCODINGS S1/S2/S3
+derived  | set-motion-mode dec goto low forward     | :G220 | = | ack                              | ENCODINGS S1/S2/S3; the axis digit is the only difference
+
+# =============================================================================================
+# THE GOTO WRITE SEQUENCE — the frames motion.py put on the wire
+#
+# Every one of these was sent to the mount and accepted; FINDINGS quotes the *decoded* values
+# rather than the byte strings, so the wire forms are reconstructed with the verified byte-swap
+# rule and labelled `derived` accordingly. T05 upgrades them by logging the raw frames.
+# =============================================================================================
+derived  | set-step-period ra 620      | :I16C0200 | = | ack                                        | FINDINGS MOTION E10; 620 is the sidereal constant, measured at 104.617 counts/s
+derived  | set-step-period ra 6200     | :I1381800 | = | ack                                        | FINDINGS MOTION E3; the 10× control that proved `I` does not govern goto speed
+derived  | set-goto-increment ra +1000 | :H1E80300 | = | ack                                        | FINDINGS MOTION E3; travelled +1,000, goto error 0
+derived  | set-break-point ra +500     | :M1F40100 | = | ack                                        | FINDINGS MOTION E3; the halfway break point every experiment used
+derived  | set-goto-increment ra -1000 | :H1E80300 | = | ack                                        | FINDINGS MOTION E13; **same bytes as +1000** — the sign is in `G`, not here
+derived  | set-break-point ra -500     | :M1F40100 | = | ack                                        | FINDINGS MOTION E13
+derived  | set-goto-increment ra +100000 | :H1A08601 | = | ack                                      | FINDINGS MOTION E13; 3.989°, goto error 0
+derived  | set-break-point ra +50000   | :M150C300 | = | ack                                        | FINDINGS MOTION E13
+derived  | start-motion ra             | :J1       | = | ack                                        | FINDINGS MOTION E3; self-terminated with no stop command sent
+derived  | start-motion dec            | :J2       | = | ack                                        | ENCODINGS; DEC axis, same opcode
+derived  | stop-motion ra              | :K1       | = | ack                                        | FINDINGS MOTION E7; arrested motion, 84 counts of overshoot
+derived  | instant-stop ra             | :L1       | = | ack                                        | FINDINGS MOTION E8; 85 counts — indistinguishable from `K` at low speed
+derived  | instant-stop dec            | :L2       | = | ack                                        | SDD §5.2.4; the emergency-stop pair is `L` on both axes
+
+# =============================================================================================
+# THE READBACK TRIPLE — E14, the experiment that made pre-motion verification mandatory
+#
+# `:H`=12,345 and `:M`=6,172 written at position 8,654,669, with `:J` never sent. All three
+# registers matched exactly. The replies below are reconstructed from the decimal values FINDINGS
+# quotes; the *relationships* they encode are measured.
+# =============================================================================================
+derived  | get-position ra           | :j1       | =4D0F84 | counts=8654669                                  | FINDINGS MOTION E14; the position the increments were relative to
+derived  | set-goto-increment ra +12345 | :H1393000 | =    | ack                                             | FINDINGS MOTION E14
+derived  | set-break-point ra +6172  | :M11C1800 | =       | ack                                             | FINDINGS MOTION E14
+derived  | get-goto-target ra        | :h1       | =863F84 | counts=8667014                                  | FINDINGS MOTION E14; = position + 12,345 exactly. **Absolute readback of a relative write**
+derived  | get-break-point ra        | :m1       | =692784 | counts=8660841                                  | FINDINGS MOTION E14; = position + 6,172 exactly
+derived  | get-step-period ra        | :i1       | =6C0200 | period=620                                      | FINDINGS MOTION E14; = the value `:I` wrote
+
+# =============================================================================================
+# BYTE-SWAP EDGE CASES — the boundaries the captures do not reach
+# =============================================================================================
+derived  | set-step-period ra 0        | :I1000000 | = | ack                                        | boundary; the only payload that is a palindrome under either byte order
+derived  | set-step-period ra 16777215 | :I1FFFFFF | = | ack                                        | boundary; the widest value a 24-bit register holds
+derived  | set-step-period ra 1193046  | :I1563412 | = | ack                                        | SDD §5.2.2's own worked example: 0x123456 travels as "563412"
+derived  | set-step-period ra 11259375 | :I1EFCDAB | = | ack                                        | asymmetric in all three bytes and in both nibbles of each
+derived  | set-goto-increment ra +16777215 | :H1FFFFFF | = | ack                                    | the longest move the increment register can express
+derived  | set-goto-increment ra +1     | :H1010000 | = | ack                                        | one count = 0.1436 arcsec; the low byte leads, so this is not "000001"
+
+# =============================================================================================
+# AXIS STATUS — the bit table, one row per bit and two combinations
+# =============================================================================================
+derived  | get-status ra             | :f1       | =000    | status=goto,forward,low,stopped,uninitialised   | ENCODINGS bit table; all clear
+derived  | get-status ra             | :f1       | =200    | status=goto,backward,low,stopped,uninitialised  | ENCODINGS bit table; n1 & 0x02 = direction
+derived  | get-status ra             | :f1       | =400    | status=goto,forward,high,stopped,uninitialised  | ENCODINGS bit table; n1 & 0x04 = speed class
+derived  | get-status ra             | :f1       | =010    | status=goto,forward,low,running,uninitialised   | ENCODINGS bit table; n2 & 0x01 = running — the slew-complete signal
+derived  | get-status ra             | :f1       | =001    | status=goto,forward,low,stopped,initialised     | ENCODINGS bit table; n3 & 0x01 = initialised
+derived  | get-status ra             | :f1       | =111    | status=slew,forward,low,running,initialised     | ENCODINGS bit table; a tracking axis
+derived  | get-status ra             | :f1       | =511    | status=slew,forward,high,running,initialised    | ENCODINGS bit table; a fast slew — **T05: high-speed classes are unrun**
+derived  | get-status ra             | :f1       | =711    | status=slew,backward,high,running,initialised   | ENCODINGS bit table; every documented bit set at once
+derived  | get-status ra             | :f1       | =021    | status=goto,forward,low,stopped,initialised     | n2 bit 1 is undocumented; kept in `raw`, not decoded, not refused
+
+# =============================================================================================
+# GUIDE RATE `P` — range enforced, semantics not asserted
+# =============================================================================================
+derived  | set-guide-rate ra 0       | :P10      | =       | ack                                             | ENCODINGS; indi-eqmod sends one digit, meaning of each level unconfirmed
+derived  | set-guide-rate dec 9      | :P29      | =       | ack                                             | ENCODINGS; the top of the range the opcode can carry

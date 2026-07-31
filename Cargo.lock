@@ -125,6 +125,7 @@ dependencies = [
  "gphoto2",
  "jpeg-encoder",
  "rustix 1.1.4",
+ "thiserror",
  "tokio",
  "tracing",
  "zune-jpeg",

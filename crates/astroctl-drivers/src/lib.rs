@@ -10,8 +10,10 @@
 //! | [`simulator`] | `SimulatorMount`, `SimulatorCamera`, `SimulatorGuideCamera` and their fault injection (HAL-11) | `simulator` | M1-T02, M1-T06 |
 //! | [`gphoto2`] | `CanonGPhoto2Camera` — camera thread, command channel, timeouts, gvfs diagnosis, live view and the REL-03 recovery loop | `gphoto2` | M2-T02/T03/T04 |
 //! | `gphoto2::backend` | the libgphoto2 calls themselves | `libgphoto2` | M2-T02 |
+//! | [`skywatcher`] | the Synta mount driver; so far [`skywatcher::codec`], the wire protocol | `skywatcher` | M3-T01 |
 //!
-//! The Sky-Watcher driver (M3-T02) joins them here.
+//! The rest of the Sky-Watcher driver — serial task, motor controller, `MountDevice` — joins it
+//! in M3-T02 through M3-T04.
 //!
 //! **Two features for one camera driver.** `gphoto2` is the driver and is on by default;
 //! `libgphoto2` adds the binding that talks to the hardware and is off by default, because
@@ -45,3 +47,6 @@ pub mod gphoto2;
 
 #[cfg(feature = "simulator")]
 pub mod simulator;
+
+#[cfg(feature = "skywatcher")]
+pub mod skywatcher;

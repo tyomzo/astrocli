@@ -36,11 +36,21 @@ publish.workspace = true
 #
 # What is untested on CI is therefore exactly the PTP call layer, which no CI machine could
 # exercise anyway for want of a camera. Everything above it runs against a mock `CamOps`.
+#
+# `skywatcher` is the third family and arrives feature-shaped like the other two, but M3-T01
+# gives it a body that needs *nothing*: the codec is pure functions over bytes and strings, no
+# serial port, no runtime, no clock. That is deliberate rather than incidental — a protocol layer
+# with an I/O dependency cannot be tested exhaustively, and T-COD-1 walks the entire 24-bit value
+# domain. The transport lands in M3-T02 and will add `serialport` and `tokio` here; until then
+# `thiserror` is the only external dependency it pulls, and
+# `cargo tree -p astroctl-drivers -e normal --no-default-features -F skywatcher --depth 1`
+# is what keeps that claim honest rather than aspirational.
 [features]
-default = ["simulator", "gphoto2"]
+default = ["simulator", "gphoto2", "skywatcher"]
 simulator = ["dep:async-trait", "dep:chrono", "dep:jpeg-encoder", "dep:tokio"]
 gphoto2 = ["dep:async-trait", "dep:chrono", "dep:rustix", "dep:tokio", "dep:tracing"]
 libgphoto2 = ["gphoto2", "dep:gphoto2"]
+skywatcher = ["dep:thiserror"]
 
 [dependencies]
 # ADD §5.6 rule 1: these two, and nothing else internal, ever.
@@ -72,6 +82,11 @@ tracing = { workspace = true, optional = true }
 # The libgphoto2 binding itself — see `[features]` above for why it is optional and why that is
 # not merely a size optimisation.
 gphoto2 = { workspace = true, optional = true }
+# The Synta codec's two error enums (M3-T01). `thiserror` rather than hand-written `Display`
+# impls for the same reason `astroctl-core` uses it: the error text is the diagnostic a field log
+# carries, and a derive keeps it next to the variant it describes instead of in a `match` arm
+# three screens away that nobody updates.
+thiserror = { workspace = true, optional = true }
 # `USBDEVFS_RESET` on the camera's device node — the USB reset SDD §5.3.1 asks the recovery path
 # to attempt (M2-T04). Already a workspace dependency for `statvfs` in the two binaries, so this
 # adds a crate edge rather than a dependency; `rustix::ioctl` needs no feature beyond the default
