@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 // graph resolves the files, which also means a rename cannot leave the guard silently pointing at
 // nothing.
 import estopButton from '../app/EStopButton.tsx?raw';
+import linkHealthBadge from '../app/LinkHealthBadge.tsx?raw';
+import linkHealthWording from './link/health.ts?raw';
+import pointingReadout from '../panels/PointingReadout.tsx?raw';
 import cameraVitals from '../panels/CameraVitals.tsx?raw';
 import captureStrip from '../panels/CaptureStrip.tsx?raw';
 import clockSkewNote from '../panels/ClockSkewNote.tsx?raw';
@@ -83,6 +86,13 @@ const OPERATOR_FACING: readonly [string, string][] = [
   ['panels/StackSlots.tsx', stackSlots],
   ['ui/FailureNote.tsx', failureNote],
   ['lib/nudge.ts', nudgeSource],
+  // M1-T15's three. The freshness copy is the most at risk in the app of drifting back into the
+  // implementation's vocabulary, because every honest way to describe *why* a coordinate is not
+  // current names something the operator cannot see — a ping, a stamp, a coalesced topic. What
+  // they need is that the telescope has not said anything for four seconds.
+  ['panels/PointingReadout.tsx', pointingReadout],
+  ['app/LinkHealthBadge.tsx', linkHealthBadge],
+  ['lib/link/health.ts', linkHealthWording],
 ];
 
 /**

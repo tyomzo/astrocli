@@ -126,6 +126,23 @@ export interface TelemetryState {
    * `null` until the first pong is answered — "not measured yet" is not "no skew".
    */
   skewMs: number | null;
+  /**
+   * When the node last said anything at all — the denominator of §8.3(8)'s telemetry age.
+   *
+   * `at` is arrival on this device's clock, `ts` the node's own stamp, for the same reason a
+   * `Slot` carries both: the difference between them is transit plus skew, and the age the header
+   * shows has to be measured in the node's frame (see `lib/predict.ts`).
+   *
+   * **Any** event counts, including the ones no panel renders. The question this answers is not
+   * "is the telemetry current" but "is the telescope still talking", and a `transfer.acked` is the
+   * node talking. Deliberately not the same as the freshest `Slot`: a mount that is disconnected
+   * has no `mount.position` to age, and a header that read "nothing for 40 minutes" because the
+   * mount was unplugged would be reporting the wrong subsystem's silence.
+   *
+   * `null` until the first event, and reset by a resnapshot along with everything else — a
+   * connection that just rebuilt has only what the snapshot carried.
+   */
+  lastEvent: { at: number; ts: string } | null;
   mountPosition: Slot<MountPosition>;
   mountStatus: Slot<MountStatus>;
   cameraStatus: Slot<CameraStatus>;
@@ -162,6 +179,7 @@ const UNKNOWN = { state: 'unknown' } as const;
 
 /** Telemetry with nothing in it. The snapshot handler rebuilds from exactly this. */
 const NO_TELEMETRY = {
+  lastEvent: null as { at: number; ts: string } | null,
   mountPosition: UNKNOWN as Slot<MountPosition>,
   mountStatus: UNKNOWN as Slot<MountStatus>,
   cameraStatus: UNKNOWN as Slot<CameraStatus>,
@@ -248,7 +266,15 @@ export function reduce(state: TelemetryState, action: LinkAction): TelemetryStat
   }
 }
 
-function applyEvent(state: TelemetryState, event: TelemetryEvent, at: number): TelemetryState {
+function applyEvent(
+  previous: TelemetryState,
+  event: TelemetryEvent,
+  at: number,
+): TelemetryState {
+  // Before the switch, so no topic can be added later without the link's liveness following it.
+  // Every branch below builds on `state`, not on `previous`.
+  const state: TelemetryState = { ...previous, lastEvent: newest(previous.lastEvent, at, event.ts) };
+
   switch (event.topic) {
     case 'mount.position':
       return { ...state, mountPosition: observed(at, event.ts, event.data) };
@@ -285,13 +311,38 @@ function applyEvent(state: TelemetryState, event: TelemetryEvent, at: number): T
     case 'transfer.acked':
       // A per-frame fact, not state: it belongs to the transfer view M1-T11 adds. Listed
       // explicitly rather than caught by a default so that a new §4.3 topic still fails to compile
-      // until somebody decides what it means here.
+      // until somebody decides what it means here. It still moves `lastEvent`, because it is the
+      // node talking — which is a different question from whether it changed anything on screen.
       return state;
   }
 }
 
 function observed<T>(at: number, ts: string, value: T): Slot<T> {
   return { state: 'observed', at, ts, value };
+}
+
+/**
+ * The later of two events, by the node's own stamp.
+ *
+ * Not simply "the one that arrived last": a connect snapshot delivers every stateful topic in one
+ * frame, so they share an arrival instant and differ only in `ts` — and the hub lists them in no
+ * particular order. Taking the last of them would let one topic the node has not refreshed in a
+ * while set the telemetry age of a connection that is a millisecond old.
+ *
+ * An unparseable stamp loses to a parseable one and beats nothing, so a node stamping something
+ * this bundle cannot read degrades the age to arrival-based rather than poisoning it.
+ */
+function newest(
+  previous: { at: number; ts: string } | null,
+  at: number,
+  ts: string,
+): { at: number; ts: string } {
+  if (previous === null) return { at, ts };
+  const before = Date.parse(previous.ts);
+  const now = Date.parse(ts);
+  if (Number.isNaN(now)) return previous;
+  if (Number.isNaN(before) || now >= before) return { at, ts };
+  return previous;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -317,6 +368,11 @@ export const dispatch = (action: LinkAction): void => useTelemetryStore.getState
 export const selectLink = (state: TelemetryState): LinkPhase => state.link;
 /** The measured clock offset, for the §5.8.1 warning. `null` until the first pong is answered. */
 export const selectSkewMs = (state: TelemetryState): number | null => state.skewMs;
+/** The last answered ping's round trip, for §8.3(8)'s header. `null` until the first one. */
+export const selectRttMs = (state: TelemetryState): number | null => state.rttMs;
+/** When the node last said anything, for §8.3(8)'s telemetry age. */
+export const selectLastEvent = (state: TelemetryState): { at: number; ts: string } | null =>
+  state.lastEvent;
 export const selectMountPosition = (state: TelemetryState): Slot<MountPosition> =>
   state.mountPosition;
 export const selectMountStatus = (state: TelemetryState): Slot<MountStatus> => state.mountStatus;
