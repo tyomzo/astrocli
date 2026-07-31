@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.26.0
+**Version:** 1.27.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -227,6 +227,31 @@ preview. **The `reconnecting` state §5.3.1 requires has no wire representation*
 `CameraStatus` is a two-state boolean, and adding a third is a frozen-contract change rather than
 something an implementation task invents, so the driver exposes the state and the facade's
 publication of it is outstanding — recorded in the M2-T04 task file. Landed by M2-T04.
+
+**Change note (1.27.0):** §5.2.2 corrected in five places by building the codec it specifies
+(M3-T01). **The `e` firmware reply is not byte-swapped.** §5.2.2 stated the byte-swap rule for
+"24-bit values" and then listed `e` as one, so the natural reading of the design decoded our own
+capture `020401` as `0x010402`. `indi-eqmod` reads those six characters big-endian, and the
+reading is falsifiable rather than asserted: EQMOD's low byte is a mount-model code, `0x01` is
+the HEQ5 that produced the capture, and the byte-swapped reading names an EQ5. §5.2.2 now carries
+a width-and-order table for all four reply shapes, because two of the three exceptions are still
+valid hex and would have been mis-decoded in silence. **The `G` mode digit is not a bit field.**
+§5.2.2 called the packing "counterintuitive" without saying what shape it has: bit 1 means *high*
+speed when bit 0 is clear and *low* when it is set, so the speed bit's polarity depends on the
+motion kind and arithmetic gets one of the four values wrong. Recorded alongside the warning that
+`f`'s first nibble encodes the same three concepts with a *different* layout that happens to agree
+for two of the eight. **The `f` bit tests must not be applied to the ASCII characters.** Both
+ENCODINGS.md and §5.2.2 described the reference sources' shortcut, which is valid only for nibbles
+`0`–`7`; at `'A'` it reports SLEW for a nibble that says GOTO. Parse the digit, then test the bits.
+The same paragraph now says what to do with the bits nobody has defended — preserve and flag, not
+decode and not refuse — because a firmware bit the design has never seen must not be able to break
+slew-complete detection. **`H` and `M` carry unsigned magnitudes; the sign is in `G`.** §5.2.2 said
+"relative increment" and left the sign unlocated, which is the one thing about a relative primitive
+that can be got wrong silently; E13's ±100,000-count gotos are the evidence, and the codec keeps
+the two halves in one value so the two commands cannot disagree. **Axis `3` is not emitted.** The
+frame grammar admits it for "both axes where valid"; nothing has ever exercised it, and on a device
+that answers `:j9` with plausible data an unverified broadcast digit cannot be distinguished from a
+working one. Landed by M3-T01.
 
 ---
 
@@ -591,11 +616,22 @@ Frame: `:` + command char + axis digit (`1`=RA, `2`=DEC, `3`=both where valid) +
 
 24-bit values are ASCII hex with **byte-swapped ordering**: value `0x123456` is transmitted `"563412"` (low byte first, per PRD §4.2 little-endian note). Codec functions `encode_u24/decode_u24` are pure and unit-tested against golden vectors captured from EQMOD traces.
 
+**Three replies are not that, and two of them are still valid hex** — so a single decode path that assumed six byte-swapped characters would mis-read them silently rather than fail:
+
+| Reply | Width | Order |
+|-------|-------|-------|
+| 24-bit registers (`a b c d h i j m r s`, and the `H I M` writes) | 6 | byte-swapped, low byte first |
+| `g` high-speed ratio | **2** | plain; one byte has nothing to swap |
+| `f` axis status | **3** | not a number — see the status decoding below |
+| `e` firmware version | 6 | **plain, big-endian** |
+
+`e` is the trap. `indi-eqmod` byte-swaps the payload and then reverses the swap field by field, which nets out to reading the six characters directly: our capture `020401` is `0x020401`, **not** the `0x010402` the byte-swap rule gives. The reading is checkable rather than merely asserted — EQMOD takes the low byte as a mount-model code, and `0x01` is the HEQ5, which is the mount that produced the capture. The byte-swapped reading yields `0x02`, an EQ5, which it is not. The upper two bytes are the firmware major and minor version; that split is `derived` from the reference implementation and the model code is its only corroboration.
+
 Command set used in Phase 1 (**all opcodes to be verified against the EQMOD source before first powered test** — PRD §4.2 risk note):
 
 | Cmd | Meaning | Used by |
 |-----|---------|--------|
-| `e` | Firmware version | connect handshake |
+| `e` | Firmware version + mount model | connect handshake — **plain big-endian, not byte-swapped** |
 | `a` | Counts per revolution (CPR) | connect handshake → stored per axis |
 | `b` | Timer interrupt frequency | connect handshake |
 | `j` | Get position counter | 1 Hz poll, goto monitoring |
@@ -620,6 +656,19 @@ sources (`spikes/skywatcher-heq5/ENCODINGS.md`). Mode: `0` GOTO high-speed, `1` 
 counterintuitive — `0` is *high* speed and `1` is *low* — so a transposed digit is a 16× speed
 error rather than a direction error. Never construct this byte from an unvalidated integer.
 
+**The mode digit is not a bit field, and this is why it must be a table.** Bit 0 does mean
+SLEW-versus-GOTO consistently. Bit 1 means *high* speed when bit 0 is clear and *low* speed when
+it is set — the speed bit's polarity depends on the motion kind. Any implementation that computes
+this character arithmetically gets one of the four values wrong. Note also that the `f` reply's
+first nibble encodes the same three concepts with a **different, consistent** layout (bit 0 slew,
+bit 1 backward, bit 2 high speed); the two share their meaning and nothing else, and they agree
+by coincidence for `0` and `1`.
+
+**`H` and `M` carry unsigned magnitudes; the sign lives in `G`.** `motion.py` drove ±100,000-count
+gotos with `H` set to `|delta|` and only the `G` direction digit differing, at zero counts of
+error in both directions (E13). The codec therefore keeps magnitude and direction in one value
+(`Move`) so the two commands cannot disagree about which way the mount is going.
+
 **Goto command sequence**: `G` (mode) → `I` (step period) → `H` (target increment) → `M`
 (break-point increment) → **read back and verify** → `J` (start).
 
@@ -639,12 +688,23 @@ goto-speed calculation around the step period; it governs SLEW and tracking only
 this self-terminating property is what makes a bounded goto the correct first motion during
 bring-up (see `spikes/skywatcher-heq5/MOTION-PLAN.md`).
 
-**`f` axis status decoding** — reply `=<n1><n2><n3>`; bit tests apply directly to the ASCII
-characters, valid because status nibbles never exceed 7. `n1 & 0x01` slew mode (1 = SLEW,
+**`f` axis status decoding** — reply `=<n1><n2><n3>`. `n1 & 0x01` slew mode (1 = SLEW,
 0 = GOTO); `n1 & 0x02` direction (1 = backward); `n1 & 0x04` speed (1 = high); `n2 & 0x01`
-running; `n3 & 0x01` initialised. Validated against our own capture: the mount returned `=100`
-powered-but-uninitialised and at rest, which the decoder reproduces exactly. **This is the field
-slew-complete detection (§5.2.3) depends on.**
+running; `n3 & 0x01` initialised. Validated against our own capture in two states: the mount
+returned `=100` powered-but-uninitialised and at rest, and `=101` after `F`, which the decoder
+reproduces exactly. **This is the field slew-complete detection (§5.2.3) depends on.**
+
+The reference sources test these bits **directly on the ASCII characters**, which is correct only
+while the nibbles stay in `0`–`7`, where ASCII carries the value in the low three bits. It breaks
+at `8`: `'A'` is `0x41`, so the shortcut reads bit 0 set — SLEW — for a nibble of `0b1010`, which
+is GOTO. **Parse the hex digit, then test the bits.** The two agree on every value the sources
+describe and differ on every value they do not.
+
+Only these five bits have defensible meanings. A nibble carrying anything else is **preserved and
+flagged, not decoded and not refused**: decoding would be inventing semantics, and refusing would
+let an unknown-but-harmless firmware bit break slew-complete detection and with it every goto.
+The vendor wiki hints at a "blocked" bit in `n2` and a level-switch bit in `n3`; nothing has
+produced either, so the codec hands the raw nibbles to M3-T05 to name them from.
 
 **Opcode case is the safety boundary.** Lowercase opcodes are inquiries; uppercase are actions
 (`F G S I J K L P`). Everything the driver sends before a deliberate motion decision must be
@@ -668,6 +728,12 @@ a nonexistent axis. The codec must therefore validate the axis before transmitti
 will not reject a corrupted digit, it will answer with plausible data. This is why the typed
 command layer (`GetPosition(Axis)`, not a formatted string) is a correctness requirement rather
 than an ergonomic preference.
+
+**Axis `3` is therefore not emitted.** The frame grammar above admits it for "both axes where
+valid", but no Phase 1 command needs it, no capture has exercised it, and on a device that
+answers an axis digit it does not implement rather than rejecting it, an unverified broadcast
+digit cannot be told from a working one. M3-T01's codec has two axes and no way to spell a third;
+M3-T05 may add it once something has watched both axes respond to one frame.
 
 #### 5.2.3 Position math
 
