@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.22.0
+**Version:** 1.24.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -144,6 +144,25 @@ way to reach a constructor. It is deliberately not a config key: `FieldConfig` i
 every deployment and put it in a production node's API. A malformed value is fatal at startup and
 a non-empty plan logs at WARN, because the failure this guards against is a scenario that asks for
 a fault, quietly gets a mount that behaves, and passes. Landed by M1-T16.
+
+**Change note (1.24.0):** §5.3.1 gains the five obligations M2-T02 met building the camera thread,
+of which two are corrections rather than additions. **Connect had no operation class** — the three
+budgets §5.3.1 names cover config, capture and download, and opening the camera is none of them
+while being the operation everything else waits on; it takes `config_seconds`, safely, because the
+failure modes there return fast rather than hanging (M2-T01 pulled the cable and measured it).
+**And the feature boundary is not one per driver family but one per system library**: `libgphoto2_sys`
+runs `bindgen` in its build script, so a machine without `libgphoto2-dev` cannot *compile* the
+crate, and a single camera feature would have had to be off by default — which, since
+`scripts/check.sh` builds default features only, would have left the thread model, the channel,
+the timeouts and the gvfs diagnosis unexamined by every gate. The driver therefore splits at the C
+library, and M3's `serialport`/libudev inherits the same split in the same place. The other three:
+`CamOps` returns the camera's own uninterpreted strings, because anything below that seam is
+untestable by construction on a machine with no camera; the gvfs claim diagnosis sits above the
+transport for the same reason plus one more, which makes "pass libgphoto2's error text through
+unmodified" a requirement on every backend; and **`DeviceError` has no variant meaning "this
+driver does not implement that yet"**, so unimplemented operations use `Protocol` with a message
+naming their task, recorded so the choice is made once rather than per operation. Landed by
+M2-T02.
 
 ---
 
@@ -658,6 +677,18 @@ API, and the WS hub are all off this thread by construction, and **T-ISO-1 (§9)
 stays that way.**
 
 Every command has an operation-class timeout (config get/set 5 s; capture = exposure + 30 s; download 120 s). A timed-out thread is considered wedged: the facade drops the channel, the thread is abandoned (it cannot be safely killed mid-libgphoto2-call), a fresh thread + context is spawned, and a USB reset is attempted — this is the REL-03 recovery path, surfaced as a `camera.status` reconnecting event.
+
+**Obligations found by implementing this (M2-T02).** The sketch above is accurate about the thread and the channel and silent about five things that decide whether they can be built. Each was a defect until it was fixed, not a preference:
+
+1. **Connect has no operation class, and it is the first operation there is.** The three budgets named above cover config, capture and download; opening the camera — autodetect, open, read the abilities, walk the config tree — is none of them, and nothing else can run until it succeeds. It takes `config_seconds`, which is a shared budget rather than an invented number: M2-T01 measured connect at 190–210 ms and the whole 91-entry tree at 222 ms, so the 5 s default is about ten times the observed cost. It is *sufficient* for a different reason worth stating, because it is what makes the sharing safe — the failure modes here return fast rather than hanging. A camera that is absent or claimed answers immediately with an error, which the spike established by pulling the cable.
+
+2. **`CamOps` must return the camera's own strings, uninterpreted.** §5.3.3 names the trait as the seam the CLI fallback implements but does not say which side of it the interpretation lives on. It has to be above: capability derivation and image-format mapping below the trait would be duplicated in every backend — the binding and the CLI disagreeing about what `RAW + Large Fine JPEG` means is a bug nobody would find — and, decisively, it would put that logic where CI cannot reach it. The entire purpose of the seam is that libgphoto2 is absent on the build machine. Anything below it is untestable by construction, so only what genuinely needs a camera belongs there.
+
+3. **The gvfs claim diagnosis is above the transport too**, for the same reason and one more: an exclusive USB claim is a property of the bus, not of how this driver talks to the camera, so every present and future `CamOps` hits it identically. Placing it in the thread rather than the backend means the backend passes libgphoto2's error text through *unmodified* — which is now a requirement on it, because the diagnosis branches on that text to tell "something else has the camera" (`Could not claim the USB device`) from "the camera is not there" (`Could not find the requested device on the USB port`).
+
+4. **A feature flag per driver family is the wrong axis; the axis is the system library.** §5.1's "registration is static (inventory of built-in drivers, feature-gated)" holds, but `libgphoto2_sys` runs `pkg-config` **and `bindgen`** in its build script, so a machine without `libgphoto2-dev` cannot compile the crate at all — it does not merely fail to link. One feature covering the whole camera driver would therefore have to be off by default, and `scripts/check.sh` builds default features only, so the thread model, the channel, the timeouts and the diagnosis would all be invisible to every gate. The driver splits: the parts that need no C library are on by default and gated; the binding is a second, non-default feature the deployable enables. **M3 inherits the same split** — `serialport` needs libudev, and its driver will need the same boundary in the same place.
+
+5. **`DeviceError` cannot say "this driver does not implement that yet."** §4.2's nine variants are about the *device*: `Unsupported` claims the body cannot do it, which contradicts the capability report two lines away, and `Rejected` blames the operator's request. M2-T02 uses `Protocol` — `DEVICE_PROTOCOL`/502, "your request was fine, the thing behind the API could not serve it" — with a message naming the task that will implement the operation. This is not worth a change to a frozen enum for a state that exists between M2-T02 and M2-T04, but it is recorded so the choice is made once rather than per operation.
 
 #### 5.3.2 Capture flow (CAM-03/04, REL-05)
 
