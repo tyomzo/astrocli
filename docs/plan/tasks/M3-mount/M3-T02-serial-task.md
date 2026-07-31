@@ -14,7 +14,7 @@ makes e-stop real, and the heartbeat that makes link loss detectable.
 
 - Task owning `serialport` handle; two mpsc lanes (Normal/Priority) with biased drain per SDD §5.2.4 — in-flight normal completes, no new normal starts while priority pending
 - Per-request timeout 500 ms → one retry → `DeviceError::Timeout`; garbled response (codec error) counts as failure; all timings config-overridable
-- Heartbeat: piggybacks the 1 Hz position poll; 3 consecutive failures → `HeartbeatLost` notification to the watchdog channel (SafeMount M1-T05 seam)
+- Heartbeat: piggybacks the 1 Hz position poll; 3 consecutive failures → `HeartbeatLost` notification to the watchdog channel — **the consumer is M1-T17's watchdog arm**, which already alerts on facade-level poll failures; this heartbeat replaces its signal with a better one (it distinguishes "port gone" from "mount mute"), it does not add a second consumer
 - Port autodetect: scan `/dev/ttyUSB*`/`/dev/serial/by-id/*` filtering known USB VID/PIDs (PL2303/FTDI/CH340), probe with version inquiry; manual port config bypasses scan
 - Mock port test double (in-crate): scriptable responses, delays, garbage, dead-air — used by all gated tests
 

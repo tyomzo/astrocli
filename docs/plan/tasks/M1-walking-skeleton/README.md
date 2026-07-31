@@ -34,6 +34,7 @@ within a track, order matters.
 | M1-T14 | Preview flow end-to-end + stack panel | B+C | T11, T12, T13 |
 | M1-T15 | Predictive display + link-health surfacing | C | T04 |
 | M1-T16 | E2E suite, fault injection, session log, demo script | all | all |
+| M1-T17 | Mount watchdog: link loss becomes an alert (post-exit addendum — REL-02 gap found by T16) | A+C | T03, T05 |
 
 Suggested PR sequence keeping the tree demoable: T01→T02→T03 (+T04 parallel) →T05→
 T06/T07→T08→T09→T10→T11/T12/T13→T14→T15→T16 (IMP §4).
