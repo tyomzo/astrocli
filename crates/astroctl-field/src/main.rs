@@ -586,9 +586,9 @@ fn assemble(
 /// depend on drivers without a cycle. Everything above the HAL, this file included from the next
 /// line onwards, holds `Arc<dyn MountDevice>`.
 ///
-/// The registry is built and consulted rather than matched on directly so that
-/// `mount.driver: skywatcher` fails with the registry's own "no such driver, available: …"
-/// message naming what this build actually has, instead of a match arm nobody updated.
+/// The registry is built and consulted rather than matched on directly so that a driver this
+/// build does not carry fails with the registry's own "no such driver, available: …" message
+/// naming what it actually has, instead of a match arm nobody updated.
 ///
 /// # The wrap happens here, and nowhere else
 ///
@@ -647,6 +647,24 @@ fn build_mount(
         )
         .map_err(|e| format!("cannot register the simulator mount driver: {e}"))?;
 
+    // M3-T04. Until this line the shipped `config/field-node.example.yaml`, which has said
+    // `driver: skywatcher` since M0, could not start a node: the registry held `simulator` alone
+    // and the lookup failed. `test_support::simulated_devices` rewrote the string on the way past,
+    // so nothing caught it — exactly the hole the camera's twin had until M2-T05.
+    //
+    // The site and the clock are constructor parameters because `MountFactory::create` is handed a
+    // `MountConfig` and this driver needs two things that are not in one: which pole the polar axis
+    // is aimed at (`site.latitude`), and local sidereal time. Both are properties of the node, and
+    // this is the only place that holds them together with the driver.
+    registry
+        .register_mount(astroctl_drivers::skywatcher::SkywatcherMountFactory::new(
+            config.site.clone(),
+            Arc::new(NodeSiderealClock(astroctl_safety::Site::from_config(
+                &config.site,
+            ))),
+        ))
+        .map_err(|e| format!("cannot register the skywatcher mount driver: {e}"))?;
+
     let driver = registry
         .create_mount(config.mount.driver.as_str(), &config.mount)
         .map_err(|e| {
@@ -661,6 +679,29 @@ fn build_mount(
     Ok(Arc::new(astroctl_safety::SafeMount::from_config(
         driver, config, bus,
     )))
+}
+
+/// The node's answer to "where is the sky", handed to the Sky-Watcher driver (SDD §5.2.3).
+///
+/// `astroctl-drivers` may depend only on `astroctl-hal` and `astroctl-core` (ADD §5.6 rule 1), and
+/// the workspace's one sidereal-time implementation is `astroctl_safety::local_sidereal_degrees` —
+/// the same function `SafeMount` computes altitude and hour angle from. So the driver declares a
+/// one-method seam and this binary, which already depends on both crates, is where the two meet.
+///
+/// **One implementation, one clock.** The mount's idea of where it is pointing and the safety
+/// layer's idea of whether that is above the horizon now come from the same series; a driver that
+/// carried its own would let the two disagree by an amount nobody could find, because both would
+/// look right on their own.
+#[derive(Debug)]
+struct NodeSiderealClock(astroctl_safety::Site);
+
+impl astroctl_drivers::skywatcher::SiderealClock for NodeSiderealClock {
+    fn local_sidereal_degrees(&self) -> f64 {
+        // `Utc::now()` here rather than an injected instant, for the reason `SafeMount::horizontal`
+        // calls it inline: this is the live sky, and a caller that wanted a different time would
+        // be asking a question the mount cannot answer.
+        astroctl_safety::local_sidereal_degrees(self.0, chrono::Utc::now())
+    }
 }
 
 /// Open the frame store and the session the node will write tonight's frames into (SDD §8.1, §5.5).
@@ -841,5 +882,107 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!(signal = "SIGINT", "shutting down");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use astroctl_hal::mount::MountDevice;
+
+    /// The shipped example, unmodified — no `driver: simulator` rewrite.
+    const EXAMPLE: &str = include_str!("../../../config/field-node.example.yaml");
+
+    #[test]
+    fn the_shipped_example_config_builds_the_mount_driver_it_names() {
+        // Until M3-T04 this could not pass: `config/field-node.example.yaml` has said
+        // `driver: skywatcher` since M0 and the registry held `simulator` alone, so a node started
+        // from the file the operator is told to copy died at startup with "no mount driver named
+        // `skywatcher`". Every test fixture rewrote the string on the way past
+        // (`test_support::simulated_devices`, `scripts/desk-e2e.sh`), which is precisely why
+        // nothing caught it — the same hole the camera's twin had until M2-T05.
+        //
+        // Construction only. SDD §8.1 forbids the registry from doing I/O, so this proves the path
+        // config → registry → driver with no mount, no serial port and no `serialport` feature.
+        let config = FieldConfig::from_yaml(EXAMPLE, "config/field-node.example.yaml")
+            .expect("the shipped example is valid");
+        assert_eq!(config.mount.driver.as_str(), "skywatcher");
+        let mount = build_mount(&config, EventBus::new()).expect("the example builds a mount");
+        assert_eq!(mount.device_info().protocol, "synta-serial");
+        // ...and the capabilities the UI renders from are readable with nothing plugged in.
+        assert!(mount.capabilities().has_pulse_guide);
+    }
+
+    /// The contract swap of M3-T04's objective — "drops into the slot `SimulatorMount` occupies:
+    /// API, SafeMount, UI all unchanged" — driven through the wrapper that occupies it.
+    ///
+    /// In process and over the mock port rather than in the e2e containers, and the boundary is the
+    /// reason: proving it there would mean putting a scriptable serial port inside the shipped
+    /// binary, and this crate's rules are emphatic that a test double must not be reachable from a
+    /// deployable. What the containers would add over this is the camera and the stack, neither of
+    /// which the mount driver touches.
+    // Not `start_paused`: this binary's tokio does not carry `test-util`, and enabling it for one
+    // test would put a clock-manipulation feature in the shipped node. The mock port's reply delay
+    // is a knob instead, so the whole session costs a few real milliseconds.
+    #[tokio::test]
+    async fn the_safety_wrapper_drives_the_skywatcher_driver_exactly_as_it_drives_the_simulator() {
+        use astroctl_drivers::skywatcher::mock_port::MockPort;
+        use astroctl_drivers::skywatcher::{FixedSiderealTime, SkywatcherMount};
+
+        let config = FieldConfig::from_yaml(EXAMPLE, "config/field-node.example.yaml")
+            .expect("the shipped example is valid");
+        let port = MockPort::new();
+        port.answers_after(std::time::Duration::from_millis(1));
+        let driver: Arc<dyn MountDevice> = Arc::new(
+            SkywatcherMount::over_wire(
+                &config.mount,
+                config.site.clone(),
+                Arc::new(FixedSiderealTime(180.0)),
+                port.factory(),
+            )
+            .expect("constructs"),
+        );
+        let safety = astroctl_safety::SafeMount::new(
+            driver,
+            config.mount.limits,
+            astroctl_safety::Site::from_config(&config.site),
+            EventBus::new(),
+        );
+
+        safety
+            .connect()
+            .await
+            .expect("the mock answers a handshake");
+        safety
+            .start_tracking(astroctl_core::types::TrackingMode::Sidereal)
+            .await
+            .expect("tracks");
+        let status = safety.status().await.expect("status");
+        assert_eq!(status.state, astroctl_core::types::MountState::Tracking);
+        assert!(status.is_consistent());
+        assert!(safety.position().await.is_ok());
+
+        // MNT-15 still holds, and still holds *before* the driver is asked: declination −80° is
+        // never above 15° from Oslo, whatever the hour. `LimitViolation` is the wrapper's own
+        // variant and no driver may produce it, so seeing it here is the proof that the wrapper is
+        // still in the path.
+        let below = astroctl_core::types::RaDec::from_parts(6.0, -80.0).expect("valid");
+        let refused = safety.goto(below).await.expect_err("below the horizon");
+        assert!(
+            matches!(
+                refused,
+                astroctl_core::error::DeviceError::LimitViolation { .. }
+            ),
+            "{refused:?}"
+        );
+
+        // ...and the emergency stop reaches the wire through the wrapper.
+        port.clear_writes();
+        safety.emergency_stop().await.expect("stops");
+        let stops: Vec<Vec<u8>> = port.writes().into_iter().map(|w| w.bytes).collect();
+        assert!(
+            stops.contains(&b":L1\r".to_vec()) && stops.contains(&b":L2\r".to_vec()),
+            "{stops:?}"
+        );
     }
 }

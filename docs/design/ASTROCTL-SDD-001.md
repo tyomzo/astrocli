@@ -1,9 +1,9 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.27.0
+**Version:** 1.28.0
 **Author:** Artiom
-**Date:** 2026-07-29
+**Date:** 2026-07-31
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
 **Governing documents:** ASTROCTL-PRD-001 v1.19.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
@@ -252,6 +252,24 @@ the two halves in one value so the two commands cannot disagree. **Axis `3` is n
 frame grammar admits it for "both axes where valid"; nothing has ever exercised it, and on a device
 that answers `:j9` with plausible data an unverified broadcast digit cannot be distinguished from a
 working one. Landed by M3-T01.
+
+**Change note (1.28.0):** §5.2.1 and §5.2.3 corrected by assembling the driver they specify
+(M3-T04). **The layering diagram is missing an input and a task.** §5.2.3 names the `mech_to_sky`
+seam but not who supplies `lst`; ADD §5.6 rule 1 forbids `astroctl-drivers` from reaching the
+workspace's one sidereal-time implementation, so LST is *injected* and the binary that builds the
+registry wires it — along with the observing site, which `MountFactory::create` also cannot supply.
+And the top layer is a driver plus a supervisor it spawns, because **§5.2.3's tracking restore
+cannot live in the caller's future**: §5.8.1 has the API answer `202` and drop it on every goto, so
+a restore that ran there would leave every dropped goto stopped with SES-06 unmet and the mount
+`Busy` forever. **Tracking is restored before the settle, not after** — 3 s of stopped mount is 45″
+of drift, and holding the target while the tube rings is what the settle interval is for.
+**"Stopped within tolerance" needs its converse and a first-poll guard**: stopped-and-short is a
+stall, but a poll landing between `J` and the ramp sees the same thing on a healthy goto, so two
+consecutive observations are required. **The high-speed crossover is per axis**, not per goto.
+**And `f` cannot distinguish tracking from a manual slew** — on a Synta mount tracking *is* a
+low-speed slew — so `mount.status` is synthesised from the driver's own record of what it
+commanded, with the status word supplying only what that record cannot know. Park/unpark and `sync`
+are recorded as the two places this driver declines to send an unverified opcode. Landed by M3-T04.
 
 ---
 
@@ -610,6 +628,26 @@ SkywatcherMount (impl MountDevice)          — semantics: coordinates, modes, g
           └── SyntaCodec + SerialTask       — framing, encoding, request/response, lanes
 ```
 
+**Two corrections, found by assembling this stack in M3-T04.**
+
+**1. The diagram has three layers and the driver needs a fourth input that is not in it: local
+sidereal time.** §5.2.3 names the seam (`fn mech_to_sky(&self, counts: AxisCounts, lst: Lst)`) and
+says Phase 1 computes LST "from system clock + site longitude", but not *where*. It cannot be here:
+ADD §5.6 rule 1 lets `astroctl-drivers` depend on `astroctl-hal` and `astroctl-core` and nothing
+else, and the workspace's one sidereal-time implementation is
+`astroctl_safety::local_sidereal_degrees` — the same function `SafeMount` computes altitude and
+hour angle from. A second implementation inside the driver would let the mount's idea of where it
+is pointing and the safety layer's idea of whether that is above the horizon disagree by an amount
+neither could detect, because both would look right on their own. So the driver declares a
+one-method `SiderealClock` seam, and **the binary that builds the registry wires it**, alongside
+the observing site — which `MountFactory::create` also cannot supply, since it is handed a
+`MountConfig` and the hemisphere comes from `site.latitude`. Both are constructor parameters on the
+factory, the shape `SimulatorMountFactory`'s profile and fault plan already established.
+
+**2. The `MountDevice` above this stack is not the whole boundary; a driver-owned task sits beside
+it.** See §5.2.3's correction 1 — the goto's completion poll, settle and tracking restore cannot
+run in the caller's future, so the top layer is `SkywatcherMount` *and* a supervisor it spawns.
+
 #### 5.2.2 Wire protocol (SyntaCodec)
 
 Frame: `:` + command char + axis digit (`1`=RA, `2`=DEC, `3`=both where valid) + payload + `\r`. Response: `=` + payload + `\r` (success) or `!` + error digit + `\r`.
@@ -747,6 +785,56 @@ dec_counts→deg:   dec_d = ((counts - counts_home) / CPR) * 360.0
 RA axis position is mechanical hour angle; conversion to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
 
 Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts; measured error is **0 counts across six gotos from 0.04° to 4°, both directions**, so the tolerance is ample and loose in the safe direction), then restores tracking if it was active (SES-06).
+
+**Five corrections, found by building the goto supervision this paragraph specifies (M3-T04).**
+
+**1. "Then restores tracking if it was active" cannot run in the caller's future, and §5.8.1 is the
+reason.** The API answers `202` and drops the `goto` future on every goto; `astroctl-hal`'s mount
+contract makes that explicit ("dropping this future does not stop the slew"). A completion poll,
+settle and tracking restore that lived in that future would therefore leave **every** dropped goto
+ending stopped, with SES-06 silently unmet — and, worse, would strand the ownership claim that
+makes a concurrent goto `Busy`, so a mount whose goto future was dropped would answer `Busy` for
+the rest of the night. The three steps run in a task the driver spawns; the trait's future waits on
+its result and dropping it changes nothing but who is listening. The claim is released by the
+supervisor, and the supervisor re-checks the override generation **before each axis's `J`** —
+programming a goto is eight frames and ~128 ms, and an emergency stop landing inside that window
+must not be followed by the next axis being started.
+
+**2. Tracking is restored *before* the settle interval, not after.** This paragraph orders them
+completion → tracking; `astroctl-hal` orders them motion → settle → tracking. The physics decides:
+settling is the tube ringing, and `mount.settle_time_seconds` (3 s by default) spent with the drive
+stopped is 45″ of sky walking out of the frame before the first exposure. Restoring first costs the
+same three frames and holds the target while the tube settles, which is what the interval is for.
+
+**3. "Declares completion when both axes report stopped within tolerance" has no converse, and the
+first poll needs a guard.** Stopped *and outside* tolerance is a stall — a mount that stopped
+somewhere it was not sent — and reporting it as an arrival is how a night's frames become a night's
+smears. But a poll that lands between `J` and the ramp starting sees exactly that on a perfectly
+good goto, so one such observation cannot be the rule: the driver requires **two consecutive**
+stopped-and-short polls before it calls a stall, costing one extra 500 ms poll to confirm a genuine
+one against aborting a slew the operator asked for. There is deliberately no distance-derived
+timeout, per this section's own rule that slew time may not be estimated from travel.
+
+**4. "Long slews use high-speed motion mode" is per axis, not per goto.** The two axes are
+programmed separately and their moves differ by orders of magnitude; picking one class from the
+larger move sends a 200-count declination correction with a ramp built for a slew a hundred times
+longer. The crossover (half a degree) is applied to each axis's own move.
+
+**5. `f`'s status word cannot tell tracking from a manual slew, so `mount.status` cannot be
+synthesised from the wire alone.** On a Synta mount tracking *is* a low-speed `SLEW` — the same
+`G`/`I`/`J` — so a tracking axis reports `kind=Slew, running=1` indefinitely, identically to an
+operator holding the D-pad. A status built on the running bit would report every tracking mount as
+slewing forever. The driver keeps its own record of what it commanded and uses `f` for the one
+thing that record cannot know: a manual slew has no completion signal, so an axis stopped by a hard
+limit, a stall or somebody's hand controller is only visible in the status word.
+
+**Two smaller notes.** *Park has no protocol state*: `park` is a goto to `mount.park_position`
+followed by `K` on both axes, and `unpark` clears a host-side flag and **sends nothing** — the
+obvious alternative, re-issuing `F`, would write an action opcode whose effect on the axis counter
+is unmeasured to a mount whose counter is the night's pointing model. *`sync` is unimplemented*:
+`E` is `derived` and unverified in ENCODINGS.md, and a half-applied sync is a pointing model wrong
+in a way nothing downstream can detect (§5.1), so the driver answers `Unsupported` rather than
+something plausible. Both are M3-T05 measurements.
 
 #### 5.2.4 Serial task and lanes
 

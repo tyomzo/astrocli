@@ -87,9 +87,17 @@ tracing-subscriber = { workspace = true }
 # needs `cargo build -p astroctl-field --features libgphoto2` on a machine with the dev package.
 # Without it the gphoto2 driver is still registered and still reachable from config; it fails at
 # `create` with a message naming the missing library, which is the true thing to say.
+#
+# M3-T04 adds `serialport`, which is the same split one layer down: `astroctl-drivers`'
+# `serialport` feature is the one `Wire` implementation that owns a real fd, it needs
+# `libudev-dev` at build time, and that crate's manifest names this binary as the thing that must
+# enable it. Without it the skywatcher driver is still registered and still reachable from
+# `mount.driver: skywatcher` — capabilities and identity work, construction succeeds — and
+# `connect` fails with a message naming the missing feature rather than a missing mount.
 [features]
 default = []
 libgphoto2 = ["astroctl-drivers/libgphoto2"]
+serialport = ["astroctl-drivers/serialport"]
 
 [dev-dependencies]
 tower = { workspace = true }
