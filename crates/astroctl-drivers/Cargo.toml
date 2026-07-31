@@ -39,7 +39,7 @@ publish.workspace = true
 [features]
 default = ["simulator", "gphoto2"]
 simulator = ["dep:async-trait", "dep:chrono", "dep:jpeg-encoder", "dep:tokio"]
-gphoto2 = ["dep:async-trait", "dep:chrono", "dep:tokio", "dep:tracing"]
+gphoto2 = ["dep:async-trait", "dep:chrono", "dep:rustix", "dep:tokio", "dep:tracing"]
 libgphoto2 = ["gphoto2", "dep:gphoto2"]
 
 [dependencies]
@@ -72,6 +72,13 @@ tracing = { workspace = true, optional = true }
 # The libgphoto2 binding itself — see `[features]` above for why it is optional and why that is
 # not merely a size optimisation.
 gphoto2 = { workspace = true, optional = true }
+# `USBDEVFS_RESET` on the camera's device node — the USB reset SDD §5.3.1 asks the recovery path
+# to attempt (M2-T04). Already a workspace dependency for `statvfs` in the two binaries, so this
+# adds a crate edge rather than a dependency; `rustix::ioctl` needs no feature beyond the default
+# backend, which is why no feature is named here. See `gphoto2::usbreset` for why the ioctl and
+# not `authorized` or unbind/rebind: it is the only one of the three that a non-root process can
+# ever perform, and the operator running the recovery test is exactly such a process.
+rustix = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` is load-bearing rather than convenient: it is what makes `tokio::time::pause`
@@ -82,6 +89,12 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util", "ti
 # would prove only that it is self-consistent. See the workspace manifest.
 fitsrs = { workspace = true }
 zune-jpeg = { workspace = true }
+# The hardware run's *software cable pull*. `tests/hardware_r10.rs` issues `USBDEVFS_RESET` on the
+# camera's own device node to make the device vanish and re-enumerate for real — the same event a
+# yanked cable produces, with no hands and no root (the node is `plugdev`-writable). The driver
+# has its own copy of this behind the `gphoto2` feature; the test does not reach into it, because
+# the reset under test must be the *driver's* decision, not one the test performed for it.
+rustix = { workspace = true }
 
 [lints]
 workspace = true

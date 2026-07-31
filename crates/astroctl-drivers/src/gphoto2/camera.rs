@@ -61,11 +61,19 @@ use astroctl_hal::stream::FrameStream;
 use async_trait::async_trait;
 use chrono::Utc;
 
+use super::liveview::{LinkSource, LiveView};
 use super::ops::{
     format_token, interpret_choices, interpret_identity, interpret_settings, shutter_seconds,
     BodyGeometry, CamOpsFactory, CameraIdentity, CfgKey, RawChoices, RawFileRef,
 };
-use super::thread::{CamCmd, CameraLink, OpClass};
+use super::recovery::{self, Relink};
+use super::thread::{CamCmd, CameraLink, FaultSink, FaultSource, OpClass};
+// Only `new` builds a fault channel, and `new` exists only where there is a `CamOpsFactory` to
+// pass it — the tests and the `libgphoto2` build. Same gate, or a default build warns.
+#[cfg(any(test, feature = "libgphoto2"))]
+use super::thread::fault_channel;
+
+pub use super::recovery::LinkState;
 
 /// The registry name, which must equal `CameraDriver::Gphoto2.as_str()` or the driver is
 /// unreachable from configuration. Asserted by a test rather than trusted.
@@ -123,8 +131,19 @@ impl Cached {
 }
 
 /// A Canon body driven over PTP/USB through libgphoto2 (SDD §5.3, PRD CAM-01/02).
+///
+/// A handle over [`Inner`]. The split exists because M2-T04's recovery loop and live-view pump
+/// are long-lived tasks that need the same link slot and the same cache the trait methods use —
+/// and a task cannot borrow from a `&self` that outlives nothing in particular. One `Arc`, shared
+/// by the driver and the two loops it owns, is the whole of it.
 #[derive(Debug)]
 pub struct CanonGPhoto2Camera {
+    inner: Arc<Inner>,
+}
+
+/// Everything the driver and its background loops share.
+#[derive(Debug)]
+struct Inner {
     /// Builds the blocking half. Held rather than consumed so a reconnect can spawn a second
     /// thread — the first one is never reusable once it has been abandoned.
     ops: Arc<dyn CamOpsFactory>,
@@ -134,6 +153,28 @@ pub struct CanonGPhoto2Camera {
     cached: Mutex<Cached>,
     /// Operation budgets, from `camera.timeouts`.
     timeouts: CameraTimeouts,
+    /// Frames per second to pull, from `camera.live_view_fps` (PRF-02, USB-11).
+    live_view_fps: u32,
+    /// The running live-view session, if any.
+    ///
+    /// Survives a wedge on purpose: dropping the sink would end every subscriber's stream, and
+    /// the field node's forwarding task does not re-subscribe. See [`super::liveview`].
+    live: Mutex<Option<LiveView>>,
+    /// Where a failing link reports itself. Cloned into every [`CameraLink`] this driver builds.
+    faults: FaultSink,
+    /// What the driver believes about the camera — the driver's half of `camera.status`.
+    state: tokio::sync::watch::Sender<LinkState>,
+    /// The recovery task, started on the first connect.
+    ///
+    /// Lazily rather than in [`new`](CanonGPhoto2Camera::new) because SDD §8.1 requires registry
+    /// construction to be free of side effects, and because `new` may be called before there is a
+    /// runtime to spawn on. `OnceLock` so two concurrent connects cannot start two loops — two
+    /// recovery loops racing to rebuild one link is the failure this type prevents by existing.
+    recovery: std::sync::OnceLock<tokio::task::JoinHandle<()>>,
+    /// The fault channel's receiving half, waiting for the recovery loop to be started.
+    ///
+    /// Taken exactly once, by whichever connect wins the `OnceLock`.
+    pending_faults: Mutex<Option<FaultSource>>,
 }
 
 impl CanonGPhoto2Camera {
@@ -146,14 +187,57 @@ impl CanonGPhoto2Camera {
     /// built without the camera library.
     #[cfg(any(test, feature = "libgphoto2"))]
     pub(crate) fn new(config: &CameraConfig, ops: Arc<dyn CamOpsFactory>) -> Self {
+        let (faults, fault_source) = fault_channel();
+        let (state, _watch) = tokio::sync::watch::channel(LinkState::Disconnected);
         Self {
-            ops,
-            link: Mutex::new(None),
-            cached: Mutex::new(Cached::unconnected()),
-            timeouts: config.timeouts,
+            inner: Arc::new(Inner {
+                ops,
+                link: Mutex::new(None),
+                cached: Mutex::new(Cached::unconnected()),
+                timeouts: config.timeouts,
+                live_view_fps: config.live_view_fps,
+                live: Mutex::new(None),
+                faults,
+                state,
+                recovery: std::sync::OnceLock::new(),
+                // Parked until the first connect starts the loop; see `Inner::start_recovery`.
+                pending_faults: Mutex::new(Some(fault_source)),
+            }),
         }
     }
 
+    /// What the driver believes about its link to the camera (REL-03).
+    ///
+    /// **The driver's half of `camera.status`, and the only half it may have** — this crate has
+    /// no event bus by design (crate docs: "drivers are silent"), so the facade reads this and
+    /// decides what reaches the wire.
+    ///
+    /// **Eventually consistent, deliberately.** A wedge is detected on whichever task issued the
+    /// doomed command, and the transition is published by the recovery loop the next time it is
+    /// scheduled — so for one tick after a failure this still reads `Connected`. Tightening that
+    /// would mean giving every [`CameraLink`] a writer on this channel, i.e. two writers racing
+    /// on one state, to buy a millisecond on a value that is polled every 60 s (SDD §4.3). The
+    /// authoritative answer to "is the camera usable" is what an operation returns; this is for
+    /// display.
+    ///
+    /// Note for whoever wires that up: `astroctl_core::event::CameraStatus` is a two-state
+    /// boolean today and has no `reconnecting`, which SDD §5.3.1 and the M2-T04 acceptance
+    /// criterion both ask for. That gap is recorded in the task file; it is a §4.3 payload change
+    /// and not something this driver could make on its own.
+    #[must_use]
+    pub fn link_state(&self) -> LinkState {
+        self.inner.state.borrow().clone()
+    }
+
+    /// A subscription to [`link_state`](Self::link_state), for a facade that wants transitions
+    /// rather than polls.
+    #[must_use]
+    pub fn watch_link_state(&self) -> tokio::sync::watch::Receiver<LinkState> {
+        self.inner.state.subscribe()
+    }
+}
+
+impl Inner {
     /// The live link, or `NotConnected`.
     ///
     /// Returns an `Arc` clone so the caller can await without holding the mutex — the workspace
@@ -192,9 +276,82 @@ impl CanonGPhoto2Camera {
             *slot = Some(Arc::new(CameraLink::spawn(
                 Arc::clone(&self.ops),
                 self.timeouts,
+                self.faults.clone(),
             )?));
         }
         Ok(Arc::clone(slot.as_ref().expect("just spawned")))
+    }
+
+    /// Starts the recovery loop, once, on the first connect.
+    ///
+    /// Idempotent by construction: `OnceLock::get_or_init` runs the closure exactly once however
+    /// many callers arrive together, so a driver whose `connect` is called from two tasks does
+    /// not end up with two loops racing to rebuild the same link.
+    fn start_recovery(self: &Arc<Self>) {
+        self.recovery.get_or_init(|| {
+            let source = self
+                .pending_faults
+                .lock()
+                .expect("the camera fault source is never poisoned")
+                .take()
+                .expect("the fault source is taken exactly once, here");
+            let relink: Arc<dyn Relink> = Arc::clone(self) as Arc<dyn Relink>;
+            tokio::spawn(recovery::run(relink, source, self.state.clone()))
+        });
+    }
+
+    /// Stops the pacing loop and tells the body to leave live view. Idempotent.
+    ///
+    /// **Both halves, and the order is the one that survives a dead camera.** Dropping the
+    /// session first ends every subscriber's stream and stops the USB traffic immediately, which
+    /// is the half that must always happen; asking the body to leave live view is the half that
+    /// needs a camera, and it is best effort because a stopping command may not fail for want of
+    /// something to stop (SDD §5.8.1). Doing it the other way round would make an operator's
+    /// *stop* wait on a camera that has already gone.
+    ///
+    /// The body half is worth the round trip: a mirrorless body left in live view keeps its
+    /// sensor powered and its screen lit, and this driver also reports the battery that pays for
+    /// it.
+    async fn stop_live_view_pump(&self) {
+        let session = self
+            .live
+            .lock()
+            .expect("the camera live-view slot is never poisoned")
+            .take();
+        let was_running = session.is_some();
+        // Explicit rather than at end of scope, so the ordering above is a fact rather than a
+        // hope about where the compiler puts the drop.
+        drop(session);
+
+        if !was_running {
+            return;
+        }
+        let Ok(link) = Inner::link(self) else {
+            return;
+        };
+        // Through the gate: during an exposure live view is already not running, so there is
+        // nothing to stop, and queueing behind the exposure would blow `config_seconds` and wedge
+        // the very camera the operator is trying to be gentle with.
+        let _ = link
+            .request_unless_capturing(OpClass::Config, CamCmd::StopPreview)
+            .await;
+    }
+
+    /// Records a state the *driver* reached, as opposed to one recovery reached.
+    ///
+    /// Only two: a successful connect and a disconnect. Everything between them belongs to the
+    /// recovery loop, and two writers taking turns on one channel is how a `Connected` published
+    /// here would arrive after a `Reconnecting` published there and undo it. These two are safe
+    /// because both happen at the operator's request, when no recovery cycle can be running: a
+    /// connect that succeeds *is* a working link, and a disconnect has torn the link down.
+    fn note(&self, state: LinkState) {
+        self.state.send_if_modified(|current| {
+            if *current == state {
+                return false;
+            }
+            *current = state;
+            true
+        });
     }
 
     /// Stores what a successful open established.
@@ -454,6 +611,64 @@ impl CanonGPhoto2Camera {
     }
 }
 
+/// What the recovery loop does to this driver — SDD §5.3.1's respawn, from the loop's side.
+#[async_trait]
+impl Relink for Inner {
+    async fn tear_down(&self, abandon: bool) {
+        let link = self
+            .link
+            .lock()
+            .expect("the camera link slot is never poisoned")
+            .take();
+        let Some(link) = link else {
+            return;
+        };
+
+        if abandon {
+            // A wedged thread is inside a libgphoto2 call with no cancellation. `shutdown` joins,
+            // and joining here would park the recovery loop — and therefore the camera — behind a
+            // call that may never return. `wedge` has already taken the handle, so dropping the
+            // `Arc` joins nothing.
+            drop(link);
+            return;
+        }
+
+        // The thread is healthy; only the camera left. Waiting for it to release the context is
+        // not merely safe here, it is required: the fresh attempt is about to ask for a USB claim
+        // that the old context still holds, and M2-T02's own `Drop` note is about exactly that
+        // race. `shutdown` is blocking-free — it joins a thread that is already returning.
+        tokio::task::spawn_blocking(move || link.shutdown())
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the camera teardown task did not finish");
+            });
+    }
+
+    async fn rebuild(&self) -> Result<(), DeviceError> {
+        // `link_or_spawn` builds a *fresh* thread and, through the factory, a fresh context —
+        // which M2-T01 measured as the only thing that recovers (108 ms), against a stale handle
+        // that failed all five retries.
+        let link = self.link_or_spawn()?;
+        let raw = link.request(OpClass::Connect, CamCmd::Open).await?;
+        // Re-read rather than replayed, for the same reason a redundant `connect` re-reads: the
+        // camera has been away, and an operator who fixed a stalled session by turning the mode
+        // dial has changed what the body offers.
+        self.remember(interpret_identity(raw, BodyGeometry::R10));
+        Ok(())
+    }
+}
+
+/// Where the live-view pump gets the link it should use *this tick*.
+///
+/// Asking per tick rather than holding one is what lets live view survive a recovery: the link is
+/// replaced wholesale when the camera comes back, and a pump holding the old one would talk to an
+/// abandoned thread for the rest of the night.
+impl LinkSource for Inner {
+    fn link(&self) -> Option<Arc<CameraLink>> {
+        Inner::link(self).ok()
+    }
+}
+
 /// How the shutter is opened for one exposure.
 ///
 /// Two variants rather than an `Option<Duration>` because they are two different mechanisms, not
@@ -552,24 +767,31 @@ fn no_cli_fallback(ops_via_cli: &[astroctl_core::config::CameraOp]) -> Option<Dr
     )))
 }
 
-/// The error every operation this driver does not implement yet returns.
-///
-/// **None of `DeviceError`'s nine variants means "this driver is not finished".** `Unsupported`
-/// would say the R10 cannot do it, which is false and is contradicted by `capabilities()` two
-/// lines away; `Rejected` would blame the operator's request. `Protocol` is the closest honest
-/// fit — it maps to `DEVICE_PROTOCOL`/502, i.e. "your request was fine, the thing behind the API
-/// could not serve it", which is exactly the situation — and the message carries the part the
-/// variant cannot. Every one of these disappears in M2-T03/T04; none of them is a design.
-fn not_yet_implemented(operation: &str, task: &str) -> DeviceError {
-    DeviceError::Protocol(format!(
-        "the gphoto2 driver cannot {operation} yet — that is {task}. \
-         The simulator driver supports it today; set `camera.driver: simulator` to use it."
-    ))
-}
+// `not_yet_implemented` lived here from M2-T02 until M2-T04, and its own documentation predicted
+// its removal: "every one of these disappears in M2-T03/T04; none of them is a design". Live view
+// was the last caller, so it is gone. The reasoning it recorded is worth keeping even though the
+// function is not, because the next driver in this crate will face the same question:
+// `DeviceError`'s nine variants are all about the *device*, and none of them can say "this driver
+// is not finished yet" — `Unsupported` claims the body cannot do it, contradicting the capability
+// report two lines away, and `Rejected` blames the operator's request. `Protocol` was the least
+// wrong, with the message carrying what the variant could not. SDD §5.3.1's M2-T02 obligation 5
+// records the same decision, and both records now describe a state this driver has left.
 
-#[async_trait]
-impl Camera for CanonGPhoto2Camera {
-    async fn connect(&self) -> Result<(), DeviceError> {
+/// The `Camera` surface, written against the shared state rather than against the handle.
+///
+/// These are inherent rather than the trait implementation because two of them
+/// ([`connect`](Self::connect) and [`live_view_stream`](Self::live_view_stream)) need an
+/// `Arc<Inner>` to hand to a background task, and a trait method cannot ask for one. The trait
+/// impl below is the delegation, and is deliberately nothing else — every behaviour lives here,
+/// where the recovery loop and the live-view pump can reach it too.
+impl Inner {
+    async fn connect(self: &Arc<Self>) -> Result<(), DeviceError> {
+        // Started here rather than in `new`, because SDD §8.1 forbids side effects in registry
+        // construction and because there may be no runtime until now. It outlives every
+        // individual connect: a camera that is unplugged, reconnected and unplugged again is one
+        // recovery loop, not three.
+        self.start_recovery();
+
         let link = self.link_or_spawn()?;
         // Re-read on every connect, including a redundant one: the trait says connecting an
         // already-connected camera is `Ok`, and the cheapest correct way to honour that is to
@@ -577,10 +799,18 @@ impl Camera for CanonGPhoto2Camera {
         // dial would describe a body that no longer exists.
         let raw = link.request(OpClass::Connect, CamCmd::Open).await?;
         self.remember(interpret_identity(raw, BodyGeometry::R10));
+        // Also the reset for a `Faulted` driver: an operator who released the gvfs mount and
+        // pressed *connect* gets a working camera, not a driver still sulking about the last one.
+        self.note(LinkState::Connected);
         Ok(())
     }
 
     async fn disconnect(&self) -> Result<(), DeviceError> {
+        // Before the link goes, and unconditionally: the pump holds a sink whose subscribers must
+        // see the stream end, and the body must be told to leave live view while there is still a
+        // camera to tell. Dropping this after the link would leave the sensor powered.
+        self.stop_live_view_pump().await;
+
         let link = {
             let mut slot = self
                 .link
@@ -590,6 +820,7 @@ impl Camera for CanonGPhoto2Camera {
         };
         let Some(link) = link else {
             // Disconnecting a disconnected camera is `Ok(())`.
+            self.note(LinkState::Disconnected);
             return Ok(());
         };
 
@@ -601,6 +832,7 @@ impl Camera for CanonGPhoto2Camera {
             .cached
             .lock()
             .expect("the camera cache is never poisoned") = Cached::unconnected();
+        self.note(LinkState::Disconnected);
         closed
     }
 
@@ -733,16 +965,44 @@ impl Camera for CanonGPhoto2Camera {
     }
 
     async fn live_view_frame(&self) -> Result<LiveViewFrame, DeviceError> {
-        Err(not_yet_implemented("produce a live-view frame", "M2-T04"))
+        // A one-shot preview — a focus check — which is one gated round trip and no loop. Gated
+        // for the same reason every tick of the stream is: a preview that queued behind a 300 s
+        // bulb exposure would blow `config_seconds`, and a timed-out command is by definition a
+        // wedged thread. The trait already documents `Busy` during a capture as the right answer.
+        let jpeg = self
+            .link()?
+            .request_unless_capturing(OpClass::Config, CamCmd::Preview)
+            .await?;
+        Ok(LiveViewFrame::new(jpeg, Utc::now()))
     }
 
-    async fn live_view_stream(&self) -> Result<FrameStream<LiveViewFrame>, DeviceError> {
-        Err(not_yet_implemented("stream live view", "M2-T04"))
+    async fn live_view_stream(self: &Arc<Self>) -> Result<FrameStream<LiveViewFrame>, DeviceError> {
+        // Refused before anything is started, rather than by a pump that finds out on its first
+        // tick: a body whose abilities report no preview operation cannot serve this at all, and
+        // `has_live_view` is read off those abilities at connect rather than assumed.
+        if !self.capabilities().has_live_view {
+            return Err(DeviceError::Unsupported);
+        }
+        // Establishes that there is a camera. The pump tolerates the link going away afterwards —
+        // that is the point of it — but starting one against a driver that has never connected
+        // would answer a `NotConnected` caller with a stream that silently never produces.
+        let _link = self.link()?;
+
+        let mut live = self
+            .live
+            .lock()
+            .expect("the camera live-view slot is never poisoned");
+        // Idempotent: two calls are two cursors on one stream, never two sensor loops. The camera
+        // has one imaging path, and two pumps would simply take turns blocking each other on the
+        // single queue.
+        let session = live.get_or_insert_with(|| {
+            LiveView::start(Arc::clone(self) as Arc<dyn LinkSource>, self.live_view_fps)
+        });
+        Ok(session.subscribe())
     }
 
     async fn stop_live_view(&self) -> Result<(), DeviceError> {
-        // Idempotent and safe when not running — and it is never running. Same reasoning as
-        // `abort_capture`.
+        self.stop_live_view_pump().await;
         Ok(())
     }
 
@@ -784,6 +1044,94 @@ impl Camera for CanonGPhoto2Camera {
     }
 }
 
+/// Delegation, and deliberately nothing more.
+///
+/// Every behaviour is on [`Inner`] so that the recovery loop and the live-view pump — which hold
+/// an `Arc<Inner>` and not a `CanonGPhoto2Camera` — reach the same code the trait does. A method
+/// that grew a second implementation here would be one the background loops could not see.
+#[async_trait]
+impl Camera for CanonGPhoto2Camera {
+    async fn connect(&self) -> Result<(), DeviceError> {
+        self.inner.connect().await
+    }
+
+    async fn disconnect(&self) -> Result<(), DeviceError> {
+        self.inner.disconnect().await
+    }
+
+    async fn settings(&self) -> Result<CameraSettings, DeviceError> {
+        self.inner.settings().await
+    }
+
+    async fn available_settings(&self) -> Result<AvailableSettings, DeviceError> {
+        self.inner.available_settings().await
+    }
+
+    async fn set_iso(&self, iso: &str) -> Result<(), DeviceError> {
+        self.inner.set_iso(iso).await
+    }
+
+    async fn set_shutter(&self, shutter: &str) -> Result<(), DeviceError> {
+        self.inner.set_shutter(shutter).await
+    }
+
+    async fn set_aperture(&self, aperture: &str) -> Result<(), DeviceError> {
+        self.inner.set_aperture(aperture).await
+    }
+
+    async fn set_image_format(&self, format: ImageFormat) -> Result<(), DeviceError> {
+        self.inner.set_image_format(format).await
+    }
+
+    async fn capture(&self, request: &CaptureRequest) -> Result<CaptureResult, DeviceError> {
+        self.inner.capture(request).await
+    }
+
+    async fn capture_bulb(
+        &self,
+        request: &CaptureRequest,
+        duration: Duration,
+    ) -> Result<CaptureResult, DeviceError> {
+        self.inner.capture_bulb(request, duration).await
+    }
+
+    async fn abort_capture(&self) -> Result<(), DeviceError> {
+        self.inner.abort_capture().await
+    }
+
+    async fn live_view_frame(&self) -> Result<LiveViewFrame, DeviceError> {
+        self.inner.live_view_frame().await
+    }
+
+    async fn live_view_stream(&self) -> Result<FrameStream<LiveViewFrame>, DeviceError> {
+        self.inner.live_view_stream().await
+    }
+
+    async fn stop_live_view(&self) -> Result<(), DeviceError> {
+        self.inner.stop_live_view().await
+    }
+
+    async fn battery(&self) -> Result<BatteryStatus, DeviceError> {
+        self.inner.battery().await
+    }
+
+    async fn storage(&self) -> Result<StorageInfo, DeviceError> {
+        self.inner.storage().await
+    }
+
+    async fn sensor_temperature_celsius(&self) -> Result<Option<f64>, DeviceError> {
+        self.inner.sensor_temperature_celsius().await
+    }
+
+    fn capabilities(&self) -> CameraCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn device_info(&self) -> DeviceInfo {
+        self.inner.device_info()
+    }
+}
+
 // -----------------------------------------------------------------------------------------
 // Registry factory
 // -----------------------------------------------------------------------------------------
@@ -804,6 +1152,36 @@ impl CanonGPhoto2CameraFactory {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    /// Builds the driver as its concrete type, for a caller that needs more than `dyn Camera`.
+    ///
+    /// **This exists for exactly one thing that the `Camera` trait cannot express**: the REL-03
+    /// link state. SDD §5.3.1 requires the recovery transition to be surfaced as
+    /// `camera.status: reconnecting`, and a driver may not publish events (crate docs: "drivers
+    /// are silent"), so the facade has to *read* it — through
+    /// [`CanonGPhoto2Camera::link_state`] and [`watch_link_state`](CanonGPhoto2Camera::watch_link_state),
+    /// neither of which is on the trait.
+    ///
+    /// Adding a state accessor to `Camera` instead was the alternative and is the wrong shape
+    /// today: it would oblige every driver — the simulator, the guide cameras, the INDI adapter
+    /// when it lands — to model a recovery protocol only this one has. If a second driver grows
+    /// one, that is the moment the trait should learn about it.
+    ///
+    /// # Errors
+    /// As [`create`](CameraFactory::create).
+    #[cfg(feature = "libgphoto2")]
+    pub fn create_gphoto2(
+        &self,
+        config: &CameraConfig,
+    ) -> Result<Arc<CanonGPhoto2Camera>, DriverInitError> {
+        if let Some(error) = no_cli_fallback(&config.ops_via_cli) {
+            return Err(error);
+        }
+        Ok(Arc::new(CanonGPhoto2Camera::new(
+            config,
+            Arc::new(super::backend::LibGphoto2Factory::new()),
+        )))
     }
 }
 
@@ -864,7 +1242,7 @@ mod tests {
 
     use super::super::mock::{mock_format_token, MockState};
     use super::super::thread::OpClass;
-    use super::{CanonGPhoto2Camera, CanonGPhoto2CameraFactory, DRIVER_NAME};
+    use super::{CanonGPhoto2Camera, CanonGPhoto2CameraFactory, LinkState, DRIVER_NAME};
 
     /// `config/field-node.example.yaml`'s camera section, verbatim.
     fn config() -> CameraConfig {
@@ -879,6 +1257,7 @@ mod tests {
                 capture_extra_seconds: 30,
                 download_seconds: 120,
             },
+            live_view_fps: 5,
             indi_device: None,
         }
     }
@@ -1124,19 +1503,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_operations_this_task_does_not_implement_name_the_task_that_will() {
+    async fn every_operation_the_trait_declares_is_implemented() {
+        // This test used to be `the_operations_this_task_does_not_implement_name_the_task_that_will`
+        // and asserted that live view answered with a message naming M2-T04. It is M2-T04, so it
+        // now asserts the opposite: nothing in the `Camera` trait answers "not implemented".
         let (_state, camera) = camera();
         camera.connect().await.expect("connects");
 
-        // Live view is all that is left: capture, bulb, download and abort landed in M2-T03.
-        let error = camera.live_view_stream().await.expect_err("M2-T04");
-        assert!(format!("{error}").contains("M2-T04"), "{error}");
-        let error = camera.live_view_frame().await.expect_err("M2-T04");
-        assert!(format!("{error}").contains("M2-T04"), "{error}");
+        camera.live_view_frame().await.expect("a preview frame");
+        let stream = camera.live_view_stream().await.expect("a stream");
+        drop(stream);
+        camera.stop_live_view().await.expect("stops");
 
-        // Stopping live view is an honest `Ok` rather than a stub: nothing can be running, so
-        // "stopped" is the true answer, and SDD §5.8.1 forbids refusing a stop.
-        camera.stop_live_view().await.expect("nothing to stop");
+        // The placeholder itself is gone rather than merely unreachable — the compiler is the
+        // check, since `not_yet_implemented` was a private function and a dead one would fail the
+        // `-D warnings` clippy gate.
     }
 
     // -------------------------------------------------------------------------------------
@@ -1829,5 +2210,701 @@ mod tests {
             message.contains("--features"),
             "the message must say how to fix it: {message}"
         );
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Live view, battery/storage and wedge recovery (M2-T04)
+    // -------------------------------------------------------------------------------------
+
+    /// A config with a fast preview rate, so a test collecting frames takes milliseconds.
+    ///
+    /// The *shipped* rate is 5 fps and is asserted separately — see
+    /// `the_shipped_default_paces_live_view_at_prf_02s_floor`. Using it here would make every
+    /// live-view test wait 200 ms per frame for no additional truth.
+    fn config_at_fps(fps: u32) -> CameraConfig {
+        CameraConfig {
+            live_view_fps: fps,
+            ..config()
+        }
+    }
+
+    /// A connected camera streaming live view fast, and the handle that scripts its body.
+    async fn streaming_camera() -> (
+        Arc<super::super::mock::MockState>,
+        Arc<CanonGPhoto2Camera>,
+        astroctl_hal::stream::FrameStream<astroctl_hal::camera::LiveViewFrame>,
+    ) {
+        let (state, factory) = MockState::new();
+        let camera = Arc::new(CanonGPhoto2Camera::new(&config_at_fps(200), factory));
+        camera.connect().await.expect("connects");
+        let stream = camera.live_view_stream().await.expect("live view starts");
+        (state, camera, stream)
+    }
+
+    /// Waits for `wanted` frames, or gives up. Returns what arrived.
+    async fn collect_frames(
+        stream: &mut astroctl_hal::stream::FrameStream<astroctl_hal::camera::LiveViewFrame>,
+        wanted: usize,
+    ) -> Vec<astroctl_hal::camera::LiveViewFrame> {
+        let mut frames = Vec::new();
+        for _ in 0..wanted {
+            match tokio::time::timeout(Duration::from_secs(5), stream.next_frame()).await {
+                Ok(Some(frame)) => frames.push(frame),
+                _ => break,
+            }
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn live_view_delivers_the_bodys_own_jpeg_bytes_unmodified() {
+        // SDD §5.7 source 1: "forwarded as-is". Re-encoding 133 KB several times a second on a Pi
+        // would be the most expensive thing in the preview path and would buy nothing, since the
+        // body already produces JPEG.
+        let (_state, camera, mut stream) = streaming_camera().await;
+
+        let frames = collect_frames(&mut stream, 3).await;
+        assert_eq!(frames.len(), 3, "the stream must produce frames");
+        for frame in &frames {
+            assert_eq!(
+                &frame.jpeg[..2],
+                &[0xFF, 0xD8],
+                "the JPEG magic must survive the driver untouched"
+            );
+        }
+
+        // Each frame is a *new* one, not the same slot read three times. This is the failure a
+        // depth-1 watch channel makes easy to miss: a stalled producer and a working one both
+        // leave a frame in the slot, so only the contents distinguish them.
+        let sequence: Vec<u32> = frames
+            .iter()
+            .filter_map(|frame| super::super::mock::mock_preview_sequence(&frame.jpeg))
+            .collect();
+        assert_eq!(sequence.len(), 3);
+        assert!(
+            sequence.windows(2).all(|pair| pair[1] > pair[0]),
+            "frames must advance, not repeat: {sequence:?}"
+        );
+
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn a_capture_pauses_live_view_without_wedging_the_camera() {
+        // **The headline of this task, and the interaction that decides whether it is safe.**
+        //
+        // There is one queue (SDD §5.3.1), so a preview issued during an exposure would be
+        // serviced after it — against `config_seconds`, five. It would therefore time out, and a
+        // timed-out command *is* a wedged thread by definition: one live-view tick would abandon
+        // the camera and destroy the frame. At 5 fps that is five chances a second.
+        //
+        // What prevents it is M2-T03's gate. `request_unless_capturing` tests the `CaptureClaim`
+        // *under the sender lock* and answers `Busy` **before sending**, so no command is queued
+        // and no budget timer ever starts. The pause costs frames and cannot cost the camera —
+        // and that is structural, not a heuristic: there is no timer to expire.
+        let (state, camera, mut stream) = streaming_camera().await;
+        camera.set_shutter("30").await.expect("30 s is offered");
+        let dir = scratch_dir("liveview-capture-pause");
+
+        // Frames are flowing before the exposure.
+        assert_eq!(collect_frames(&mut stream, 2).await.len(), 2);
+
+        // A capture long enough to cover many live-view ticks — the real stall is 2.08 s and the
+        // period here is 5 ms, so this is the same shape at a testable scale.
+        state.capture_takes(Duration::from_millis(400));
+        let exposing = {
+            let camera = Arc::clone(&camera);
+            let dir = dir.clone();
+            tokio::spawn(async move { camera.capture(&CaptureRequest::new(&dir, "light_1")).await })
+        };
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let during = state.previews();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            state.previews(),
+            during,
+            "live view must pull no frames at all while the imaging path is claimed"
+        );
+
+        // The exposure the pause protected completes normally...
+        exposing
+            .await
+            .expect("task")
+            .expect("the capture survives a live-view stream running against it");
+
+        // ...the camera was never wedged — this is the assertion the whole design exists for...
+        assert!(
+            camera.battery().await.is_ok(),
+            "a paused live view must never have wedged the camera thread"
+        );
+        assert!(camera.link_state().is_connected());
+
+        // ...and frames resume on the *same* stream, with no reconnect and no restart, exactly as
+        // SDD §5.7 requires of an expected gap.
+        let after = collect_frames(&mut stream, 2).await;
+        assert_eq!(
+            after.len(),
+            2,
+            "live view must resume by itself once the exposure ends"
+        );
+
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn a_camera_that_stops_answering_still_wedges_the_detector() {
+        // The other half of the same distinction, and the one that would be quietly lost by a
+        // driver that made live view "safe" by exempting it from the budget. SDD §5.7: the
+        // pipeline must tell *idle because the camera is busy* from *idle because the camera
+        // stopped responding*. Nothing is capturing here, so the gate does not fire, the preview
+        // is sent, and it blows its budget — which is a wedge, as designed.
+        let (state, factory) = MockState::new();
+        let one_second = CameraConfig {
+            timeouts: CameraTimeouts {
+                config_seconds: 1,
+                ..config().timeouts
+            },
+            ..config_at_fps(200)
+        };
+        let camera = Arc::new(CanonGPhoto2Camera::new(&one_second, factory));
+        camera.connect().await.expect("connects");
+
+        // A preview that never returns: the thread is inside a C call that cannot be interrupted.
+        state.block_calls_for(Duration::from_secs(3));
+
+        let error = camera
+            .live_view_frame()
+            .await
+            .expect_err("the camera stopped answering");
+        match error {
+            DeviceError::Timeout(budget) => assert_eq!(budget, Duration::from_secs(1)),
+            other => panic!("a silent camera must time out, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn live_view_pulls_nothing_when_nobody_is_watching() {
+        // M1-T09's acceptance criterion names the orphaned-work failure directly, and on a real
+        // body it is a USB transfer and 133 KB per frame for the rest of the night.
+        let (state, camera, stream) = streaming_camera().await;
+        let _ = collect_frames(&mut stream.clone(), 1).await;
+
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let idle = state.previews();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            state.previews(),
+            idle,
+            "with no subscriber the pump must stop pulling frames off the camera"
+        );
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn a_new_subscriber_restarts_the_frames_without_restarting_the_stream() {
+        // The other side of the idle rule: the pump goes quiet rather than exiting, so a client
+        // that reconnects gets frames again with no `live_view_stream` call in between.
+        let (_state, camera, stream) = streaming_camera().await;
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut resumed = camera.live_view_stream().await.expect("subscribes again");
+        assert_eq!(
+            collect_frames(&mut resumed, 2).await.len(),
+            2,
+            "a returning watcher must get frames without the stream being restarted"
+        );
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn two_subscribers_are_two_cursors_on_one_stream_not_two_sensor_loops() {
+        // The trait's idempotence rule. The camera has one imaging path, and two pumps would
+        // simply take turns blocking each other on the single queue.
+        let (state, camera, mut first) = streaming_camera().await;
+        let mut second = camera.live_view_stream().await.expect("a second cursor");
+
+        let (a, b) = tokio::join!(
+            collect_frames(&mut first, 2),
+            collect_frames(&mut second, 2)
+        );
+        assert_eq!(a.len(), 2);
+        assert_eq!(b.len(), 2);
+
+        // One loop, so the frames both saw came from one pull each rather than two.
+        let pulled = state.previews();
+        assert!(
+            pulled < 12,
+            "two subscribers must not double the USB traffic; {pulled} frames were pulled"
+        );
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn stopping_live_view_ends_the_stream_and_asks_the_body_to_leave_it() {
+        // Both halves. The frames stopping is what the operator asked for; telling the body is
+        // what stops a mirrorless sensor being held powered for the rest of the night, on the
+        // same battery this driver reports.
+        let (state, camera, mut stream) = streaming_camera().await;
+        assert_eq!(collect_frames(&mut stream, 1).await.len(), 1);
+
+        camera.stop_live_view().await.expect("stops");
+
+        assert_eq!(
+            stream.next_frame().await,
+            None,
+            "dropping the sink is how a driver says live view stopped"
+        );
+        assert_eq!(
+            state.stop_previews(),
+            1,
+            "the body must be told to leave live view, not merely ignored"
+        );
+
+        // Idempotent, and safe when it is not running.
+        camera.stop_live_view().await.expect("stopping twice is Ok");
+        camera.disconnect().await.expect("disconnects");
+    }
+
+    #[tokio::test]
+    async fn disconnecting_stops_live_view_before_the_camera_goes() {
+        // The order matters: the body has to be told while there is still a camera to tell.
+        let (state, camera, mut stream) = streaming_camera().await;
+        assert_eq!(collect_frames(&mut stream, 1).await.len(), 1);
+
+        camera.disconnect().await.expect("disconnects");
+
+        assert_eq!(stream.next_frame().await, None);
+        assert_eq!(
+            state.stop_previews(),
+            1,
+            "a disconnect must not leave the body in live view"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_that_reports_no_preview_operation_says_unsupported() {
+        // Derived from the abilities the body reported at connect, never assumed — the same way
+        // `has_bulb` comes from the shutter list rather than from a table of models.
+        let (state, factory) = MockState::new();
+        state.remove_live_view();
+        let camera = CanonGPhoto2Camera::new(&config(), factory);
+        camera.connect().await.expect("connects");
+
+        assert!(!camera.capabilities().has_live_view);
+        assert!(
+            matches!(
+                camera.live_view_stream().await,
+                Err(DeviceError::Unsupported)
+            ),
+            "a body with no preview operation is Unsupported, not a stream that never produces"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_view_before_connect_is_not_connected() {
+        let (_state, camera) = camera();
+        assert!(matches!(
+            camera.live_view_stream().await,
+            Err(DeviceError::NotConnected)
+        ));
+        assert!(matches!(
+            camera.live_view_frame().await,
+            Err(DeviceError::NotConnected)
+        ));
+        // ...but stopping is always Ok. SDD §5.8.1 forbids refusing a stop.
+        camera.stop_live_view().await.expect("nothing to stop");
+    }
+
+    #[tokio::test]
+    async fn a_one_shot_preview_during_an_exposure_is_busy_rather_than_queued() {
+        // The same gate, on the one-shot path. The trait documents `Busy` during a capture as the
+        // right answer, and it is the answer that keeps the camera alive.
+        let (state, camera) = timed_camera().await;
+        state.capture_takes(Duration::from_millis(400));
+        let dir = scratch_dir("preview-during-capture");
+        let camera = Arc::new(camera);
+
+        let exposing = {
+            let camera = Arc::clone(&camera);
+            let dir = dir.clone();
+            tokio::spawn(async move { camera.capture(&CaptureRequest::new(&dir, "light_1")).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            matches!(camera.live_view_frame().await, Err(DeviceError::Busy(_))),
+            "a focus check during an exposure must be refused, not queued behind it"
+        );
+        exposing.await.expect("task").expect("the capture survives");
+    }
+
+    #[tokio::test]
+    async fn the_shipped_default_paces_live_view_at_prf_02s_floor() {
+        // 58.5 fps is what the hardware does; 5 fps is what PRF-02 needs and what USB-11 asks us
+        // to come down to. The knob exists so the number is a decision rather than an accident,
+        // and this asserts the shipped decision.
+        assert_eq!(config().live_view_fps, 5);
+    }
+
+    // --- wedge recovery (REL-03) ---------------------------------------------------------
+
+    /// Waits for the driver's link state to satisfy `wanted`.
+    async fn await_state(
+        camera: &CanonGPhoto2Camera,
+        what: &str,
+        wanted: impl Fn(&LinkState) -> bool,
+    ) -> LinkState {
+        let mut watch = camera.watch_link_state();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            {
+                let current = watch.borrow_and_update().clone();
+                if wanted(&current) {
+                    return current;
+                }
+            }
+            tokio::select! {
+                changed = watch.changed() => changed.expect("the driver is alive"),
+                () = tokio::time::sleep_until(deadline) => {
+                    panic!("never reached {what}; stuck at {:?}", camera.link_state())
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wedged_camera_recovers_by_itself_to_a_working_capture() {
+        // T-CAM-1's shape, against the mock: an induced wedge, automatic recovery, and a capture
+        // that works afterwards — with the state going reconnecting → connected in between.
+        let (state, factory) = MockState::new();
+        let one_second = CameraConfig {
+            timeouts: CameraTimeouts {
+                config_seconds: 1,
+                ..config().timeouts
+            },
+            ..config()
+        };
+        let camera = Arc::new(CanonGPhoto2Camera::new(&one_second, factory));
+        camera.connect().await.expect("connects");
+        camera.set_shutter("30").await.expect("30 s is offered");
+        assert!(camera.link_state().is_connected());
+
+        // The wedge: a call that outlasts its budget, i.e. a thread inside a C call that cannot
+        // be interrupted.
+        let contexts_before = state.builds();
+        state.block_calls_for(Duration::from_secs(2));
+        let error = camera.battery().await.expect_err("over budget");
+        assert!(matches!(error, DeviceError::Timeout(_)), "{error:?}");
+
+        // The camera comes back — the mock stops blocking, as a body does once it is replugged.
+        state.block_calls_for(Duration::ZERO);
+
+        // **Wait for the rebuild, not for the state.** `link_state` is eventually consistent: the
+        // wedge happens on the caller's task and the transition is published by the recovery loop
+        // the next time it is scheduled, so for one tick the state still reads `Connected` — the
+        // value from before the wedge. Sampling it here would pass instantly and prove nothing.
+        // A *fresh context* is the unambiguous evidence that recovery ran, and it is the thing
+        // M2-T01 measured as the only path that works.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while state.builds() <= contexts_before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "recovery never rebuilt the context; state is {:?}",
+                camera.link_state()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        await_state(&camera, "connected", LinkState::is_connected).await;
+
+        // The acceptance criterion's real content: *working capture* afterwards, not merely a
+        // link that reports itself up.
+        let result = camera
+            .capture(&CaptureRequest::new(scratch_dir("recovered"), "light_1"))
+            .await
+            .expect("the recovered camera takes a frame");
+        assert!(result.raw().expect("a science file").path.exists());
+
+        // And it is a genuinely fresh context: M2-T01 proved the stale handle never recovers.
+        assert!(
+            state.builds() >= 2,
+            "recovery must build a new context, not retry the abandoned one"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_reports_reconnecting_before_it_reports_connected() {
+        // The transition SDD §5.3.1 asks to be surfaced. The driver cannot publish it — this
+        // crate has no event bus by design — so it drives the state and the facade publishes.
+        let (state, factory) = MockState::new();
+        let one_second = CameraConfig {
+            timeouts: CameraTimeouts {
+                config_seconds: 1,
+                ..config().timeouts
+            },
+            ..config()
+        };
+        let camera = Arc::new(CanonGPhoto2Camera::new(&one_second, factory));
+        camera.connect().await.expect("connects");
+
+        // Fail the reopen for a while, so `Reconnecting` is observable rather than a state the
+        // driver passes through in 108 ms.
+        state.fail_open_with("Could not find the requested device on the USB port");
+        state.block_calls_for(Duration::from_secs(2));
+        camera.battery().await.expect_err("over budget");
+        state.block_calls_for(Duration::ZERO);
+
+        let reconnecting = await_state(&camera, "reconnecting", |s| {
+            matches!(s, LinkState::Reconnecting { .. })
+        })
+        .await;
+        let LinkState::Reconnecting { attempt, of, .. } = &reconnecting else {
+            unreachable!()
+        };
+        assert!(*attempt >= 1 && attempt <= of, "{reconnecting:?}");
+        // The operator is told *why*, not merely that something is happening.
+        let because = reconnecting
+            .message()
+            .expect("reconnecting explains itself");
+        assert!(!because.is_empty(), "{because}");
+
+        state.succeed_open();
+        await_state(&camera, "connected", LinkState::is_connected).await;
+    }
+
+    #[tokio::test]
+    async fn live_view_survives_a_recovery_and_resumes_into_the_same_stream() {
+        // **The failure this test exists to prevent is silent.** Dropping the `FrameSink` on a
+        // wedge would end every subscriber's stream, and the field node's forwarding task does
+        // not re-subscribe — it logs "the camera's live-view stream ended" and exits. The camera
+        // would recover perfectly and the operator would still be looking at a dead preview.
+        //
+        // So the pump outlives its link: a tick during recovery is a skipped frame, and the
+        // frames resume into the *same* sink and the *same* subscriber.
+        let (state, factory) = MockState::new();
+        let fast = CameraConfig {
+            timeouts: CameraTimeouts {
+                config_seconds: 1,
+                ..config().timeouts
+            },
+            ..config_at_fps(200)
+        };
+        let camera = Arc::new(CanonGPhoto2Camera::new(&fast, factory));
+        camera.connect().await.expect("connects");
+        let mut stream = camera.live_view_stream().await.expect("live view starts");
+        assert_eq!(collect_frames(&mut stream, 2).await.len(), 2);
+
+        // The camera leaves mid-stream, exactly as the spike's cable pull did: live view was the
+        // traffic generator, and the preview call is what noticed.
+        state.fail_preview_with("Could not find the requested device on the USB port");
+        await_state(&camera, "recovering or reconnected", |s| {
+            !matches!(s, LinkState::Connected)
+        })
+        .await;
+
+        // ...and it comes back.
+        state.succeed_preview();
+        await_state(&camera, "connected", LinkState::is_connected).await;
+
+        assert_eq!(
+            collect_frames(&mut stream, 2).await.len(),
+            2,
+            "the same subscriber must see frames again, with no re-subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vanished_camera_is_diagnosed_as_a_cable_and_never_as_gvfs() {
+        // Branch (a) of M2-T01's two measured error strings. Sending an operator to hunt for a
+        // desktop mount when the camera is simply unplugged is the wrong place at the worst time.
+        let (state, factory) = MockState::new();
+        let camera = Arc::new(CanonGPhoto2Camera::new(&config(), factory));
+        camera.connect().await.expect("connects");
+
+        state.fail_open_with("Could not find the requested device on the USB port");
+        state.fail_preview_with("Could not find the requested device on the USB port");
+        camera.live_view_frame().await.expect_err("the camera left");
+
+        let state_now = await_state(&camera, "not connected", |s| !s.is_connected()).await;
+        let message = state_now.message().expect("it explains itself");
+        assert!(message.contains("cable"), "{message}");
+        assert!(
+            !message.contains("gvfs"),
+            "a device that is not on the bus is not being held by anything: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stolen_camera_is_diagnosed_as_a_claim_conflict_with_a_next_step() {
+        // Branch (b), and REL-03's real-world blocker. gvfs is named when it is actually there;
+        // when it is not, the message lists the remaining causes rather than picking one.
+        let (state, factory) = MockState::new();
+        let camera = Arc::new(CanonGPhoto2Camera::new(&config(), factory));
+        camera.connect().await.expect("connects");
+
+        state.fail_open_with("Could not claim the USB device");
+        state.fail_preview_with("Could not claim the USB device");
+        camera
+            .live_view_frame()
+            .await
+            .expect_err("something took it");
+
+        let state_now = await_state(&camera, "not connected", |s| !s.is_connected()).await;
+        let message = state_now.message().expect("it explains itself");
+        assert!(
+            message.contains("Could not claim the USB device"),
+            "{message}"
+        );
+        assert!(
+            message.contains("gio mount -u") || message.contains("switched off"),
+            "the message names no next step: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_device_that_is_present_but_has_stopped_answering_is_recovered_from() {
+        // **The third failure mode, and M2-T01 did not see it because it pulled the cable.**
+        // M2-T04 induced a bus-level reset on the real body instead — which is what a hub glitch
+        // or a power-management event looks like — and found the device *still enumerated* while
+        // every transfer failed with libgphoto2's `Unspecified error`. Neither measured string
+        // appears, so neither text branch fires, and an earlier version of this driver sat there
+        // logging skipped frames all night with a camera it could have rebuilt in 108 ms.
+        //
+        // Repetition is the only signal available, so repetition is what is used.
+        let (state, factory) = MockState::new();
+        let camera = Arc::new(CanonGPhoto2Camera::new(&config(), factory));
+        camera.connect().await.expect("connects");
+        let contexts_before = state.builds();
+
+        state.fail_preview_with("Unspecified error");
+        for _ in 0..super::super::thread::UNRESPONSIVE_STREAK {
+            camera
+                .live_view_frame()
+                .await
+                .expect_err("the session is dead");
+        }
+        state.succeed_preview();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while state.builds() <= contexts_before {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "a camera that stopped answering was never rebuilt; state is {:?}",
+                camera.link_state()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        await_state(&camera, "connected", LinkState::is_connected).await;
+        camera
+            .live_view_frame()
+            .await
+            .expect("the rebuilt session works");
+    }
+
+    #[tokio::test]
+    async fn one_bad_transfer_is_a_lost_frame_and_not_a_lost_camera() {
+        // The other side of the streak rule, and the reason it is a streak. A marginal cable that
+        // drops one transfer an hour must never reach the threshold — tearing the camera down for
+        // a single failure would turn a lost frame into a lost session, every hour, all night.
+        let (state, camera) = camera();
+        camera.connect().await.expect("connects");
+
+        // One short of the threshold, then a success, then one short again. A running total would
+        // have fired; a streak does not.
+        for _ in 0..2 {
+            state.fail_preview_with("Unspecified error");
+            camera
+                .live_view_frame()
+                .await
+                .expect_err("one bad transfer");
+            state.succeed_preview();
+            camera.live_view_frame().await.expect("and then a good one");
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            camera.link_state().is_connected(),
+            "an intermittent failure must not tear the camera down: {:?}",
+            camera.link_state()
+        );
+        assert_eq!(
+            state.builds(),
+            1,
+            "nothing should have been rebuilt for two isolated failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_that_is_not_about_the_link_does_not_tear_the_camera_down() {
+        // The other side of the classification. A download that could not be written, or a body
+        // that refused a widget, is a failure of *that operation* — tearing the camera thread
+        // down for one would turn a lost frame into a lost session.
+        let (state, camera) = timed_camera().await;
+        state.fail_download_with("No space left on device");
+
+        camera
+            .capture(&CaptureRequest::new(
+                scratch_dir("not-a-link-fault"),
+                "light_1",
+            ))
+            .await
+            .expect_err("the download failed");
+
+        // Give any recovery that was going to fire the chance to.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            camera.battery().await.is_ok(),
+            "a per-frame failure must leave the camera connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_live_view_soak_leaks_nothing_and_does_not_decay() {
+        // The mock half of the 10-minute hardware soak. It cannot say anything about fps decay on
+        // a real body — only a real body can — but it proves the plumbing: hundreds of frames
+        // through the watch channel with one subscriber attached, no unbounded growth, and a
+        // stream that is still producing at the end at the rate it started.
+        let (state, camera, mut stream) = streaming_camera().await;
+
+        let first_window = tokio::time::Instant::now();
+        assert_eq!(collect_frames(&mut stream, 20).await.len(), 20);
+        let first_window = first_window.elapsed();
+
+        // Run for a while with the subscriber attached but reading only occasionally, which is
+        // the shape of a slow client and the case where a queue would grow.
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let _ = stream.latest();
+        }
+
+        // The depth-1 channel is what bounds memory: a slow consumer skips frames rather than
+        // accumulating them, so the first frame after a pause is a *recent* one and not the head
+        // of a backlog. Both numbers are read at the same instant, or the comparison is against a
+        // frame count that has moved on since.
+        let resumed = stream.next_frame().await.expect("the stream is alive");
+        let pulled = u32::try_from(state.previews()).expect("fits");
+        let seen = super::super::mock::mock_preview_sequence(&resumed.jpeg).expect("a sequence");
+        assert!(
+            pulled.saturating_sub(seen) < 5,
+            "a slow consumer must wake to the newest frame; it woke {} frames behind",
+            pulled.saturating_sub(seen)
+        );
+
+        let last_window = tokio::time::Instant::now();
+        let tail = collect_frames(&mut stream, 20).await;
+        let last_window = last_window.elapsed();
+        assert_eq!(tail.len(), 20, "the stream must still be producing");
+        // And the rate has not decayed: the last twenty frames took about as long as the first
+        // twenty. Generous, because this is a shared CI machine and the claim is "no decay", not
+        // "identical timing".
+        assert!(
+            last_window < first_window * 4 + Duration::from_millis(200),
+            "live view slowed from {first_window:?} to {last_window:?} over the run"
+        );
+
+        camera.disconnect().await.expect("disconnects");
     }
 }

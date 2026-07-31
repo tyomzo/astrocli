@@ -272,8 +272,8 @@ pub(crate) struct CameraIdentity {
 /// The blocking camera operations. One implementation per transport; see the module docs.
 ///
 /// Scope note: M2-T02 delivered connect, disconnect and settings; M2-T03 added `capture`,
-/// `capture_bulb`, `download` and `abort`. M2-T04 adds the live-view pair, which belongs here for
-/// the same reason these do and which the thread will dispatch the same way.
+/// `capture_bulb`, `download` and `abort`; M2-T04 added `preview` and `stop_preview`, completing
+/// the trait.
 pub(crate) trait CamOps {
     /// Autodetects, opens and interrogates the camera.
     ///
@@ -400,6 +400,42 @@ pub(crate) trait CamOps {
     /// # Errors
     /// Transport-level failures only.
     fn abort(&mut self) -> Result<(), DeviceError>;
+
+    /// Pulls one live-view frame off the body (CAM-05).
+    ///
+    /// **One frame per call, synchronously, and there is no start.** On the reference body live
+    /// view is not a mode the driver enters — it is what asking for a preview *does*. M2-T01
+    /// measured 58.5 fps sustained by calling this in a loop, with the first call costing 390 ms
+    /// because that one is the sensor spinning up. So there is no `LiveViewStart` here: the
+    /// pacing loop above the thread is the start, and the first frame is slower than the rest.
+    ///
+    /// That is a departure from SDD §5.3.1's sketched `LiveViewStart`/`LiveViewStop` pair, which
+    /// had the thread pushing frames into a watch channel on its own. It cannot: the thread
+    /// services one command at a time, so a thread that was looping on previews would not be
+    /// reading its channel, and a capture would queue behind live view instead of interleaving
+    /// with it. Pulling one frame per command is what makes the two share the queue at all.
+    ///
+    /// Returns the JPEG bytes exactly as the body produced them. No decode, no re-encode, no
+    /// scaling — the frame is on the wire to the PWA unmodified (SDD §5.7 source 1), and 133 KB
+    /// re-encoded on a Pi several times a second would be the most expensive thing in the
+    /// preview path for no gain.
+    ///
+    /// # Errors
+    /// `Unsupported` if the body reports no preview operation, `NotConnected`, otherwise
+    /// transport-level.
+    fn preview(&mut self) -> Result<Vec<u8>, DeviceError>;
+
+    /// Tells the body to leave live view, if it has a way of being told. Idempotent.
+    ///
+    /// Distinct from simply not calling [`preview`](Self::preview) again, and worth the round
+    /// trip: a mirrorless body left in live view keeps its sensor powered and its rear screen
+    /// lit, which on the battery this driver also reports is the difference between a night's
+    /// imaging and a flat body by midnight. A body with no such control is `Ok(())` — refusing to
+    /// stop something is never the right answer to a stopping command (SDD §5.8.1).
+    ///
+    /// # Errors
+    /// Transport-level failures only.
+    fn stop_preview(&mut self) -> Result<(), DeviceError>;
 }
 
 /// Builds a [`CamOps`] on the thread that will use it.

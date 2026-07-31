@@ -34,6 +34,10 @@ camera:
   default_format: "RAW+JPEG"
   ops_via_cli: []            # operations routed through the `gphoto2` binary instead of the
                              #   crate bindings, e.g. ["bulb"] — populated from the M2 spike
+  live_view_fps: 5           # frames a second to pull off the body (PRF-02 needs >= 5).
+                             #   A ceiling to throttle *down* to, not a target: the R10 sustains
+                             #   58.5 fps at 133 KB/frame (7.8 MB/s), which USB-11 asks us not to
+                             #   spend on a preview. Lower it for a thin VPN link.
   timeouts:                  # operation-class timeouts; a breach declares the thread wedged (REL-03)
     config_seconds: 5        # get/set a setting
     capture_extra_seconds: 30  # added to the exposure duration

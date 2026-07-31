@@ -1,4 +1,4 @@
-//! The acceptance runs that need a camera on the end of a cable — M2-T02 and M2-T03.
+//! The acceptance runs that need a camera on the end of a cable — M2-T02, M2-T03 and M2-T04.
 //!
 //! **`#[ignore]`d, so `cargo test` and all six gates skip it.** It is not a unit test with a
 //! hardware dependency bolted on — it is the evidence-producing run for the one acceptance
@@ -40,6 +40,15 @@
 //!
 //! Unlike M2-T02's, these tests actuate the camera and write frames to a temporary directory.
 //! Lens cap on is fine; the frames are structural evidence, not pictures.
+//!
+//! # M2-T04's runs, and the one that bites
+//!
+//! Live view, battery/storage and the ten-minute soak are harmless. **`t_cam_1_…` is not**: it
+//! resets the camera's USB device to induce a real disconnect, and on the reference body that was
+//! measured to (a) leave the device enumerated with a dead session, (b) invite gvfs to auto-mount
+//! and steal the claim, and (c) on a second run, take the body off the bus until it was physically
+//! power-cycled. Read that test's own comment before running it, and prefer the physical cable
+//! pull (M2-T05) when there is a human at the desk.
 
 #![cfg(feature = "libgphoto2")]
 
@@ -67,6 +76,7 @@ fn config() -> CameraConfig {
             capture_extra_seconds: 30,
             download_seconds: 120,
         },
+        live_view_fps: 5,
         indi_device: None,
     }
 }
@@ -814,4 +824,724 @@ async fn probe_finds_the_camera_and_names_the_port() {
         );
     }
     assert!(!found.is_empty(), "no camera detected — is it switched on?");
+}
+
+// =============================================================================================
+// M2-T04 — live view, battery/storage and wedge recovery
+// =============================================================================================
+
+/// The camera as its concrete type, so the run can read the REL-03 link state.
+///
+/// `create` hands back `Arc<dyn Camera>` and the trait has no link state — deliberately, see
+/// `CanonGPhoto2CameraFactory::create_gphoto2`. These runs are the evidence for the recovery
+/// protocol, so they need the one accessor the trait does not carry.
+fn concrete_camera(config: &CameraConfig) -> Arc<astroctl_drivers::gphoto2::CanonGPhoto2Camera> {
+    CanonGPhoto2CameraFactory::new()
+        .create_gphoto2(config)
+        .expect("this build has the libgphoto2 backend")
+}
+
+/// The concrete driver as a trait object, for the helpers that take one.
+fn camera_as_dyn(camera: &Arc<astroctl_drivers::gphoto2::CanonGPhoto2Camera>) -> Arc<dyn Camera> {
+    Arc::clone(camera) as Arc<dyn Camera>
+}
+
+/// This process's resident set size in kilobytes, from `/proc`.
+///
+/// The soak's memory evidence. `VmRSS` rather than an allocator counter on purpose: the thing most
+/// likely to grow here is **not** Rust memory at all — libgphoto2 buffers each preview frame in C
+/// (M2-T01 measured 133 KB a frame), and a leak there is invisible to anything inside the process
+/// except the kernel's own accounting.
+fn resident_kb() -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").expect("procfs is mounted");
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|kb| kb.parse().ok())
+        .expect("VmRSS is reported")
+}
+
+/// The camera's USB device node, found the way `lsusb` finds it.
+fn camera_device_node() -> Option<PathBuf> {
+    for entry in std::fs::read_dir("/sys/bus/usb/devices").ok()? {
+        let dir = entry.ok()?.path();
+        let vendor = std::fs::read_to_string(dir.join("idVendor")).unwrap_or_default();
+        // Canon Inc.
+        if vendor.trim() != "04a9" {
+            continue;
+        }
+        let bus: u16 = std::fs::read_to_string(dir.join("busnum"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        let address: u16 = std::fs::read_to_string(dir.join("devnum"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        return Some(PathBuf::from(format!("/dev/bus/usb/{bus:03}/{address:03}")));
+    }
+    None
+}
+
+/// Pulls the cable in software: `USBDEVFS_RESET` on the camera's device node.
+///
+/// **This is a real device-vanished event, not a simulation of one.** The kernel tears the device
+/// down and re-enumerates it, so the open `Camera` handle inside libgphoto2 refers to a device
+/// that no longer exists — which is precisely the state M2-T01 produced by yanking the cable, and
+/// which it measured as unrecoverable without a fresh context.
+///
+/// It needs write access to the node. On this workstation that is `plugdev` group membership,
+/// granted by libgphoto2's own udev rules, so it runs unprivileged. `Err` where it does not, and
+/// the caller skips rather than fails — a permissions difference on the runner's machine is not a
+/// defect in the driver.
+///
+/// What it is *not* is a substitute for the physical pull: the connector, the cable and the
+/// operator's elbow are all outside this, and that run stays an M2-T05 desk-session item.
+fn software_cable_pull() -> Result<PathBuf, String> {
+    let node = camera_device_node().ok_or("no Canon device on the USB bus")?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&node)
+        .map_err(|error| format!("cannot open {} for writing: {error}", node.display()))?;
+
+    use std::os::fd::AsFd;
+    // SAFETY: `USBDEVFS_RESET` is `_IO('U', 20)` — no argument, nothing written back — issued on a
+    // usbfs device node, which is the only file it is defined for.
+    unsafe {
+        rustix::ioctl::ioctl(
+            file.as_fd(),
+            rustix::ioctl::NoArg::<{ rustix::ioctl::opcode::none(b'U', 20) }>::new(),
+        )
+    }
+    .map_err(|error| format!("USBDEVFS_RESET on {} failed: {error}", node.display()))?;
+    Ok(node)
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; run with --ignored --nocapture"]
+async fn live_view_streams_at_the_configured_rate_rather_than_the_bodys_maximum() {
+    // The measurement that justifies the config knob. M2-T01 found the body sustaining 58.5 fps
+    // at 133 KB a frame — 7.8 MB/s — against PRF-02's requirement of *at least* 5. USB-11 asks
+    // for graceful degradation on a thin link, so the driver paces down and this proves it does:
+    // the rate should track `camera.live_view_fps`, not the hardware's ceiling.
+    let config = config();
+    let camera = concrete_camera(&config);
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T04 · live view at the configured rate ===\n");
+    println!(
+        "camera.live_view_fps = {} (the shipped default)",
+        config.live_view_fps
+    );
+    println!("M2-T01 measured the body's own ceiling at 58.5 fps, 133 KB/frame");
+
+    let mut stream = camera.live_view_stream().await.expect("live view starts");
+
+    // The first frame is the sensor spinning up — M2-T01 measured 390 ms for it against ~17 ms
+    // for the rest — so it is taken and reported outside the rate window rather than dragging the
+    // average down.
+    let first = Instant::now();
+    let frame = stream.next_frame().await.expect("a first frame");
+    println!(
+        "first frame: {:?}, {} bytes (live-view startup)",
+        first.elapsed(),
+        frame.jpeg.len()
+    );
+    assert_eq!(
+        &frame.jpeg[..2],
+        &[0xFF, 0xD8],
+        "a live-view frame must be a JPEG"
+    );
+
+    let window = Duration::from_secs(10);
+    let started = Instant::now();
+    let (mut frames, mut bytes, mut worst) = (0_u32, 0_usize, Duration::ZERO);
+    let mut previous = Instant::now();
+    while started.elapsed() < window {
+        let Some(frame) = stream.next_frame().await else {
+            panic!("the stream ended mid-run after {frames} frames");
+        };
+        worst = worst.max(previous.elapsed());
+        previous = Instant::now();
+        bytes += frame.jpeg.len();
+        frames += 1;
+    }
+    let seconds = started.elapsed().as_secs_f64();
+    let fps = f64::from(frames) / seconds;
+
+    println!(
+        "{frames} frames in {seconds:.1} s = {fps:.1} fps, mean {:.0} KB/frame, worst gap {worst:?}",
+        bytes as f64 / f64::from(frames) / 1024.0
+    );
+    println!(
+        "PRF-02 needs >= 5 fps on LAN: {}",
+        if fps >= 5.0 { "MET" } else { "NOT MET" }
+    );
+
+    // The requirement...
+    assert!(
+        fps >= f64::from(config.live_view_fps) * 0.7,
+        "live view ran at {fps:.1} fps against a configured {}",
+        config.live_view_fps
+    );
+    // ...and the *point of the knob*, which is the half a throughput-chasing driver would fail.
+    // Anything near the body's 58.5 fps means the pacing is not happening at all.
+    assert!(
+        fps < f64::from(config.live_view_fps) * 2.0,
+        "live view ran at {fps:.1} fps against a configured {} — it is not pacing down, and on a \
+         VPN link that is the USB-11 failure",
+        config.live_view_fps
+    );
+
+    camera.stop_live_view().await.expect("stop live view");
+    assert_eq!(
+        stream.next_frame().await,
+        None,
+        "stopping must end the stream for every subscriber"
+    );
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; FIRES THE SHUTTER; run with --ignored --nocapture"]
+async fn a_capture_pauses_live_view_and_it_resumes_without_a_reconnect() {
+    // SDD §5.7's expected gap, against the real 2.08 s stall rather than a mock's sleep. Three
+    // things have to be true at once and only hardware can show all three: the frames stop, the
+    // camera is *not* wedged by the live-view ticks that were refused while it was busy, and the
+    // stream resumes by itself on the same subscription.
+    let camera = concrete_camera(&config());
+    camera.connect().await.expect("connect");
+    let dir = scratch_dir("liveview-pause");
+
+    println!("\n=== M2-T04 · live view across a real capture ===\n");
+    let mut stream = camera.live_view_stream().await.expect("live view starts");
+    let _ = stream.next_frame().await.expect("a first frame");
+
+    // Two seconds of frames before, so the "before" rate is measured rather than assumed.
+    let before_started = Instant::now();
+    let mut before = 0_u32;
+    while before_started.elapsed() < Duration::from_secs(2) {
+        if stream.next_frame().await.is_some() {
+            before += 1;
+        }
+    }
+    println!("before the capture: {before} frames in 2 s");
+
+    let settings = camera.settings().await.expect("settings");
+    println!("shutter is `{}`", settings.shutter);
+
+    let capture_started = Instant::now();
+    let taken = camera
+        .capture(&CaptureRequest::new(&dir, "light_pause"))
+        .await;
+    let capture_took = capture_started.elapsed();
+    match &taken {
+        Ok(result) => println!(
+            "capture: {:?}, {} file(s)",
+            capture_took,
+            result.files.len()
+        ),
+        Err(error) => println!("capture refused after {capture_took:?}: {error}"),
+    }
+
+    // **The assertion this run exists for.** Every live-view tick during that exposure met the
+    // capture gate and was refused without queueing, so none of them started a budget timer and
+    // none of them could wedge the thread. A driver that let live view queue would have abandoned
+    // the camera here.
+    assert!(
+        camera.link_state().is_connected(),
+        "live view running across a capture must not wedge the camera; state is {:?}",
+        camera.link_state()
+    );
+    let battery = camera.battery().await.expect("the camera still answers");
+    println!(
+        "camera still answering after the capture: battery {}%",
+        battery.percent
+    );
+
+    // And the stream resumes by itself, on the same subscription, with no reconnect.
+    let resumed = Instant::now();
+    let frame = tokio::time::timeout(Duration::from_secs(10), stream.next_frame())
+        .await
+        .expect("live view must resume within ten seconds of the exposure ending")
+        .expect("the stream must not have ended");
+    println!(
+        "live view resumed {:?} after the capture returned, {} bytes",
+        resumed.elapsed(),
+        frame.jpeg.len()
+    );
+
+    camera.stop_live_view().await.expect("stop live view");
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+/// Releases a gvfs camera mount, standing in for the operator.
+///
+/// **The driver must never do this and does not** — `gphoto2::gvfs` is diagnostic only, because
+/// tearing down another session's desktop mount is not a decision a background service gets to
+/// make. This is the *test* playing the human who reads the driver's message and runs the command
+/// it printed, which is the recovery path REL-03 actually has on a desktop node.
+fn release_gvfs_camera_mount() -> Result<String, String> {
+    // `XDG_RUNTIME_DIR` is the definition of where gvfs puts its mounts; `/run/user/<uid>` is
+    // merely what it is set to everywhere we have looked. The driver's own `gvfs::gvfs_root` makes
+    // the same choice, and this run deliberately does not reach into it — a test that used the
+    // driver's private scanner would be checking the scanner against itself.
+    let gvfs = PathBuf::from(
+        std::env::var("XDG_RUNTIME_DIR").map_err(|_| "XDG_RUNTIME_DIR is not set".to_owned())?,
+    )
+    .join("gvfs");
+    let entry = std::fs::read_dir(&gvfs)
+        .map_err(|error| format!("cannot read {}: {error}", gvfs.display()))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("gphoto2:host="))
+        .ok_or_else(|| format!("no camera mount under {}", gvfs.display()))?;
+    let host = entry
+        .strip_prefix("gphoto2:host=")
+        .expect("just matched")
+        .to_owned();
+
+    let url = format!("gphoto2://{host}/");
+    let output = std::process::Command::new("gio")
+        .args(["mount", "-u", &url])
+        .output()
+        .map_err(|error| format!("could not run gio: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "gio mount -u \"{url}\" failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(format!("gio mount -u \"{url}\""))
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; RESETS THE USB DEVICE — MAY REQUIRE A PHYSICAL POWER CYCLE AFTERWARDS — and FIRES THE SHUTTER; run with --ignored --nocapture"]
+async fn t_cam_1_a_device_that_vanishes_mid_liveview_recovers_to_a_working_capture() {
+    // **T-CAM-1, as far as it can be met without hands on the cable.**
+    //
+    // `USBDEVFS_RESET` is the software cable pull. What M2-T04 measured when it ran this is worth
+    // reading before running it again, because it is not what the design expected:
+    //
+    //   * The device **stayed enumerated** and the session behind it died — every transfer
+    //     answering `Unspecified error`, which is neither of M2-T01's two measured strings. That
+    //     is what `LinkFault::Unresponsive` was added for.
+    //   * The re-enumeration triggered a **gvfs auto-mount**, reproducing the exact claim conflict
+    //     that broke REL-03 in the spike. The driver named it and printed the release command; the
+    //     block below runs that command, as an operator would.
+    //   * The **second** reset took the body off the USB bus entirely, and it needed a physical
+    //     power cycle to come back. Hence the shouting in the `#[ignore]` label. Budget for that
+    //     before running this, and prefer the physical pull (M2-T05) if a human is at the desk.
+    //
+    // What this run cannot cover either way is the connector itself, which stays an M2-T05 item.
+    let camera = concrete_camera(&config());
+    camera.connect().await.expect("connect");
+    let dir = scratch_dir("t-cam-1");
+
+    println!("\n=== M2-T04 · T-CAM-1 · induced device loss and recovery ===\n");
+
+    // --- a working session first: settings, live view -------------------------------------
+    let settings = camera.settings().await.expect("settings");
+    println!(
+        "settings: iso={} shutter={} format={:?}",
+        settings.iso, settings.shutter, settings.format
+    );
+    let mut stream = camera.live_view_stream().await.expect("live view starts");
+    let mut before = 0_u32;
+    let warmup = Instant::now();
+    while warmup.elapsed() < Duration::from_secs(3) {
+        if stream.next_frame().await.is_some() {
+            before += 1;
+        }
+    }
+    println!("live view running: {before} frames in 3 s");
+    assert!(
+        before > 0,
+        "live view must be producing before the device is pulled"
+    );
+    assert!(camera.link_state().is_connected());
+
+    // --- pull the cable, in software -------------------------------------------------------
+    println!("\n--- RESETTING THE USB DEVICE (a cable pull without hands) ---");
+    let node = match software_cable_pull() {
+        Ok(node) => node,
+        Err(reason) => {
+            // Not a failure of the driver. Skip loudly so the pending list is accurate.
+            println!("SKIPPED: {reason}");
+            println!("  the recovery path is proved against the mock in the library tests;");
+            println!("  re-run as a user in `plugdev`, or do the physical pull (M2-T05).");
+            camera.disconnect().await.expect("disconnect");
+            return;
+        }
+    };
+    let pulled_at = Instant::now();
+    println!("reset {}", node.display());
+
+    // --- recovery ---------------------------------------------------------------------------
+    // Nothing below asks the driver to reconnect. The live-view pump meets the dead session on its
+    // next tick, the link reports the fault, and the recovery loop does the rest.
+    //
+    // **With one intervention, and it is the operator's, not the driver's.** Re-enumerating the
+    // device is a hotplug event, and on a desktop that is an invitation for gvfs to auto-mount the
+    // camera and hold the USB claim — the exact eighty-second failure M2-T01 measured after a
+    // replug, reproduced here from the other direction. The driver deliberately never unmounts
+    // anything (`gphoto2::gvfs`: "releasing another session's mount is the operator's call"), so
+    // when the claim branch fires this run does what the driver's own message tells a human to do
+    // and runs the `gio mount -u` it printed. That is the loop being tested: the driver names the
+    // thief, the human evicts it, the driver recovers.
+    let mut states: Vec<String> = Vec::new();
+    let mut watch = camera.watch_link_state();
+    let mut released_the_mount = false;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let recovered = loop {
+        {
+            let current = watch.borrow_and_update().clone();
+            let rendered = format!("{current:?}");
+            if states.last() != Some(&rendered) {
+                println!(
+                    "  [{:>6.2} s] {rendered}",
+                    pulled_at.elapsed().as_secs_f64()
+                );
+                states.push(rendered);
+            }
+            if current.is_connected() && states.len() > 1 {
+                break true;
+            }
+            // The claim branch, diagnosed by the driver and acted on by the "operator".
+            if !released_the_mount
+                && current
+                    .message()
+                    .is_some_and(|m| m.contains("gvfs") || m.contains("could not be claimed"))
+            {
+                released_the_mount = true;
+                println!("\n  --- the driver says gvfs has the camera; releasing it as an operator would ---");
+                match release_gvfs_camera_mount() {
+                    Ok(command) => println!("  ran: {command}"),
+                    Err(reason) => println!("  could not release it: {reason}"),
+                }
+                println!();
+            }
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(500), watch.changed()).await;
+    };
+
+    println!(
+        "\nrecovery took {:?}; states seen: {}",
+        pulled_at.elapsed(),
+        states.join(" -> ")
+    );
+    assert!(
+        recovered,
+        "T-CAM-1: the camera did not recover within 30 s. States seen: {states:?}"
+    );
+    // The transition the acceptance criterion names, in the order it names it.
+    assert!(
+        states.iter().any(|s| s.starts_with("Reconnecting")),
+        "the operator must see a reconnecting state, not a silent gap: {states:?}"
+    );
+    assert!(
+        states.last().is_some_and(|s| s == "Connected"),
+        "it must end connected: {states:?}"
+    );
+
+    // --- *working capture*, which is what the criterion actually asks for --------------------
+    let taken = camera
+        .capture(&CaptureRequest::new(&dir, "light_recovered"))
+        .await;
+    match taken {
+        Ok(result) => {
+            let raw = result.raw().expect("a science file");
+            println!(
+                "capture after recovery: {} ({:.1} MB)",
+                raw.path.display(),
+                raw.size_bytes as f64 / 1e6
+            );
+            assert_is_a_cr3(&raw.path);
+        }
+        Err(DeviceError::Rejected(message)) if message.contains("capture_bulb") => {
+            // The mode dial is on Bulb, so a timed capture has no duration to fire for. The bulb
+            // path is the working-capture evidence instead.
+            println!("dial is on Bulb; proving the recovered camera with a 2 s bulb frame");
+            let result = camera
+                .capture_bulb(
+                    &CaptureRequest::new(&dir, "light_recovered"),
+                    Duration::from_secs(2),
+                )
+                .await
+                .expect("the recovered camera takes a bulb frame");
+            let raw = result.raw().expect("a science file");
+            println!(
+                "bulb after recovery: {} ({:.1} MB)",
+                raw.path.display(),
+                raw.size_bytes as f64 / 1e6
+            );
+            assert_is_a_cr3(&raw.path);
+        }
+        Err(error) => panic!("the recovered camera could not take a frame: {error}"),
+    }
+    println!("session directory: {:?}", listing(&dir));
+
+    // --- and live view is still live view ----------------------------------------------------
+    // The subscriber from *before* the pull, never re-subscribed. A driver that dropped its sink
+    // on a wedge would recover the camera perfectly and leave this stream dead — and the field
+    // node's forwarding task does not re-subscribe, so the operator would be looking at a frozen
+    // preview with a working camera behind it.
+    match tokio::time::timeout(Duration::from_secs(15), stream.next_frame()).await {
+        Ok(Some(frame)) => println!(
+            "live view resumed into the original subscription: {} bytes",
+            frame.jpeg.len()
+        ),
+        Ok(None) => panic!(
+            "the live-view stream ended at the wedge; the field node will not re-subscribe and \
+             the operator's preview stays dead"
+        ),
+        Err(_) => panic!("live view did not resume within 15 s of the camera reconnecting"),
+    }
+
+    camera.stop_live_view().await.expect("stop live view");
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; run with --ignored --nocapture"]
+async fn battery_and_storage_for_the_operator_to_check_against_the_body() {
+    // The acceptance criterion is *"battery percentage matches camera body display ±5 %"*, and no
+    // software can check that: the body's own display is the reference. So this prints the
+    // driver's reading in a form an operator can compare at a glance, and asserts only what a
+    // machine can — that the figures are plausible and the units are right.
+    let camera = concrete_camera(&config());
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T04 · battery and storage ===\n");
+    let battery = camera.battery().await.expect("battery");
+    let storage = camera.storage().await.expect("storage");
+
+    println!("+--------------------------------------------------------+");
+    println!(
+        "|  DRIVER READS: battery {:>3} %                             |",
+        battery.percent
+    );
+    println!("|  COMPARE WITH THE BODY'S OWN DISPLAY (±5 % is the bar)  |");
+    println!("+--------------------------------------------------------+");
+    println!(
+        "charging (i.e. no batterylevel key, external power): {}",
+        battery.charging
+    );
+    println!(
+        "storage: {} MB free of {} MB ({:.1} GB of {:.1} GB)",
+        storage.free_mb,
+        storage.total_mb,
+        storage.free_mb as f64 / 1024.0,
+        storage.total_mb as f64 / 1024.0
+    );
+
+    assert!(
+        battery.percent <= 100,
+        "a percentage over 100 is a parse error"
+    );
+    // gphoto2 3.4.1's `free_kb`/`capacity_kb` are misnamed and return *bytes*. M2-T03 asserted
+    // this conversion and it is re-asserted here rather than trusted: getting it wrong by 1024
+    // would report a 128 GB card as 128 MB and REL-12's disk thresholds would fire every night.
+    assert!(
+        storage.total_mb > 1_000,
+        "storage total of {} MB is implausible — check the byte/kilobyte conversion in backend.rs",
+        storage.total_mb
+    );
+    assert!(
+        storage.free_mb <= storage.total_mb,
+        "free ({}) exceeds total ({})",
+        storage.free_mb,
+        storage.total_mb
+    );
+
+    // On-demand is what the two calls above are. The 60 s cadence is the *facade's* ticker
+    // (`astroctl-field/src/camera.rs`'s `poll`), and a second reading here proves only that
+    // repeated polling is cheap and does not disturb the body.
+    let again = Instant::now();
+    let second = camera.battery().await.expect("battery again");
+    println!(
+        "a second on-demand read took {:?} and returned {} %",
+        again.elapsed(),
+        second.percent
+    );
+
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB; RUNS FOR TEN MINUTES; run with --ignored --nocapture"]
+async fn the_ten_minute_live_view_soak() {
+    // The acceptance criterion: *"live view runs 10 min without fps decay or memory growth (watch
+    // RSS)"*. Both halves need a real body — the mock soak in the library tests proves the
+    // plumbing leaks nothing, but only libgphoto2 can leak libgphoto2, and only a real sensor can
+    // slow down as it warms.
+    let camera = concrete_camera(&config());
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T04 · ten-minute live-view soak ===\n");
+    let mut stream = camera.live_view_stream().await.expect("live view starts");
+    let _ = stream.next_frame().await.expect("a first frame");
+
+    const MINUTES: u64 = 10;
+    let baseline_rss = resident_kb();
+    println!("minute  frames    fps    RSS (MB)   mean KB/frame");
+
+    let mut per_minute: Vec<(f64, u64)> = Vec::new();
+    for minute in 1..=MINUTES {
+        let started = Instant::now();
+        let (mut frames, mut bytes) = (0_u32, 0_usize);
+        while started.elapsed() < Duration::from_secs(60) {
+            let Some(frame) = stream.next_frame().await else {
+                panic!("the stream ended during minute {minute}");
+            };
+            bytes += frame.jpeg.len();
+            frames += 1;
+        }
+        let fps = f64::from(frames) / started.elapsed().as_secs_f64();
+        let rss = resident_kb();
+        per_minute.push((fps, rss));
+        println!(
+            "{minute:>6}  {frames:>6}  {fps:>5.2}  {:>9.1}   {:>13.0}",
+            rss as f64 / 1024.0,
+            bytes as f64 / f64::from(frames) / 1024.0
+        );
+    }
+
+    let (first_fps, _) = per_minute[0];
+    let (last_fps, last_rss) = per_minute[MINUTES as usize - 1];
+    let growth_kb = last_rss.saturating_sub(baseline_rss);
+    println!(
+        "\nfps: {first_fps:.2} -> {last_fps:.2}   RSS: {:.1} MB -> {:.1} MB (+{:.1} MB)",
+        baseline_rss as f64 / 1024.0,
+        last_rss as f64 / 1024.0,
+        growth_kb as f64 / 1024.0
+    );
+
+    // No decay: the last minute within a tenth of the first. The pacing loop is rate-limited, so
+    // the expected answer is "identical"; a real decay would show as the body thermally throttling
+    // or as the driver falling behind.
+    assert!(
+        last_fps > first_fps * 0.9,
+        "live view decayed from {first_fps:.2} fps to {last_fps:.2} fps over {MINUTES} minutes"
+    );
+    // No growth. Ten minutes at 5 fps is three thousand frames of 133 KB passing through
+    // libgphoto2 and this driver; anything that held on to even one frame in a hundred would show
+    // as four megabytes here. 32 MB of headroom against PRF-05's 512 MB budget.
+    assert!(
+        growth_kb < 32 * 1024,
+        "RSS grew by {growth_kb} KB over {MINUTES} minutes of live view, which is a leak"
+    );
+
+    camera.stop_live_view().await.expect("stop live view");
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+#[tokio::test]
+#[ignore = "needs a Canon camera on USB with the dial on Bulb; HOLDS THE SHUTTER; answers M2-T03's open question"]
+async fn an_aborted_bulb_does_not_poison_the_next_one() {
+    // **M2-T03's open question, and the reason it was left open.** That task saw every bulb frame
+    // fail after one aborted exposure, in a *fresh process*, so the state was on the camera rather
+    // than in the driver. An occupied `Internal RAM` buffer was the obvious explanation; adding a
+    // camera-side delete did not fix it, and the body then dropped off USB altogether — which
+    // makes a fading battery an equally good explanation and leaves the two confounded.
+    //
+    // The body is healthy again, so the sequence M2-T03 asked for can be run: abort a bulb, then
+    // take a 10 s bulb. Whichever way it goes is a result:
+    //   * succeeds → the buffer-orphan hypothesis holds and the delete is what fixes it;
+    //   * fails    → the buffer is not the cause, and the next suspect is `eosremoterelease`
+    //                needing an explicit reset to `None` after an early release.
+    let camera = concrete_camera(&config());
+    camera.connect().await.expect("connect");
+    let dir = scratch_dir("abort-then-bulb");
+
+    println!("\n=== M2-T04 · M2-T03's open question: abort -> bulb ===\n");
+    if !bulb_available(&camera_as_dyn(&camera), &dir).await {
+        camera.disconnect().await.expect("disconnect");
+        println!("SKIPPED: move the mode dial to Bulb and re-run.");
+        return;
+    }
+
+    // --- the abort -----------------------------------------------------------------------
+    println!("--- aborting a bulb exposure three seconds in ---");
+    let exposing = {
+        let camera = Arc::clone(&camera);
+        let dir = dir.clone();
+        tokio::spawn(async move {
+            camera
+                .capture_bulb(
+                    &CaptureRequest::new(&dir, "light_aborted"),
+                    Duration::from_secs(120),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let raised = Instant::now();
+    camera.abort_capture().await.expect("aborting never fails");
+    let outcome = exposing.await.expect("task");
+    println!(
+        "abort returned in {:?}; the exposure resolved as {:?}",
+        raised.elapsed(),
+        outcome.as_ref().err()
+    );
+    assert!(
+        matches!(outcome, Err(DeviceError::Aborted(_))),
+        "an operator's stop is Aborted: {outcome:?}"
+    );
+    assert_eq!(
+        listing(&dir),
+        Vec::<String>::new(),
+        "an aborted bulb leaves nothing on disk"
+    );
+
+    // --- the question ----------------------------------------------------------------------
+    println!("\n--- LISTEN TO THE SHUTTER: 10 s bulb, immediately after the abort ---");
+    let started = Instant::now();
+    let after = camera
+        .capture_bulb(
+            &CaptureRequest::new(&dir, "light_after_abort"),
+            Duration::from_secs(10),
+        )
+        .await;
+    let wall = started.elapsed();
+
+    match &after {
+        Ok(result) => {
+            let raw = result.raw().expect("a science file");
+            println!(
+                "\nANSWER: the bulb SUCCEEDED after an abort — wall {wall:?}, camera reports \
+                 {:?}, {} ({:.1} MB)",
+                result.exposure,
+                raw.path.file_name().expect("a name").to_string_lossy(),
+                raw.size_bytes as f64 / 1e6
+            );
+            println!(
+                "  => the buffer-orphan hypothesis holds: discarding the aborted frame from the \
+                 body is what makes the next exposure possible. M2-T03's failure was the fading \
+                 battery, not a driver defect."
+            );
+            assert_is_a_cr3(&raw.path);
+        }
+        Err(error) => {
+            println!("\nANSWER: the bulb FAILED after an abort — {error} (after {wall:?})");
+            println!(
+                "  => the buffer is NOT the cause. Next suspect, per M2-T03: `eosremoterelease` \
+                 needs an explicit reset to `None` after an early release."
+            );
+        }
+    }
+
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
 }

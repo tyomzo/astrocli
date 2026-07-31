@@ -145,11 +145,29 @@ pub(crate) fn is_claim_failure(detail: &str) -> bool {
     detail.contains("claim")
 }
 
+/// Whether a libgphoto2 error text is the *device is not there* failure — the other half of the
+/// pair [`is_claim_failure`] documents.
+///
+/// The literal string the spike recorded when the cable was pulled mid-stream is `Could not find
+/// the requested device on the USB port`. Matched on `find the requested device` rather than on
+/// the whole sentence because the port clause varies with the transport and libgphoto2's wording
+/// is not a documented interface — but matched on *more* than one word, unlike
+/// [`is_claim_failure`], because "find" alone appears in unrelated messages ("Could not find the
+/// requested file") and a recovery loop that mistook a missing *file* for a missing *camera*
+/// would tear down a working link.
+///
+/// M2-T04 uses this to branch the recovery loop's operator message: a vanished device is a cable,
+/// a power switch or a flat battery, and telling that operator to go hunting for a gvfs mount
+/// sends them to the wrong place at the worst possible time.
+pub(crate) fn is_device_missing(detail: &str) -> bool {
+    detail.contains("find the requested device")
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use super::{explain_claim_failure, find_camera_mount, is_claim_failure};
+    use super::{explain_claim_failure, find_camera_mount, is_claim_failure, is_device_missing};
 
     /// Builds a directory that looks like a gvfs root with the given mount names in it.
     fn gvfs_root_containing(names: &[&str]) -> tempdir::TempDir {
@@ -241,6 +259,30 @@ mod tests {
         assert!(!is_claim_failure(
             "Could not find the requested device on the USB port"
         ));
+    }
+
+    #[test]
+    fn the_two_usb_failures_are_recognised_as_different_things() {
+        // Both halves of the pair, and both negatives — the recovery loop branches on exactly
+        // this and gives two different operator messages, so a predicate that answered `true` to
+        // both would collapse the branch it exists to make.
+        let gone = "Could not find the requested device on the USB port";
+        let claimed = "Could not claim the USB device";
+
+        assert!(is_device_missing(gone));
+        assert!(!is_device_missing(claimed));
+        assert!(is_claim_failure(claimed));
+        assert!(!is_claim_failure(gone));
+    }
+
+    #[test]
+    fn a_missing_file_is_not_a_missing_camera() {
+        // Why the match is on three words rather than on `find`. libgphoto2 says "Could not find
+        // the requested file" when a download names a frame the body has already overwritten —
+        // a per-frame failure. A recovery loop that read that as a vanished device would abandon
+        // a perfectly healthy camera thread and lose the rest of the sequence with it.
+        assert!(!is_device_missing("Could not find the requested file"));
+        assert!(!is_device_missing("File exists: /tmp/light_1.cr3"));
     }
 
     /// A directory that deletes itself, so these tests leave nothing behind.

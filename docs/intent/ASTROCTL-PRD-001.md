@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.18.0  
+**Version:** 1.19.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -39,6 +39,8 @@
 **Change note (1.17.0):** **§8.1 gains the `server.tls` block**, landed by M0-T09 together with the config struct and the shipped example — the three artefacts 1.16.0 said would move in one change set, and did. `cert_path`, `key_path`, `warn_days_before_expiry`. It ships **commented out**, because absence has to mean plain HTTP: `localhost` development is already a secure context to a browser, and the two-container harness of M0-T08 has no name to certify. A block that is present but unreadable is a startup failure naming the path, never a silent downgrade. SEC-07's expiry now appears in `/api/system/health` as `cert_expires_at`/`cert_days_remaining`, with `status` degrading to `warn` inside the threshold and staying there past it. Operator procedure, with the traps that cost time in practice, is `docs/ops/tls-setup.md`.
 
 **Change note (1.16.0):** **TLS on the operator↔field connection promoted from a "Could" to a Must**, and the reason recorded, after testing the M0-T06 PWA on a real Android phone over the LAN. Chrome gates the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 were unreachable over plain HTTP at any address other than `localhost` — and a VPN does not substitute, because the browser judges the origin and a tunnelled `http://` origin is still insecure. SEC-05 previously called TLS optional while ADD §4 already drew `HTTPS/WSS` on that link; the two now agree. New: SEC-06 (issuance must not require inbound exposure — DNS-01 or an externally issued certificate, so SEC-01 holds), SEC-07 (certificate expiry in `/api/system/health`, because an expired certificate revokes the secure context exactly as a missing one does), SEC-08 (the hostname must resolve through the VPN's DNS, or the UI becomes unreachable precisely when the field node runs standalone — defeating ARC-06). Inter-node TLS stays optional as SEC-09; no browser is involved on that path. §8.1 deliberately does **not** yet carry the `server.tls` block: a drift test holds the PRD schema, the shipped example and the config struct identical, and the config denies unknown fields, so the schema moves in M0-T09 with the implementation rather than ahead of it. An absent block will mean plain HTTP; an unreadable one a startup failure, never a silent downgrade.
+
+**Change note (1.19.0):** **§8.1's `camera` block gains `live_view_fps`**, landed by M2-T04 together with the config struct and the shipped example — the three artefacts a drift test holds identical, so they move in one change set. It exists because PRF-02 and USB-11 pull in opposite directions and the hardware settled the argument: M2-T01 measured the R10 sustaining **58.5 fps** of live view, against a requirement of *at least 5*, and M2-T04 measured the frames at **193 KB** each — so an unpaced preview is roughly 11 MB/s of USB and of link for something no operator can see. USB-11 asks for the opposite (graceful degradation on a thin VPN), so the driver paces itself down and this is the knob. Defaulted rather than required, because `camera` denies unknown fields and every deployed `field-node.yaml` predates the key; validated 1..=60, where the ceiling is the measured hardware rate because a number above it can only mean "as fast as possible", which is what the key exists to prevent being asked for by accident.
 
 **Change note (1.18.0):** STK-35 added — the STK-08 registration transform republished as drift telemetry. Recorded from a design conversation (2026-07-30) about mixing the camera stream into pointing: within-frame correction needs the GDE guide camera and absolute anchoring stays with plate solving, but *between* frames the stacking server is already measuring drift every time it registers a frame, and nobody had scheduled that number's trip back to the operator. Nearly free in 2b — the ingest quality sidecar (M1-T12) already carries per-frame metadata the direction it needs to flow — and the drift direction doubles as a polar-alignment diagnostic.
 
@@ -1138,6 +1140,10 @@ camera:
   default_format: "RAW+JPEG"
   ops_via_cli: []            # operations routed through the `gphoto2` binary instead of the
                              #   crate bindings, e.g. ["bulb"] — populated from the M2 spike
+  live_view_fps: 5           # frames a second to pull off the body (PRF-02 needs >= 5).
+                             #   A ceiling to throttle *down* to, not a target: the R10 sustains
+                             #   58.5 fps at 133 KB/frame (7.8 MB/s), which USB-11 asks us not to
+                             #   spend on a preview. Lower it for a thin VPN link.
   timeouts:                  # operation-class timeouts; a breach declares the thread wedged (REL-03)
     config_seconds: 5        # get/set a setting
     capture_extra_seconds: 30  # added to the exposure duration

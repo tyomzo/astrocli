@@ -25,14 +25,24 @@
 //! *why* the preview stopped — but the queueing itself happens here, and nothing above this
 //! module can change it.
 //!
-//! # The wedge protocol is a stub in M2-T02
+//! # The wedge protocol, and where it stops
 //!
 //! A command that exceeds its budget means the thread is stuck inside a libgphoto2 call. It
 //! cannot be killed — there is no safe way to interrupt a C call mid-flight — so the design
 //! abandons it: drop the channel, let the thread exit when its current call finally returns, and
-//! surface `DeviceError::Timeout`. **What M2-T02 implements is that much and no more.** The
-//! respawn (fresh thread, fresh context, USB reset, `camera.status` reconnecting event) is M2-T04
-//! and is marked `TODO(M2-T04)` at the one place it attaches.
+//! surface `DeviceError::Timeout`.
+//!
+//! **This module detects; it does not recover.** M2-T02 left the respawn as a `TODO(M2-T04)` and
+//! M2-T04 filled it in one module over, in [`super::recovery`] — which is the right seam, because
+//! recovering means sleeping, retrying and rebuilding the link, and [`CameraLink::wedge`] is a
+//! synchronous `&self` method running inside a lock. What crosses the boundary is a
+//! [`LinkFault`], posted once per link.
+//!
+//! Faults are also raised by [`CameraLink::note_device_failure`] for the failures that are not
+//! timeouts at all: a camera that answers "I am not here", one that answers "something else has
+//! me", and — the case M2-T01 never saw because it pulled the cable — one that stays on the bus
+//! and stops answering. See [`LinkFault`] for what distinguishes the three and why the third one
+//! has to be recognised by repetition rather than by its message.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,6 +160,103 @@ impl OpClass {
 /// A reply channel. The camera thread owns the sending half for exactly one command.
 type Reply<T> = oneshot::Sender<Result<T, DeviceError>>;
 
+/// Why a link stopped being usable — the input to [`super::recovery`].
+///
+/// Three variants and not one, because the three need **different operator messages** and two of
+/// them need different handling. M2-T01 established by pulling the cable that libgphoto2's two
+/// USB failures are distinguishable (`spikes/gphoto2-r10/FINDINGS.md` step 7), and collapsing
+/// them here would throw that away at the one moment it is worth most: an operator whose sequence
+/// has stalled needs to know whether to check the cable or to go and find the process that took
+/// their camera.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LinkFault {
+    /// An operation exceeded its budget. The thread is stuck inside a libgphoto2 call, has been
+    /// abandoned, and **must never be joined**.
+    Wedged {
+        /// Which operation ran out of budget, for the operator's message.
+        operation: &'static str,
+        /// The budget it exceeded.
+        budget: Duration,
+    },
+    /// The camera answered that it is no longer on the bus — `Could not find the requested device
+    /// on the USB port`. A cable, a power switch, or a flat battery.
+    ///
+    /// The thread here is *healthy*; it is the camera that left. So this link can be shut down
+    /// properly, joined and all, unlike [`Wedged`](Self::Wedged).
+    DeviceGone {
+        /// libgphoto2's own words, kept because that is what a bug report is searched for.
+        detail: String,
+    },
+    /// The camera is present and something else holds the USB claim — `Could not claim the USB
+    /// device`. On a desktop that is nearly always gvfs, and the recovery loop says so by name.
+    ClaimLost {
+        /// libgphoto2's own words.
+        detail: String,
+    },
+    /// The device is still on the bus and the session behind it is dead.
+    ///
+    /// **The third failure, and M2-T01 did not see it because it pulled the cable.** M2-T04 induced
+    /// a bus-level reset instead (`USBDEVFS_RESET`, which is what a hub glitch or a
+    /// power-management event looks like) and the device *stayed enumerated* — the node was still
+    /// there, `lsusb` still listed it — while every transfer on the open handle failed with
+    /// libgphoto2's `Unspecified error`. Neither of the two measured strings appears, so neither
+    /// of the two branches above fires.
+    ///
+    /// Recognised by **repetition rather than by text**, because there is no text to match: one
+    /// transport failure is a lost frame and tearing the camera down for it would turn a lost
+    /// frame into a lost session, but [`UNRESPONSIVE_STREAK`] of them in a row with nothing
+    /// succeeding in between is a handle that is not coming back.
+    Unresponsive {
+        /// libgphoto2's own words for the last of them.
+        detail: String,
+        /// How many consecutive failures established it.
+        after: u32,
+    },
+}
+
+impl LinkFault {
+    /// Whether the thread must be abandoned rather than shut down.
+    ///
+    /// Only a wedge earns that: shutting down joins, and joining a thread that is inside a C call
+    /// with no cancellation means waiting for a call that may never return — with the recovery
+    /// loop, and therefore the whole camera, parked behind it.
+    pub(crate) fn abandons_the_thread(&self) -> bool {
+        matches!(self, Self::Wedged { .. })
+    }
+}
+
+/// How many consecutive transport failures mean the session is dead rather than unlucky.
+///
+/// Three. At the shipped 5 fps live-view rate that is about six hundred milliseconds, which is
+/// prompt against T-CAM-1's thirty-second window and long enough that a single bad transfer — a
+/// frame lost to a marginal cable, which happens — costs a frame rather than the camera.
+///
+/// The counter is reset by **any** success, so this is a *streak* and not a total: a link that
+/// fails one transfer an hour never reaches it, and a link that has stopped answering reaches it
+/// immediately.
+pub(crate) const UNRESPONSIVE_STREAK: u32 = 3;
+
+/// Where a link reports that it has failed.
+///
+/// Unbounded, and that is a deliberate choice rather than laziness: a fault is a rare event that
+/// the recovery loop *must* see, and the bounded alternative would have a sender in a synchronous
+/// context — `wedge` runs inside a lock, from a `&self` method with no runtime to await on —
+/// choosing between blocking there and dropping the only notification that a camera has died.
+pub(crate) type FaultSink = tokio::sync::mpsc::UnboundedSender<LinkFault>;
+
+/// The receiving half, held by the recovery loop.
+pub(crate) type FaultSource = tokio::sync::mpsc::UnboundedReceiver<LinkFault>;
+
+/// A fault channel.
+///
+/// Compiled where there is a driver to own one, which is the `libgphoto2` build and the tests —
+/// the same gate `CanonGPhoto2Camera::new` carries, and for the same reason: a default build has
+/// the wedge protocol and the recovery loop and nothing to point them at.
+#[cfg(any(test, feature = "libgphoto2"))]
+pub(crate) fn fault_channel() -> (FaultSink, FaultSource) {
+    tokio::sync::mpsc::unbounded_channel()
+}
+
 /// One unit of work for the camera thread (SDD §5.3.1's `CamCmd`).
 ///
 /// Each variant carries its own reply channel rather than the enum having one, because the reply
@@ -226,7 +333,16 @@ pub(crate) enum CamCmd {
         /// Where the outcome goes.
         reply: Reply<()>,
     },
-    // M2-T04: LiveViewStart, LiveViewStop.
+    /// Pull one live-view frame.
+    ///
+    /// **One frame, not a stream.** SDD §5.3.1 sketched `LiveViewStart`/`LiveViewStop` with the
+    /// thread pushing frames into a watch channel by itself; that cannot work here, because a
+    /// thread inside its own preview loop is a thread not reading its command channel, and every
+    /// capture would then queue behind live view rather than interleaving with it. One command
+    /// per frame keeps the single queue honest — see [`super::ops::CamOps::preview`].
+    Preview(Reply<Vec<u8>>),
+    /// Ask the body to leave live view.
+    StopPreview(Reply<()>),
 }
 
 impl CamCmd {
@@ -245,6 +361,8 @@ impl CamCmd {
             Self::Download { .. } => "download",
             Self::Abort(_) => "abort",
             Self::Sweep { .. } => "sweep",
+            Self::Preview(_) => "preview",
+            Self::StopPreview(_) => "stop_preview",
         }
     }
 }
@@ -274,6 +392,22 @@ pub(crate) struct CameraLink {
     /// lock that sends. A flag held one layer up would be readable but not *atomic with the
     /// send*, which is the property that matters.
     capturing: AtomicBool,
+    /// Where this link tells the recovery loop that it has died.
+    faults: FaultSink,
+    /// Consecutive transport failures with no success in between.
+    ///
+    /// The evidence for [`LinkFault::Unresponsive`] — a dead session that libgphoto2 describes
+    /// only as `Unspecified error`, so repetition is the only signal there is.
+    failure_streak: std::sync::atomic::AtomicU32,
+    /// Whether this link has already reported a fault.
+    ///
+    /// **One report per link, not one per failed command.** A camera that has been unplugged
+    /// fails every operation issued to it, and a live-view loop at 5 fps would otherwise post
+    /// five faults a second at a recovery loop that decided what to do about the first one. This
+    /// is the same edge-triggering the rest of the system applies to alerts (§5.10.4), enforced
+    /// where the edge actually is: a link reports once, and a *new* link is what a new report
+    /// means.
+    reported: AtomicBool,
 }
 
 /// Holds the imaging path for one exposure, and releases it however the exposure ends.
@@ -302,6 +436,7 @@ impl CameraLink {
     pub(crate) fn spawn(
         factory: Arc<dyn CamOpsFactory>,
         timeouts: CameraTimeouts,
+        faults: FaultSink,
     ) -> Result<Self, DeviceError> {
         let (sender, receiver) = mpsc::channel();
         let abort = Arc::new(AbortSignal::default());
@@ -319,6 +454,9 @@ impl CameraLink {
             timeouts,
             abort,
             capturing: AtomicBool::new(false),
+            faults,
+            failure_streak: std::sync::atomic::AtomicU32::new(0),
+            reported: AtomicBool::new(false),
         })
     }
 
@@ -434,7 +572,16 @@ impl CameraLink {
         }
 
         match tokio::time::timeout(budget, reply_rx).await {
-            Ok(Ok(result)) => result,
+            Ok(Ok(result)) => {
+                match &result {
+                    // Any success ends the streak. That is what makes
+                    // [`LinkFault::Unresponsive`] a *streak* rather than a running total: a link
+                    // that loses one transfer an hour never reaches the threshold.
+                    Ok(_) => self.failure_streak.store(0, Ordering::SeqCst),
+                    Err(error) => self.note_device_failure(operation, error),
+                }
+                result
+            }
             // The reply channel was dropped without an answer: the thread died between accepting
             // the command and replying. Reported as transport rather than timeout because the
             // caller waited no time at all and retrying is pointless until a reconnect.
@@ -448,6 +595,75 @@ impl CameraLink {
         }
     }
 
+    /// Notices, in the one place every reply passes through, that the camera has gone.
+    ///
+    /// **Centralised rather than per call site**, because the alternative is every caller in the
+    /// driver remembering to classify its own transport errors — and the one that forgets is the
+    /// one where a cable is pulled and nothing recovers. Every command's reply comes back through
+    /// [`send_and_wait`](Self::send_and_wait); this is that funnel.
+    ///
+    /// **`open` is exempt, and that exemption is load-bearing.** A failed open is how *connecting*
+    /// reports that there is no camera, and it is also how the recovery loop's own attempts fail.
+    /// Treating either as a fresh fault would mean an operator's `connect` with the cable out
+    /// silently starting a background reconnect nobody asked for, and — worse — the recovery loop
+    /// feeding its own failures back to itself. The recovery loop reads its attempts' return
+    /// values directly; it does not need to be told about them twice.
+    fn note_device_failure(&self, operation: &str, error: &DeviceError) {
+        if operation == "open" {
+            return;
+        }
+        let DeviceError::Transport(detail) = error else {
+            // Not a transport failure at all — a `Rejected` body, a `Protocol` disagreement, a
+            // `Busy` refusal. None of those says anything about the link, and none of them should
+            // count towards the streak either: a camera that refuses a hundred bad ISO writes is
+            // a camera that is answering.
+            return;
+        };
+        // The two measured texts are definitive, so they fire on the first occurrence. The order
+        // matters only in that they are exclusive; `is_device_missing` is checked first because it
+        // is the more specific of the two.
+        let fault = if gvfs::is_device_missing(detail) {
+            LinkFault::DeviceGone {
+                detail: detail.clone(),
+            }
+        } else if gvfs::is_claim_failure(detail) {
+            LinkFault::ClaimLost {
+                detail: detail.clone(),
+            }
+        } else {
+            // **Everything else is judged by repetition, because there is no text to judge by.**
+            // One transport failure is a lost frame — a download that could not be written, a
+            // marginal cable dropping a transfer — and tearing the camera thread down for it
+            // would turn a lost frame into a lost session.
+            //
+            // A *streak* of them is different, and M2-T04 measured what it looks like: after a
+            // bus-level reset the R10 stayed enumerated while every transfer failed with
+            // libgphoto2's `Unspecified error`, forever. Neither branch above fires on that text
+            // and the session never comes back on its own.
+            let streak = self.failure_streak.fetch_add(1, Ordering::SeqCst) + 1;
+            if streak < UNRESPONSIVE_STREAK {
+                return;
+            }
+            LinkFault::Unresponsive {
+                detail: detail.clone(),
+                after: streak,
+            }
+        };
+        self.report(fault);
+    }
+
+    /// Posts a fault to the recovery loop, at most once for this link.
+    ///
+    /// A send failure means the recovery loop is gone — the driver is being dropped — which is
+    /// not something to log about at a level anyone reads.
+    fn report(&self, fault: LinkFault) {
+        if self.reported.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        tracing::warn!(?fault, "the camera link has failed; asking for recovery");
+        let _ = self.faults.send(fault);
+    }
+
     /// Abandons the camera thread after a timeout — SDD §5.3.1's wedge protocol.
     ///
     /// The thread is *not* joined and *not* killed. It is stuck inside a libgphoto2 call and
@@ -455,7 +671,7 @@ impl CameraLink {
     /// it discover, when the call eventually returns, that its channel is gone. It then exits and
     /// drops the context — releasing the USB claim on the thread that took it, which is the only
     /// thread allowed to.
-    fn wedge(&self, operation: &str, budget: Duration) {
+    fn wedge(&self, operation: &'static str, budget: Duration) {
         // Dropping the sole sender is the signal. Taking the handle too makes the abandonment
         // explicit: nothing will ever join this thread.
         let dropped = self
@@ -477,12 +693,18 @@ impl CameraLink {
             abandoned = abandoned.is_some(),
             "the camera did not answer within its budget; abandoning the camera thread"
         );
-        // TODO(M2-T04): this is where recovery attaches. SDD §5.3.1 specifies a fresh thread and
-        // context plus an attempted USB reset, surfaced as a `camera.status` reconnecting event;
-        // M2-T01 measured that a fresh context reconnects in 108 ms while the *old* handle never
-        // recovers (five retries, all failed), so respawning is the only path and there is no
-        // cheaper one to try first. Until that lands, the driver reports itself disconnected and
-        // the operator reconnects.
+
+        // M2-T02 left this as `TODO(M2-T04)`; this is that. The recovery loop
+        // ([`super::recovery`]) takes it from here: fresh thread, fresh context, and — only if
+        // those repeatedly fail on a device that says it is gone — a USB reset. M2-T01 measured
+        // a fresh context reconnecting in 108 ms while the *old* handle never recovers (five
+        // retries, all failed), which is why respawning is the first rung and not the last.
+        //
+        // Reported rather than performed here on purpose. This method is `&self`, synchronous,
+        // and runs from inside a lock; recovery needs to sleep, retry and rebuild the link. The
+        // separation is also what keeps this function what it has always been — the one place
+        // that abandons a thread — rather than the place that owns the whole protocol.
+        self.report(LinkFault::Wedged { operation, budget });
     }
 
     /// Stops the camera thread and waits for the context to be released.
@@ -653,6 +875,17 @@ fn dispatch(
             download::sweep(&dir, &stem, &files);
             let _ = reply.send(Ok(()));
         }
+        CamCmd::Preview(reply) => answer!(reply, |ops| ops.preview()),
+        CamCmd::StopPreview(reply) => {
+            // Not `answer!`, for the same reason `Abort` is not: leaving live view on a camera
+            // that is not open is `Ok(())`. A closed camera is the strongest possible guarantee
+            // that its sensor is not being held awake.
+            let result = match ops.as_mut() {
+                Some(ops) => ops.stop_preview(),
+                None => Ok(()),
+            };
+            let _ = reply.send(result);
+        }
     }
 }
 
@@ -707,6 +940,18 @@ mod tests {
     use super::super::mock::MockState;
     use super::{CamCmd, CameraLink, OpClass, CAMERA_THREAD_NAME};
 
+    /// A fault sink nobody reads.
+    ///
+    /// These tests are about the thread, the queue and the budgets; the recovery loop that
+    /// consumes faults has its own tests in [`super::super::recovery`]. Leaking the receiver is
+    /// deliberate — dropping it would make every `report` fail silently, and a test that asserts
+    /// on a wedge would then be asserting against a channel that was already closed.
+    fn discard_faults() -> super::FaultSink {
+        let (sink, source) = super::fault_channel();
+        std::mem::forget(source);
+        sink
+    }
+
     /// The example config's budgets (`config/field-node.example.yaml`).
     fn timeouts() -> CameraTimeouts {
         CameraTimeouts {
@@ -723,7 +968,7 @@ mod tests {
         // each `CamOps` method, so this checks where the call *actually ran* — a span field
         // alone would only prove what the driver believes.
         let (state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         link.request(OpClass::Connect, CamCmd::Open)
             .await
@@ -757,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn one_context_means_one_queue_serviced_in_order() {
         let (state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         link.request(OpClass::Connect, CamCmd::Open)
             .await
@@ -776,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn a_command_before_open_is_not_connected_rather_than_a_panic() {
         let (_state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         let result = link.request(OpClass::Config, CamCmd::GetSettings).await;
         assert!(
@@ -816,7 +1061,7 @@ mod tests {
         // which is exactly the state the wedge protocol exists for.
         state.block_calls_for(Duration::from_secs(3));
 
-        let link = CameraLink::spawn(factory, one_second).expect("spawns");
+        let link = CameraLink::spawn(factory, one_second, discard_faults()).expect("spawns");
         let result = link.request(OpClass::Connect, CamCmd::Open).await;
 
         match result {
@@ -839,7 +1084,7 @@ mod tests {
         // there. A context dropped on another thread is libgphoto2 being used the one way it
         // forbids, and it would show up as an occasional crash rather than a test failure.
         let (state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
         link.request(OpClass::Connect, CamCmd::Open)
             .await
             .expect("opens");
@@ -858,7 +1103,7 @@ mod tests {
     async fn dropping_the_link_releases_the_camera_even_without_a_disconnect() {
         let (state, factory) = MockState::new();
         {
-            let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+            let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
             link.request(OpClass::Connect, CamCmd::Open)
                 .await
                 .expect("opens");
@@ -872,7 +1117,7 @@ mod tests {
     async fn a_failed_open_is_diagnosed_before_the_caller_ever_sees_it() {
         let (state, factory) = MockState::new();
         state.fail_open_with("Could not claim the USB device");
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         let error = link
             .request(OpClass::Connect, CamCmd::Open)
@@ -903,7 +1148,7 @@ mod tests {
         // place at the worst time.
         let (state, factory) = MockState::new();
         state.fail_open_with("Could not find the requested device on the USB port");
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         let error = link
             .request(OpClass::Connect, CamCmd::Open)
@@ -925,7 +1170,7 @@ mod tests {
         // old context in place to be retried.
         let (state, factory) = MockState::new();
         state.fail_open_with("Could not claim the USB device");
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         link.request(OpClass::Connect, CamCmd::Open)
             .await
@@ -946,7 +1191,7 @@ mod tests {
     async fn the_link_survives_a_close_and_can_be_opened_again() {
         // `Close` releases the camera but keeps the thread, so a reconnect costs no respawn.
         let (state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
 
         link.request(OpClass::Connect, CamCmd::Open)
             .await
@@ -969,7 +1214,7 @@ mod tests {
     #[tokio::test]
     async fn closing_a_camera_that_is_not_open_is_ok() {
         let (_state, factory) = MockState::new();
-        let link = CameraLink::spawn(factory, timeouts()).expect("spawns");
+        let link = CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns");
         link.request(OpClass::Config, CamCmd::Close)
             .await
             .expect("closing nothing is not an error");
@@ -980,7 +1225,8 @@ mod tests {
         // PRF-04's structural claim: concurrent callers do not get concurrent contexts. Four
         // tasks, one thread, four calls.
         let (state, factory) = MockState::new();
-        let link = Arc::new(CameraLink::spawn(factory, timeouts()).expect("spawns"));
+        let link =
+            Arc::new(CameraLink::spawn(factory, timeouts(), discard_faults()).expect("spawns"));
         link.request(OpClass::Connect, CamCmd::Open)
             .await
             .expect("opens");

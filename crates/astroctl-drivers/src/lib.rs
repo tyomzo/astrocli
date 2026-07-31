@@ -8,7 +8,7 @@
 //! | Module | Contents | Feature | Task |
 //! |--------|----------|---------|------|
 //! | [`simulator`] | `SimulatorMount`, `SimulatorCamera`, `SimulatorGuideCamera` and their fault injection (HAL-11) | `simulator` | M1-T02, M1-T06 |
-//! | [`gphoto2`] | `CanonGPhoto2Camera` — camera thread, command channel, timeouts, gvfs diagnosis | `gphoto2` | M2-T02 |
+//! | [`gphoto2`] | `CanonGPhoto2Camera` — camera thread, command channel, timeouts, gvfs diagnosis, live view and the REL-03 recovery loop | `gphoto2` | M2-T02/T03/T04 |
 //! | `gphoto2::backend` | the libgphoto2 calls themselves | `libgphoto2` | M2-T02 |
 //!
 //! The Sky-Watcher driver (M3-T02) joins them here.

@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.25.0
+**Version:** 1.26.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.18.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.19.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -192,6 +192,41 @@ body**: with `capturetarget=Internal RAM` the transfer happens inside `capture_i
 is no observable moment between the two, and on the bulb path the facade's timer is already exact.
 That verdict is conditional on the capture target and is worth re-asking if it ever changes.
 Landed by M2-T03.
+
+**Change note (1.26.0):** §5.3.1's recovery half is built, and building it found **a third USB
+failure the design did not have a branch for**. §5.3.1 described two, on M2-T01's cable-pull
+evidence: the device is gone (`Could not find the requested device on the USB port`) or something
+else holds it (`Could not claim the USB device`). M2-T04 induced a *bus-level* reset instead —
+which is what a hub glitch or a power-management event looks like — and the R10 **stayed
+enumerated while its session died**, every transfer answering `Unspecified error`. Neither text
+branch fires on that, so a driver that only matched the two strings would log skipped frames all
+night beside a camera it could rebuild in 108 ms. The third case is recognised by **repetition
+rather than by text** — three consecutive transport failures with no success between them — and
+the same run exposed a related lie one layer down: `read_settings` on that dead session returned
+`Ok` with every field empty, because the backend deliberately maps a missing config key to an
+empty value (correct for `aperture` behind a manual lens, catastrophic when *every* key is
+missing). An empty success is worse than a failure; the backend now refuses when a body reports no
+ISO, no shutter and no format at all. **The USB reset §5.3.1 asks for is kept, and demoted to
+nearly unreachable.** It is attempted only after two failed rebuilds *and* only where libgphoto2
+says the device is absent — never on the claim branch, because re-enumeration is a hotplug event
+and hotplug is precisely what invites gvfs to take the camera (observed live: the reset produced
+the claim conflict, and the driver's own message named the mount and printed the `gio mount -u`
+that released it). M2-T04 also measured the reset taking the body off the bus until it was
+physically power-cycled, which is a second independent sighting of the drop-off M2-T03 had to
+leave confounded with a flat battery. **Live view is paced above the command channel, not inside
+the thread**: §5.3.1's sketched `LiveViewStart`/`LiveViewStop` had the thread pushing frames into
+a watch channel itself, and a thread inside its own preview loop is a thread not reading its
+command channel — capture would queue behind live view and `stop_live_view` could never arrive.
+One command per frame keeps the single queue honest, and every frame goes through M2-T03's
+capture gate, which is what makes §5.7's expected pause and §5.3.1's wedge detector coexist: a
+refused tick starts no budget timer, so a paused preview *cannot* wedge the camera, while a
+genuinely silent one is not refused and times out as designed. The pump also **outlives its
+link** — dropping the `FrameSink` on a wedge would end every subscriber's stream and the field
+node's forwarding task does not re-subscribe, so the camera would recover perfectly behind a dead
+preview. **The `reconnecting` state §5.3.1 requires has no wire representation**: §4.3's
+`CameraStatus` is a two-state boolean, and adding a third is a frozen-contract change rather than
+something an implementation task invents, so the driver exposes the state and the facade's
+publication of it is outstanding — recorded in the M2-T04 task file. Landed by M2-T04.
 
 ---
 
@@ -717,7 +752,21 @@ Every command has an operation-class timeout (config get/set 5 s; capture = expo
 
 4. **A feature flag per driver family is the wrong axis; the axis is the system library.** §5.1's "registration is static (inventory of built-in drivers, feature-gated)" holds, but `libgphoto2_sys` runs `pkg-config` **and `bindgen`** in its build script, so a machine without `libgphoto2-dev` cannot compile the crate at all — it does not merely fail to link. One feature covering the whole camera driver would therefore have to be off by default, and `scripts/check.sh` builds default features only, so the thread model, the channel, the timeouts and the diagnosis would all be invisible to every gate. The driver splits: the parts that need no C library are on by default and gated; the binding is a second, non-default feature the deployable enables. **M3 inherits the same split** — `serialport` needs libudev, and its driver will need the same boundary in the same place.
 
-5. **`DeviceError` cannot say "this driver does not implement that yet."** §4.2's nine variants are about the *device*: `Unsupported` claims the body cannot do it, which contradicts the capability report two lines away, and `Rejected` blames the operator's request. M2-T02 uses `Protocol` — `DEVICE_PROTOCOL`/502, "your request was fine, the thing behind the API could not serve it" — with a message naming the task that will implement the operation. This is not worth a change to a frozen enum for a state that exists between M2-T02 and M2-T04, but it is recorded so the choice is made once rather than per operation.
+5. **`DeviceError` cannot say "this driver does not implement that yet."** §4.2's nine variants are about the *device*: `Unsupported` claims the body cannot do it, which contradicts the capability report two lines away, and `Rejected` blames the operator's request. M2-T02 uses `Protocol` — `DEVICE_PROTOCOL`/502, "your request was fine, the thing behind the API could not serve it" — with a message naming the task that will implement the operation. This is not worth a change to a frozen enum for a state that exists between M2-T02 and M2-T04, but it is recorded so the choice is made once rather than per operation. *(M2-T04 closed that state: every `Camera` operation is implemented and the placeholder is deleted.)*
+
+**Obligations found by implementing the recovery half (M2-T04).** The paragraph above ends "a fresh thread + context is spawned, and a USB reset is attempted — this is the REL-03 recovery path, surfaced as a `camera.status` reconnecting event". Building it found six things wrong or missing in that sentence:
+
+1. **There are three USB failures, not two.** M2-T01 established the pair by pulling the cable: the device is gone (`Could not find the requested device on the USB port`) or something else holds it (`Could not claim the USB device`). M2-T04 induced a *bus-level* reset instead — a hub glitch, a power-management event — and the R10 **stayed enumerated while its session died**, every transfer answering libgphoto2's `Unspecified error`. Neither branch fires on that text, and nothing recovers on its own. The third case cannot be recognised by its message because it has no distinctive message; it is recognised by **repetition** — three consecutive transport failures with no success between them, the counter reset by any success. One failure stays a lost frame, because tearing the camera down for a single bad transfer would turn a lost frame into a lost session.
+
+2. **A success carrying nothing is worse than a failure.** On that same dead session `read_settings` returned `Ok` with `iso=""`, `shutter=""`, `format=""` — because the backend maps a missing config key to an empty value, which is *correct* for `aperture` behind a fully manual lens and catastrophic when every key is missing. The facade would have published an empty settings panel as the camera's state. The backend now refuses when a body reports no ISO, no shutter and no image format at all; `aperture` is excluded from that test for the reason it is allowed to be empty.
+
+3. **The USB reset must be nearly unreachable, and the reason is measured.** It is attempted only after two failed rebuilds *and* only where libgphoto2 says the device is absent — on which branch the sysfs scan almost always finds nothing to reset, which is the correct outcome. It is **never** attempted on the claim branch, because re-enumeration is a hotplug event and hotplug is exactly what invites gvfs to take the camera; that is not theoretical, the reset produced the claim conflict live and the driver's own diagnosis named the mount and printed the `gio mount -u` that released it. M2-T04 also measured a reset taking the body off the bus until it was physically power-cycled — a second, independent sighting of the drop-off M2-T03 had to leave confounded with a flat battery. The mechanism chosen is `USBDEVFS_RESET` on the device node, because it is the only one of the three candidates that a non-root process can perform (`authorized` and unbind/rebind both need root unconditionally).
+
+4. **Live view cannot be a loop on the camera thread**, which is what the `CamCmd` sketch above implies with `LiveViewStart`/`LiveViewStop` "when active, thread pushes JPEGs to a watch channel". A thread inside its own preview loop is a thread not reading its command channel: capture would queue behind live view, and `stop_live_view` — the one command that must reach a busy thread — could never arrive at all. One command per frame, paced above the channel, keeps the single queue honest.
+
+5. **The capture gate is what makes §5.7's pause and this section's wedge detector coexist**, and it is structural rather than a heuristic. Every live-view tick asks through M2-T03's `request_unless_capturing`, so during an exposure it is refused *before the send*, under the sender lock: no command is queued and **no budget timer starts**, therefore a paused preview cannot wedge the camera. A genuinely silent camera is not refused, occupies the thread and times out exactly as designed. There is no rule saying "ignore live-view timeouts" because there is no timeout to ignore.
+
+6. **The `reconnecting` state this section requires has no wire representation.** §4.3's `CameraStatus` is `{connected, battery_pct, charging, storage_free_mb}` — a two-state boolean with no room for it, and adding a field is a frozen-contract change rather than something an implementation task invents. The driver therefore *drives* the state and does not publish it (drivers are silent by design), exposing it as `CanonGPhoto2Camera::link_state` and a `watch` subscription. Publishing it is outstanding and is recorded in the M2-T04 task file; until it lands, the acceptance criterion's "UI shows reconnecting→connected" is met inside the driver and not on the wire.
 
 #### 5.3.2 Capture flow (CAM-03/04, REL-05)
 
