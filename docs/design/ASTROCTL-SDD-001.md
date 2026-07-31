@@ -767,6 +767,46 @@ instant-stop advantage is real only at high slew rates where momentum exists. St
 therefore scales with rate — the same 16 ms becomes ~1,370 counts at 817× sidereal — which is the
 actual argument for the priority lane. measured budget from API handler to bytes-on-wire ≤ 20 ms (test T-SER-3, §9).
 
+**Four corrections, found by building M3-T02 against this section.**
+
+**1. "The in-flight normal request completes" has a hole, and §5.4 walks straight into it.** The
+sentence is right while the mount is answering: the measured round trip is 14.7–17.2 ms, so an
+emergency stop behind a *healthy* normal command lands inside the 20 ms budget. It is wrong when
+the mount has gone quiet — and that is precisely the case §5.4 legislates for, since the watchdog
+issues its priority-lane stop *because* the link went silent. Taken literally, that stop queues
+behind the full 500 ms timeout of the very poll that detected the loss. At the measured 835×
+sidereal cruise, 500 ms is ~43,700 counts: **1.7° of unwanted slew, on the one path whose purpose
+is to stop one.** The rule is therefore amended to: *an in-flight normal exchange gets one round
+trip (18 ms, just past the observed 17.2 ms maximum), and after that the priority lane may take
+the cable.* A healthy exchange never notices; a stalled one is abandoned, its request is retried
+by its own caller, and the emergency stop's worst case becomes one round trip instead of one
+timeout. The grace is measured **from the start of the exchange, not from the stop's arrival** —
+counted from arrival it would have to be a whole round trip (or it would abandon healthy
+exchanges) and would then let a stop arriving one millisecond into a stall wait a round trip *plus*
+that millisecond, past the budget it exists to protect.
+
+**2. An abandoned request is not a link failure, and a refusal is not one either.** Both would
+otherwise be counted as heartbeat misses and both would be wrong. Losing the cable to an emergency
+stop says nothing about whether the cable works, so it is reported as `DeviceError::Busy` and
+retried. `!1` means the mount received the frame, understood it and declined it — the link is in
+perfect health, retrying produces the same `!1` forever, and counting it would report a dead link
+over a live one. That distinction is the reason M3-T01 made `MountError` and `ProtocolError`
+separate types, and this is the section that consumes it.
+
+**3. "The 1 Hz position poll doubles as the heartbeat" under-specifies the counter.** M3-T02 counts
+**every** completed request, not only the poll: a goto costs eight frames and is the moment link
+loss matters most, so a counter that watched only the 1 Hz poll would look away at the worst time.
+The threshold's hardware validation (2000 exchanges, zero failures) is a statement about
+*exchanges* and carries over unchanged. The count also has to live below the poll loop rather than
+in it, because a reply whose framing is intact and whose payload is the wrong width is a miss and
+only `Command::decode` can say so.
+
+**4. The 20 ms budget spans two measurements, and T-SER-3 owns one of them.** "API handler to
+bytes-on-wire" crosses the facade, the safety layer and the driver; the serial link can only
+measure from *its own* entry to the wire. T-SER-3 measures that half — 1000 injections under
+54.5 cmd/s of normal load gave p50 9 ms, p99 15 ms, max 15 ms — and the handler half belongs to
+whoever wires the e-stop route to it (M3-T04, §5.8.2).
+
 ### 5.3 Canon gPhoto2 camera driver (`astroctl-drivers::gphoto2`)
 
 #### 5.3.1 Thread model

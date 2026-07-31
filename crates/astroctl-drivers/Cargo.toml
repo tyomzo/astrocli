@@ -37,20 +37,31 @@ publish.workspace = true
 # What is untested on CI is therefore exactly the PTP call layer, which no CI machine could
 # exercise anyway for want of a camera. Everything above it runs against a mock `CamOps`.
 #
-# `skywatcher` is the third family and arrives feature-shaped like the other two, but M3-T01
-# gives it a body that needs *nothing*: the codec is pure functions over bytes and strings, no
-# serial port, no runtime, no clock. That is deliberate rather than incidental — a protocol layer
-# with an I/O dependency cannot be tested exhaustively, and T-COD-1 walks the entire 24-bit value
-# domain. The transport lands in M3-T02 and will add `serialport` and `tokio` here; until then
-# `thiserror` is the only external dependency it pulls, and
-# `cargo tree -p astroctl-drivers -e normal --no-default-features -F skywatcher --depth 1`
-# is what keeps that claim honest rather than aspirational.
+# `skywatcher` is the third family and takes the same shape for the same reason. M3-T01 gave it a
+# body that needed *nothing* — the codec is pure functions over bytes and strings — and M3-T02 has
+# now added the transport above it, which is where the split appears:
+#
+#   `skywatcher` the codec **and** the serial task: two lanes, the biased drain, per-request
+#                timeout and retry, the heartbeat counter, the exchange loop, the write gate, the
+#                VID/PID table and the candidate ranking. Every one of those is pure Rust over a
+#                `Wire` trait, **on by default**, and tested against the in-crate mock port.
+#   `serialport` the one `Wire` implementation that owns a real fd. Needs `libudev-dev` at build
+#                time (see the workspace manifest), so it is **off by default** and the field node
+#                enables it — the same rule ADD §5.6 applies to `libgphoto2`.
+#
+# What is untested on CI is therefore exactly the fd layer, which needs a mount. Note that this
+# moved `skywatcher` from "no external dependency at all" to `tokio` + `async-trait` + `tracing`:
+# a request/response queue is a runtime object and cannot be otherwise. The codec's own claim
+# survives unchanged and is still checkable, now by asking about the codec rather than the family:
+# `cargo tree -p astroctl-drivers -e normal --no-default-features -F skywatcher --depth 1` lists
+# the transport's dependencies, and nothing under `src/skywatcher/codec/` imports any of them.
 [features]
 default = ["simulator", "gphoto2", "skywatcher"]
 simulator = ["dep:async-trait", "dep:chrono", "dep:jpeg-encoder", "dep:tokio"]
 gphoto2 = ["dep:async-trait", "dep:chrono", "dep:rustix", "dep:tokio", "dep:tracing"]
 libgphoto2 = ["gphoto2", "dep:gphoto2"]
-skywatcher = ["dep:thiserror"]
+skywatcher = ["dep:async-trait", "dep:thiserror", "dep:tokio", "dep:tracing"]
+serialport = ["skywatcher", "dep:serialport"]
 
 [dependencies]
 # ADD §5.6 rule 1: these two, and nothing else internal, ever.
@@ -67,7 +78,12 @@ async-trait = { workspace = true, optional = true }
 # producer loops the *driver* owns (`start_continuous` hands back a stream and returns), and a
 # loop with nobody to await it is a spawned task. Still no runtime is started here — drivers run
 # on the caller's.
-tokio = { workspace = true, features = ["rt", "sync", "time"], optional = true }
+#
+# `macros` arrived with M3-T02, for one construct and one reason: `tokio::select!` with `biased`
+# is what makes SDD §5.2.4's priority lane a property of the code rather than a hope. Hand-rolling
+# the poll order over two `Receiver`s would mean hand-rolling cancellation safety on the losing
+# branch, on the path an emergency stop travels.
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"], optional = true }
 # Frame timestamps: `CaptureResult.started_at`, `LiveViewFrame.captured_at`, `DATE-OBS` in the
 # FITS header. The workspace pins it without `clock` (SDD §2 confines local time to the UI).
 chrono = { workspace = true, optional = true }
@@ -94,6 +110,10 @@ thiserror = { workspace = true, optional = true }
 # not `authorized` or unbind/rebind: it is the only one of the three that a non-root process can
 # ever perform, and the operator running the recovery test is exactly such a process.
 rustix = { workspace = true, optional = true }
+# The mount's cable, and the only thing in this crate that opens one. Optional and off by default
+# because it needs `libudev-dev` at build time — see the workspace manifest for why udev is kept
+# rather than switched off, and `[features]` above for what stays testable without it.
+serialport = { workspace = true, optional = true }
 
 [dev-dependencies]
 # `test-util` is load-bearing rather than convenient: it is what makes `tokio::time::pause`
