@@ -172,6 +172,16 @@ impl Reply<'_> {
 /// the result straight here; anything it read past the terminator is a fault this reports rather
 /// than hides.
 ///
+/// **[`ProtocolError::TrailingBytes`] is nonetheless unreachable from that caller, and that is the
+/// right outcome rather than a gap.** M3-T02's exchange loop stops *at* the first terminator, so
+/// bytes behind one stay in the port buffer and are discarded by the next exchange's flush. Two
+/// reasons. Whether a second frame's bytes arrive in the same `read` as the first frame's
+/// terminator is a timing accident, so an error that depended on it would be nondeterministic —
+/// and the corruption the variant was written for does not have an early terminator at all:
+/// `=0000=000080\r` is one over-long reply, refused here as [`ProtocolError::TooLong`], every
+/// time. The variant stays because a caller that *does* hand over a whole buffer — a trace being
+/// replayed, a future harness — still needs the answer.
+///
 /// # Errors
 /// Every way a buffer can fail to be a Synta reply — see [`ProtocolError`]. Never panics, for
 /// any input at all; that is a gated property of T-COD-1 rather than a claim.
