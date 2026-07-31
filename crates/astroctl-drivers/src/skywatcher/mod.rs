@@ -8,9 +8,9 @@
 //! | [`port`] | the cable: the `Wire` seam, the exchange loop, the write gate, autodetect | M3-T02 |
 //! | [`serial`] | the task that owns the cable: two lanes, timeout, retry, heartbeat | M3-T02 |
 //! | [`mock_port`] | the scriptable port double the gated tests and M3-T04 run against | M3-T02 |
+//! | [`mount`] | the `MountDevice` itself: connect, position, goto supervision, the e-stop path | M3-T04 |
 //!
-//! The motor controller (M3-T03) and the `MountDevice` implementation (M3-T04) join them here,
-//! in that order, each one layered on the one before per SDD §5.2.1:
+//! They are layered on one another per SDD §5.2.1, each one speaking only to the one below it:
 //!
 //! ```text
 //! SkywatcherMount (impl MountDevice)          — coordinates, modes, goto logic
@@ -29,7 +29,11 @@ pub mod codec;
 pub mod controller;
 pub mod math;
 pub mod mock_port;
+pub mod mount;
 pub mod port;
 pub mod serial;
 
-pub use serial::{watchdog_channel, Heartbeat, SerialLink, SerialTimings, WatchdogSink};
+pub use mount::{FixedSiderealTime, SiderealClock, SkywatcherMount, SkywatcherMountFactory};
+pub use serial::{
+    watchdog_channel, Heartbeat, SerialLink, SerialTimings, WatchdogSink, WatchdogSource,
+};

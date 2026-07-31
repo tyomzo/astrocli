@@ -308,7 +308,7 @@ impl SerialLink {
     /// [`DeviceError::Transport`] for a port that failed, [`DeviceError::Busy`] if the emergency
     /// stop lane took the cable, or [`DeviceError::NotConnected`] if the link has been shut down.
     pub async fn send<C: Command>(&self, cmd: C) -> Result<C::Response, DeviceError> {
-        self.dispatch(Lane::Normal, &cmd).await
+        self.dispatch(Lane::Normal, cmd).await
     }
 
     /// Send a command on the priority lane, jumping every queued normal request.
@@ -321,7 +321,7 @@ impl SerialLink {
     /// # Errors
     /// As [`Self::send`].
     pub async fn send_priority<C: Command>(&self, cmd: C) -> Result<C::Response, DeviceError> {
-        self.dispatch(Lane::Priority, &cmd).await
+        self.dispatch(Lane::Priority, cmd).await
     }
 
     /// The emergency stop of SDD §5.2.4: `L` on both axes, both on the priority lane.
@@ -368,7 +368,13 @@ impl SerialLink {
 
     /// One request: encode once, exchange, retry the failures worth retrying, and account for the
     /// heartbeat exactly once at the end.
-    async fn dispatch<C: Command>(&self, lane: Lane, cmd: &C) -> Result<C::Response, DeviceError> {
+    ///
+    /// `cmd` is taken **by value**, and that is not a style choice. The command lives across the
+    /// `.await` below, and a `&C` there is only `Send` when `C: Sync` — so a borrowed parameter
+    /// would force every caller of the generic seam M3-T03 defined (`Exchange::send`, whose bound
+    /// is `C: Command + Send`) to add a bound the trait does not have. Owning it costs a `Copy` of
+    /// a handful of bytes and makes the future `Send` for exactly the commands the trait admits.
+    async fn dispatch<C: Command>(&self, lane: Lane, cmd: C) -> Result<C::Response, DeviceError> {
         let frame = cmd.encode();
         let mut attempt = 0;
         loop {
@@ -377,7 +383,7 @@ impl SerialLink {
             // while an emergency stop waits behind it.
             let outcome = self.exchange(lane, frame).await?;
             let retryable = attempt < self.timings.retries;
-            match interpret(cmd, outcome, self.timings.request_timeout) {
+            match interpret(&cmd, outcome, self.timings.request_timeout) {
                 Verdict::Ok(response) => {
                     self.health.succeeded();
                     return Ok(response);
