@@ -17,16 +17,30 @@ publish.workspace = true
 astroctl-core = { workspace = true }
 # The only encoder in the tree, already carrying the simulator's live-view frames (M1-T06). It
 # has no dependencies at all, which is the property that matters for something running in the
-# capture path on a Pi. Nothing here *decodes* JPEG: live-view frames are forwarded untouched.
+# capture path on a Pi.
 jpeg-encoder = { workspace = true }
+# The CR3 arm (M2-T05), chosen by the M2-T01 survey over `rawloader` (no CRX at all) and `libraw`
+# (a system C library, which is the dependency this whole tree is arranged to avoid). Pure Rust,
+# with a `data/cameras/canon/r10.toml` profile and R10 regression fixtures upstream — the spike
+# decoded a real R10 frame with it before the decision was made.
+#
+# **`rawler` is LGPL-2.1 and this workspace is MIT.** That is compatible for use, but it is a
+# weak-copyleft obligation on whoever ships a binary containing it (relinkability), and the M2-T01
+# dependency survey recorded every other property of this crate and not that one. Flagged in the
+# M2-T05 task notes; it wants a licensing decision before a binary is distributed, not before it
+# is run at a desk.
+rawler = { workspace = true }
+# Reads the camera JPEG the R10 writes beside each CR3, and a `JPEG`-format capture. Was a
+# dev-dependency until M2-T05 — see `jpeg.rs` for why using it in both roles keeps the tests
+# honest: they check *our* encoder against a foreign decoder, which is the other direction.
+zune-jpeg = { workspace = true }
 
 [dev-dependencies]
 # A *different* implementation from the one under test, for the reason M1-T06 took these on:
 # reading back with the writer's own logic proves only self-consistency. `fitsrs` is CDS's parser
-# (the group behind Aladin and SIMBAD) and `zune-jpeg` decodes what `jpeg-encoder` wrote, so "the
-# preview is a readable JPEG of the expected size" is a claim with someone else's parser behind it.
+# (the group behind Aladin and SIMBAD), so "the preview is a readable frame" is a claim with
+# someone else's parser behind it.
 fitsrs = { workspace = true }
-zune-jpeg = { workspace = true }
 
 [lints]
 workspace = true
