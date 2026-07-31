@@ -79,6 +79,23 @@ impl Reply {
         self.json()
     }
 
+    /// Assert the status and discard the body.
+    ///
+    /// For the routes that answer with no body at all — `liveview/start` and `liveview/stop` both
+    /// return `202` and nothing else — where [`expect`](Self::expect)'s `#[must_use]` value is a
+    /// `Value::Null` the caller has no use for.
+    ///
+    /// # Panics
+    ///
+    /// When the status differs.
+    pub fn expect_status(&self, status: u16) {
+        assert_eq!(
+            self.status, status,
+            "expected {status}, got {}: {}",
+            self.status, self.body
+        );
+    }
+
     /// The `code` of an error envelope.
     ///
     /// # Panics
