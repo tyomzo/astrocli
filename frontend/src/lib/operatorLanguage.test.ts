@@ -135,4 +135,37 @@ describe('the nudge explanations', () => {
     expect(down.reason.toLowerCase()).not.toContain('link');
     expect(down.reason.toLowerCase()).not.toContain('node');
   });
+
+  /**
+   * A fault must not promise a button that does not exist.
+   *
+   * This copy said "refuses motion until it is acknowledged" until M1-T17, and there is no
+   * acknowledgement — not in this app, not on the node, not in SDD §5.8.1. It reads as an
+   * instruction, so an operator whose mount has just stopped answering goes looking for the
+   * control that clears it while the tube is still slewing. Found by building REL-02's watchdog,
+   * which raises `MOUNT_LINK_LOST` in exactly that moment: the alert strip and this sentence are
+   * on screen together, and one of them was telling the operator the mount had stopped.
+   */
+  it('does not offer an acknowledgement that no screen has', () => {
+    const faulted = nudgeAvailability(
+      { phase: 'live', since: 0 },
+      {
+        state: 'observed',
+        at: 0,
+        ts: '2026-07-31T00:00:00.000Z',
+        value: {
+          state: 'fault',
+          tracking: false,
+          tracking_mode: null,
+          slewing: false,
+          parked: false,
+        },
+      },
+    );
+    expect(faulted.available).toBe(false);
+    if (faulted.available) return;
+
+    expect(faulted.reason.toLowerCase()).not.toContain('acknowledg');
+    expect(faulted.reason).toContain('system panel');
+  });
 });

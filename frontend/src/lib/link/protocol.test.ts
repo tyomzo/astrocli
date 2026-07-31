@@ -118,12 +118,15 @@ describe('frame kinds', () => {
 describe('the closed error vocabulary', () => {
   it('mirrors astroctl-core exactly, at the count that is the review checkpoint', () => {
     // 24 → 25 is `ABORTED` (M1-T03); 25 → 26 is `NODE_UNREACHABLE` (M1-T14), which §4.2 had
-    // specified with no producer while the proxy answered `DEVICE_TRANSPORT`. The number is here
-    // for the same reason it is in `ErrorCode::ALL`'s test: a frozen contract should not grow
-    // without someone noticing.
-    expect(ERROR_CODES).toHaveLength(26);
+    // specified with no producer while the proxy answered `DEVICE_TRANSPORT`; 26 → 27 is
+    // `MOUNT_LINK_LOST` (M1-T17), REL-02's watchdog verdict, which is the mirror image of T14's
+    // gap — there the code had no producer, here the config key `mount.serial.heartbeat_misses`
+    // had no *consumer*. The number is here for the same reason it is in `ErrorCode::ALL`'s test:
+    // a frozen contract should not grow without someone noticing.
+    expect(ERROR_CODES).toHaveLength(27);
     expect(ERROR_CODES).toContain('ABORTED');
     expect(ERROR_CODES).toContain('NODE_UNREACHABLE');
+    expect(ERROR_CODES).toContain('MOUNT_LINK_LOST');
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 

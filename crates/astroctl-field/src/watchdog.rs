@@ -1,14 +1,22 @@
-//! The vitals watchdog — SDD §8.1 ("watchdogs on → health `ok`"), §4.3 `system.health`, REL-12.
+//! The watchdogs — SDD §8.1 ("watchdogs on → health `ok`"), §4.3 `system.health`, §5.4, REL-02/12.
 //!
-//! M0 has no hardware, so the serial-heartbeat and USB-presence watchdogs of SDD §3 have nothing
-//! to watch; they arrive with their drivers in M1–M3. The disk and clock watchdog does not depend
-//! on hardware and is implemented here in full, because it is what the `starting` → `ok`
-//! transition of §8.1 is actually waiting for: a node reports `ok` when something is watching it,
-//! not when its socket is open.
+//! Two arms live here, on two clocks:
+//!
+//! * **Disk and clock**, at the §4.3 `system.health` cadence of 60 s. It does not depend on
+//!   hardware and was implemented in full at M0, because it is what the `starting` → `ok`
+//!   transition of §8.1 is actually waiting for: a node reports `ok` when something is watching
+//!   it, not when its socket is open. [`run`] owns it.
+//! * **The mount's link**, at the mount facade's poll cadence. [`MountLink`] owns it, and
+//!   `mount::poll` drives it — see that type's own note for why it is not on this file's ticker.
 //!
 //! Alerts are **edge-triggered**. A disk that has been low for six hours is one alert, not 360 —
 //! SDD §5.10.4 makes the same point about an offline stack node ("one offline alert not
-//! thousands"), and an operator who learns to ignore a repeating alert has lost the alert.
+//! thousands"), and an operator who learns to ignore a repeating alert has lost the alert. The
+//! mount arm obeys the same rule for the same reason, and the rule is the reason both arms are
+//! written as state machines over "what changed" rather than as tests of a current condition.
+//!
+//! What is still missing: USB presence, and the camera thread's liveness. Both wait on a device
+//! that can lose one.
 
 use std::time::Duration;
 
@@ -161,6 +169,138 @@ fn tick(bus: &EventBus, storage: &StorageConfig, uptime: vitals::Uptime, seen: S
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The mount's link — REL-02, SDD §5.4
+// ---------------------------------------------------------------------------------------------
+
+/// What one poll cycle learned about the link to the mount.
+///
+/// Three answers rather than two, because "the poll got nothing" and "nothing was expected to
+/// answer" are the difference between an alert and silence: an operator who pressed Disconnect
+/// has not lost their mount, and a node that alerted on their own action would teach them to
+/// ignore the alert that matters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkSample {
+    /// The mount is not connected. Nobody is expected to answer, and nothing is wrong.
+    Standby,
+    /// The mount answered this poll.
+    Reached,
+    /// The poll did not reach the mount, though the node believes it is connected.
+    Missed {
+        /// Whether the axes were moving the last time the node could read a status.
+        ///
+        /// The last time, not now — by definition the mount is not answering, so this cannot be
+        /// re-read at the moment it matters. It is carried on the sample rather than remembered
+        /// here because the poll loop already tracks the last status it read, and one copy of
+        /// that fact is better than two that can disagree.
+        slewing: bool,
+    },
+}
+
+/// The consecutive-miss counter behind [`ErrorCode::MountLinkLost`] (REL-02).
+///
+/// # Why this is not on the 60 s ticker above
+///
+/// The disk arm *asks* a question on its own clock; this one can only *listen*. The evidence of a
+/// lost link is a poll that failed, and the only place that sees a poll's whole verdict is the
+/// poll itself — a status read that errored, or a status that came back from the driver's cache
+/// with a position read that errored behind it. A second task on its own clock could observe
+/// neither without the poll loop telling it, so the arm is a state machine the poll loop feeds
+/// and this file keeps the alert discipline the rest of the watchdogs are written to.
+///
+/// # The M3-T02 seam
+///
+/// `skywatcher::serial::watchdog_channel()` already produces `Heartbeat::Lost { misses }` and
+/// `Heartbeat::Recovered` from the driver, counted across *every* exchange rather than only the
+/// 1 Hz poll — a strictly better signal, and one that can tell "the port is gone" from "the mount
+/// is mute". When it is wired up it replaces the samples below: `Lost` is the transition this
+/// counter exists to detect and `Recovered` is [`LinkSample::Reached`] after one, so the driver
+/// feeds the same arm and the operator keeps getting exactly one alert. It is deliberately not a
+/// second consumer publishing a second code — two watchdogs on one link is how an operator ends
+/// up with two alerts for one cable.
+#[derive(Clone, Copy, Debug)]
+pub struct MountLink {
+    /// `mount.serial.heartbeat_misses`, floored at 1.
+    threshold: u32,
+    /// Consecutive misses so far.
+    misses: u32,
+    /// Whether the loss has already been announced — the edge trigger.
+    lost: bool,
+}
+
+impl MountLink {
+    /// An arm that fires after `heartbeat_misses` consecutive misses.
+    #[must_use]
+    pub fn new(heartbeat_misses: u32) -> Self {
+        Self {
+            // The config validator's range is 1–100, so this only bites if a caller builds a
+            // `MountConfig` by hand. A zero would otherwise mean "declare the link lost having
+            // observed nothing", which is the one reading of the key nobody wants.
+            threshold: heartbeat_misses.max(1),
+            misses: 0,
+            lost: false,
+        }
+    }
+
+    /// Fold one poll's verdict in, and return the alert it makes true — at most one, and only on
+    /// a transition.
+    ///
+    /// Returning the alert rather than publishing it keeps this a pure function of the samples it
+    /// has seen, which is what lets a test count polls without a clock, a bus or a mount, and what
+    /// makes the M3-T02 swap above a change of *source* rather than of behaviour.
+    pub fn observe(&mut self, sample: LinkSample) -> Option<Alert> {
+        match sample {
+            LinkSample::Reached => {
+                self.misses = 0;
+                // Only after a complaint — the same rule the disk arm's recovery follows, and the
+                // reason a healthy night is silent rather than announcing hourly that the cable
+                // is still plugged in.
+                self.lost.then(|| {
+                    self.lost = false;
+                    Alert::info(
+                        ErrorCode::MountLinkLost.as_str(),
+                        "the mount is answering again",
+                    )
+                })
+            }
+            LinkSample::Missed { slewing } => {
+                self.misses += 1;
+                if self.misses < self.threshold || self.lost {
+                    return None;
+                }
+                self.lost = true;
+                Some(Alert::critical(
+                    ErrorCode::MountLinkLost.as_str(),
+                    format!(
+                        "the mount has not answered {} consecutive polls{} — check the cable at \
+                         the mount and its power (REL-02)",
+                        self.misses,
+                        if slewing {
+                            // The sentence that changes what the operator does next. A loss at
+                            // idle is a thing to fix before the next target; a loss mid-slew is a
+                            // tube still moving under a mount that has stopped listening, because
+                            // nothing about an unplugged cable stops a motor.
+                            ". The mount was slewing when contact was lost, so the telescope may \
+                             still be moving"
+                        } else {
+                            ""
+                        }
+                    ),
+                ))
+            }
+            LinkSample::Standby => {
+                // A deliberate disconnect is not a link loss, and the streak that led up to it is
+                // no longer evidence of anything.
+                self.misses = 0;
+                // `lost` deliberately survives. An operator who unplugs after a loss has not
+                // fixed it, and clearing the flag here would mean the reconnect that *does* fix
+                // it passes in silence, leaving the critical alert standing with no answer.
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,6 +425,158 @@ mod tests {
             vec![Topic::SystemHealth],
             "an unchanged clock state is not re-announced"
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The mount's link (REL-02)
+    // -----------------------------------------------------------------------------------------
+
+    /// A miss at idle.
+    const IDLE: LinkSample = LinkSample::Missed { slewing: false };
+    /// A miss while the tube was moving.
+    const MID_SLEW: LinkSample = LinkSample::Missed { slewing: true };
+
+    /// `mount.serial.heartbeat_misses` is the number of polls, and it is honoured verbatim.
+    ///
+    /// Set to 5 rather than the shipped 3 so that a hard-coded 3 fails here: this test is the
+    /// reason the key is no longer decoration, and a test that used the default value would pass
+    /// against an arm that ignored it.
+    #[test]
+    fn the_link_is_declared_lost_on_the_configured_poll_and_not_before() {
+        let mut link = MountLink::new(5);
+        for poll in 1..5 {
+            assert!(
+                link.observe(IDLE).is_none(),
+                "poll {poll} of 5 alerted — a mount is allowed to miss a reply"
+            );
+        }
+        let alert = link.observe(IDLE).expect("the fifth miss is the threshold");
+        assert_eq!(
+            alert.severity(),
+            astroctl_core::event::AlertSeverity::Critical
+        );
+        assert_eq!(alert.code(), "MOUNT_LINK_LOST");
+        assert!(
+            alert.message().contains('5'),
+            "the alert should carry the streak that crossed the threshold: {}",
+            alert.message()
+        );
+    }
+
+    /// Edge-triggered: a link that has been down for an hour is one alert, not 3 600.
+    #[test]
+    fn a_lost_link_alerts_once_not_on_every_poll() {
+        let mut link = MountLink::new(2);
+        assert!(link.observe(IDLE).is_none());
+        assert!(link.observe(IDLE).is_some(), "the second miss declares it");
+        for _ in 0..50 {
+            assert!(
+                link.observe(IDLE).is_none(),
+                "an unchanged condition must not re-alert"
+            );
+        }
+    }
+
+    /// The first successful poll clears the counter, so intermittent misses never accumulate into
+    /// a loss the operator would be sent outside for.
+    #[test]
+    fn one_good_poll_resets_the_streak() {
+        let mut link = MountLink::new(3);
+        for _ in 0..10 {
+            assert!(link.observe(IDLE).is_none());
+            assert!(link.observe(IDLE).is_none());
+            assert!(
+                link.observe(LinkSample::Reached).is_none(),
+                "a recovery must not be announced when nothing was announced lost"
+            );
+        }
+    }
+
+    /// Recovery is one `info`, and only after a complaint.
+    #[test]
+    fn recovery_is_announced_once_and_only_after_a_loss() {
+        let mut link = MountLink::new(1);
+        assert!(link.observe(IDLE).is_some());
+
+        let alert = link
+            .observe(LinkSample::Reached)
+            .expect("contact restored is worth saying");
+        assert_eq!(alert.severity(), astroctl_core::event::AlertSeverity::Info);
+        assert_eq!(alert.code(), "MOUNT_LINK_LOST");
+
+        for _ in 0..10 {
+            assert!(
+                link.observe(LinkSample::Reached).is_none(),
+                "a healthy link must not announce itself every second"
+            );
+        }
+    }
+
+    /// The acceptance criterion `POST /api/mount/disconnect` exists for: the operator's own action
+    /// is not a fault, however many polls fail while it takes effect.
+    #[test]
+    fn a_deliberate_disconnect_never_alerts_and_forgets_the_streak() {
+        let mut link = MountLink::new(3);
+        // Two misses in flight when the operator presses Disconnect — the real shape of a
+        // disconnect that races the poll.
+        assert!(link.observe(IDLE).is_none());
+        assert!(link.observe(IDLE).is_none());
+        for _ in 0..100 {
+            assert!(
+                link.observe(LinkSample::Standby).is_none(),
+                "a disconnected mount is a state, not a link loss"
+            );
+        }
+        // …and the streak that led into it is spent, so the next real loss costs the full three.
+        assert!(link.observe(IDLE).is_none());
+        assert!(link.observe(IDLE).is_none());
+        assert!(link.observe(IDLE).is_some());
+    }
+
+    /// A reconnect after a loss still resolves it. `Standby` clears the counter but not the
+    /// complaint, so the operator who fixes the cable is told the fix worked.
+    #[test]
+    fn reconnecting_after_a_loss_resolves_it() {
+        let mut link = MountLink::new(1);
+        assert!(link.observe(IDLE).is_some(), "lost");
+        assert!(
+            link.observe(LinkSample::Standby).is_none(),
+            "they unplug it"
+        );
+        let alert = link
+            .observe(LinkSample::Reached)
+            .expect("the critical alert must not be left standing unanswered");
+        assert_eq!(alert.severity(), astroctl_core::event::AlertSeverity::Info);
+    }
+
+    /// The sentence that sends the operator outside rather than back to the phone.
+    #[test]
+    fn a_loss_mid_slew_says_the_telescope_may_still_be_moving() {
+        let mut idle = MountLink::new(1);
+        let at_rest = idle.observe(IDLE).expect("lost");
+        assert!(
+            !at_rest.message().contains("slewing"),
+            "a loss at idle must not imply motion: {}",
+            at_rest.message()
+        );
+
+        let mut moving = MountLink::new(1);
+        let in_motion = moving.observe(MID_SLEW).expect("lost");
+        assert!(
+            in_motion
+                .message()
+                .contains("slewing when contact was lost"),
+            "REL-02's whole point is the tube that is still moving: {}",
+            in_motion.message()
+        );
+    }
+
+    /// A hand-built config cannot ask for a loss to be declared having observed nothing.
+    #[test]
+    fn a_zero_threshold_still_needs_one_missed_poll() {
+        let mut link = MountLink::new(0);
+        assert!(link.observe(LinkSample::Standby).is_none());
+        assert!(link.observe(IDLE).is_some());
     }
 
     #[test]

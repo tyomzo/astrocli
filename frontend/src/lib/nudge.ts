@@ -58,7 +58,7 @@ export function nudgeAvailability(
       return {
         available: false,
         reason:
-          'The mount reported a fault and refuses motion until it is acknowledged. The alert ' +
+          'The mount is in a fault, so nudging is withheld until it says otherwise. The alert ' +
           'that raised it is in the system panel.',
       };
     case 'parked':

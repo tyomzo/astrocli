@@ -57,6 +57,7 @@ use tokio::sync::Mutex;
 
 use crate::api::{ApiFailure, AppState};
 use crate::ticket::Ticket;
+use crate::watchdog::{LinkSample, MountLink};
 
 /// The position poll interval (MNT-02, SDD §4.3: `mount.position` at 1 Hz).
 ///
@@ -98,6 +99,9 @@ pub struct MountFacade {
     inflight: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// `mount.serial.poll_hz`, clamped to at least 1.
     poll_hz: u32,
+    /// `mount.serial.heartbeat_misses` — how many consecutive polls may fail to reach the mount
+    /// before the watchdog declares the link lost (REL-02). See [`crate::watchdog::MountLink`].
+    heartbeat_misses: u32,
 }
 
 /// A goto the node has accepted and is still waiting on.
@@ -119,6 +123,7 @@ impl MountFacade {
             // The config validator already floors this at 1; clamping again costs nothing and
             // means a zero here is a slow poll rather than a division by zero.
             poll_hz: config.serial.poll_hz.max(DEFAULT_POLL_HZ),
+            heartbeat_misses: config.serial.heartbeat_misses,
         }
     }
 
@@ -126,6 +131,12 @@ impl MountFacade {
     #[must_use]
     pub fn poll_interval(&self) -> Duration {
         Duration::from_micros(1_000_000 / u64::from(self.poll_hz))
+    }
+
+    /// The watchdog arm this facade's poll loop feeds (REL-02).
+    #[must_use]
+    pub fn link_watchdog(&self) -> MountLink {
+        MountLink::new(self.heartbeat_misses)
     }
 
     /// Remember the task waiting on a motion, replacing any finished one.
@@ -280,6 +291,22 @@ fn to_wire_position(safety: &SafeMount, pos: RaDec) -> event::MountPosition {
 /// therefore the *normal* case, not a failure, and logging it at 1 Hz would fill the log before
 /// anyone connected anything. The status is published once when it changes and the position
 /// simply is not read.
+///
+/// # The poll is also the heartbeat (REL-02)
+///
+/// Every tick ends in one verdict for [`MountLink`]: did this poll reach the mount? A status read
+/// that succeeded is *not* enough to say yes — a driver that has lost its link still answers
+/// `status()` with `Fault` from its own record, which is the HAL contract and is exactly right
+/// for the status panel, but it is a memory rather than a measurement. The position read is the
+/// one that has to go down the wire, so it is the one that counts. `mount.serial.heartbeat_misses`
+/// consecutive failures raise one `MOUNT_LINK_LOST` critical; the first success clears it.
+///
+/// SDD §5.4 sketches the serial-heartbeat watchdog as a task on its own 1 Hz tick. It is here
+/// instead, for a reason worth stating: a separate task can only observe the mount by *polling
+/// it too*, which on a serial line means two readers competing for a cable that is already in
+/// trouble. The arm itself is a state machine with no clock ([`crate::watchdog::MountLink`]), so
+/// nothing about the discipline moved into this loop — only the observation, which was already
+/// here and was being thrown away at `debug`.
 pub async fn poll(facade: Arc<MountFacade>) {
     let mut ticker = tokio::time::interval(facade.poll_interval());
     // The mount is a physical thing: if a poll takes longer than the interval, the answer is to
@@ -290,28 +317,41 @@ pub async fn poll(facade: Arc<MountFacade>) {
     // `None` until the first successful status read, so the first status is always published —
     // a client connecting before the first tick would otherwise see an empty snapshot.
     let mut last_status: Option<event::MountStatus> = None;
+    let mut link = facade.link_watchdog();
+    // What the axes were doing the last time the node could read a status. The wire status has no
+    // `slewing` flag — `mount.status` says `fault`, which is true and says nothing about the tube
+    // — so the HAL one is kept here, and it is the only thing that can answer "was it moving?" at
+    // the moment nothing is answering.
+    let mut last_slewing = false;
 
     loop {
         ticker.tick().await;
 
-        match facade.device.status().await {
+        let sample = match facade.device.status().await {
             Ok(status) => {
                 let wire = to_wire_status(status);
                 if last_status != Some(wire) {
                     facade.bus.publish(wire);
                     last_status = Some(wire);
                 }
+                last_slewing = status.slewing;
 
                 // Only read a position the mount can actually answer. A `position()` call on a
                 // disconnected driver is a guaranteed `NotConnected`, and asking anyway would
                 // make the log a list of questions we knew the answer to.
-                if status.state != MountState::Disconnected {
+                if status.state == MountState::Disconnected {
+                    LinkSample::Standby
+                } else {
                     match facade.device.position().await {
                         Ok(pos) => {
                             facade.bus.publish(to_wire_position(&facade.device, pos));
+                            LinkSample::Reached
                         }
                         Err(error) => {
                             tracing::debug!(%error, "mount position poll failed");
+                            LinkSample::Missed {
+                                slewing: last_slewing,
+                            }
                         }
                     }
                 }
@@ -322,13 +362,21 @@ pub async fn poll(facade: Arc<MountFacade>) {
                     facade.bus.publish(wire);
                     last_status = Some(wire);
                 }
+                LinkSample::Standby
             }
             Err(error) => {
                 // A driver that is connected but unhappy reports `Fault` from `status()` rather
                 // than erroring (HAL contract), so reaching here means the transport itself
                 // failed. Worth a line, but not a panic and not a rate that fills a log.
                 tracing::debug!(%error, "mount status poll failed");
+                LinkSample::Missed {
+                    slewing: last_slewing,
+                }
             }
+        };
+
+        if let Some(alert) = link.observe(sample) {
+            facade.bus.publish(alert);
         }
     }
 }
@@ -2195,5 +2243,224 @@ mod tests {
         assert_eq!(wire.alt_degrees(), Some(horizontal.alt.degrees()));
         assert_eq!(wire.az_degrees(), Some(horizontal.az.degrees()));
         assert!((wire.ra_hours() - 5.5).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The mount watchdog (M1-T17, REL-02)
+    // -----------------------------------------------------------------------------------------
+
+    /// Build a facade over a simulator that loses its link, on a fast poll.
+    ///
+    /// Built by hand rather than through `state_with` for one reason: fault plans are constructor
+    /// parameters, never configuration (SDD §9), and the only path that carries one into a node
+    /// is `ASTROCTL_SIM_FAULTS` — a process-wide environment variable, which is the e2e harness's
+    /// answer to a *container* boundary and would be a race between tests sharing one process.
+    fn faulting_facade(
+        config: &astroctl_core::config::FieldConfig,
+        bus: &EventBus,
+    ) -> Arc<MountFacade> {
+        use astroctl_drivers::simulator::{Fault, FaultPlan, SimulatorMount, SimulatorProfile};
+
+        let driver: Arc<dyn MountDevice> = Arc::new(
+            SimulatorMount::new(
+                &config.mount,
+                // The measured profile, not `instant()`: an instant mount finishes its goto
+                // before the link falls out, and this scenario is about a tube still moving.
+                SimulatorProfile::default(),
+                &FaultPlan::new([Fault::DisconnectAfter(Duration::from_millis(600))]),
+            )
+            .expect("the simulator builds from the shipped config"),
+        );
+        Arc::new(MountFacade::new(
+            Arc::new(astroctl_safety::SafeMount::from_config(
+                driver,
+                config,
+                bus.clone(),
+            )),
+            bus.clone(),
+            &config.mount,
+        ))
+    }
+
+    /// The next `alert` payload, or `None` if none arrives inside `within`.
+    async fn next_alert(
+        events: &mut astroctl_core::bus::EventSubscriber,
+        within: Duration,
+    ) -> Option<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + within;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(left, events.recv()).await {
+                Ok(astroctl_core::bus::Recv::Event(event))
+                    if event.topic == astroctl_core::event::Topic::Alert =>
+                {
+                    return Some(event.data)
+                }
+                Ok(
+                    astroctl_core::bus::Recv::Event(_) | astroctl_core::bus::Recv::Lagged { .. },
+                ) => {}
+                Ok(astroctl_core::bus::Recv::Closed) | Err(_) => return None,
+            }
+        }
+    }
+
+    /// `mount.serial.heartbeat_misses` is a number of polls, and it is the operator's number.
+    ///
+    /// The key has been shipped, documented and range-validated since M0 while being read by
+    /// nothing, which is why this asserts the *configured* value rather than the arm's default:
+    /// 5 is not 3, so an arm that had quietly kept a constant would fail here.
+    #[test]
+    fn the_configured_heartbeat_misses_is_the_number_of_polls_the_watchdog_counts() {
+        let node = crate::test_support::TestNode::open_loopback();
+        let mut config = (*node.config()).clone();
+        config.mount.serial.heartbeat_misses = 5;
+
+        let bus = EventBus::new();
+        let facade = faulting_facade(&config, &bus);
+
+        let mut link = facade.link_watchdog();
+        let missed = crate::watchdog::LinkSample::Missed { slewing: false };
+        for poll in 1..5 {
+            assert!(
+                link.observe(missed).is_none(),
+                "poll {poll} of the configured 5 declared the link lost"
+            );
+        }
+        assert!(
+            link.observe(missed).is_some(),
+            "the fifth failed poll is `heartbeat_misses`, and must be the one that fires"
+        );
+    }
+
+    /// The REL-02 arm end to end in one process: the poll loop feeds the watchdog, exactly one
+    /// critical alert reaches the bus naming the motion, and the reconnect resolves it with one
+    /// `info`.
+    ///
+    /// `tests/e2e/tests/faults.rs` drives the same scenario across two containers and is the
+    /// primary evidence for the acceptance criteria. This is its fast twin, and it exists because
+    /// that suite is not one of `check.sh`'s six gates: the join between the poll loop and the arm
+    /// is a handful of lines, and a handful of lines is exactly what rots unnoticed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_link_that_falls_out_mid_slew_alerts_once_and_the_reconnect_resolves_it() {
+        let node = crate::test_support::TestNode::open_loopback();
+        let mut config = (*node.config()).clone();
+        // Ten polls a second, so three misses cost 300 ms rather than three seconds.
+        config.mount.serial.poll_hz = 10;
+        config.mount.serial.heartbeat_misses = 3;
+
+        let bus = EventBus::new();
+        let facade = faulting_facade(&config, &bus);
+        facade
+            .device
+            .connect()
+            .await
+            .expect("the simulator connects");
+
+        // Spawned and forgotten, exactly as the goto route does it (SDD §5.8.1): dropping the
+        // future does not stop the mount, which is the whole hazard REL-02 covers. The target is
+        // `circumpolar_target`'s, so the safety layer never refuses it, and the slew outlives the
+        // link by tens of seconds.
+        let slewing = Arc::clone(&facade);
+        tokio::spawn(async move {
+            let _ = slewing
+                .device
+                .goto(RaDec::from_parts(12.0, 70.0).expect("circumpolar from Oslo"))
+                .await;
+        });
+
+        let mut events = bus.subscribe();
+        let poll_task = tokio::spawn(poll(Arc::clone(&facade)));
+
+        // The link drops 600 ms after connect; three more polls at 100 ms declare it. Five
+        // seconds is slack for a loaded CI box, not an expectation.
+        let alert = next_alert(&mut events, Duration::from_secs(5))
+            .await
+            .expect("REL-02: a lost link must raise an alert");
+        assert_eq!(alert["code"], "MOUNT_LINK_LOST", "{alert}");
+        assert_eq!(alert["severity"], "critical", "{alert}");
+        let message = alert["message"].as_str().expect("a message");
+        assert!(
+            message.contains("slewing when contact was lost"),
+            "the operator must be told the tube may still be moving: {message}"
+        );
+
+        // Edge-triggered: ten more poll periods of the same dead link say nothing more.
+        assert!(
+            next_alert(&mut events, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "a link that is still down must not re-alert every poll"
+        );
+
+        // The fault is spent, so the reconnect really reconnects — and the critical alert must
+        // not be left standing with no answer.
+        facade.device.connect().await.expect("reconnects");
+        let recovery = next_alert(&mut events, Duration::from_secs(5))
+            .await
+            .expect("the operator who fixed the cable must be told it worked");
+        assert_eq!(recovery["code"], "MOUNT_LINK_LOST", "{recovery}");
+        assert_eq!(recovery["severity"], "info", "{recovery}");
+        assert!(
+            next_alert(&mut events, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "a healthy link must not announce itself every poll"
+        );
+
+        poll_task.abort();
+    }
+
+    /// The third acceptance criterion: the operator's own Disconnect is not a link loss.
+    ///
+    /// Worth its own scenario rather than trusting the arm's unit test, because the thing that
+    /// could go wrong is in the *poll loop*: a disconnected driver answers `NotConnected` from
+    /// `status()` on some paths and `Ok(Disconnected)` on others, and only one of those was
+    /// originally a branch of this loop.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_deliberate_disconnect_raises_no_link_loss_alert() {
+        let node = crate::test_support::TestNode::open_loopback();
+        let mut config = (*node.config()).clone();
+        config.mount.serial.poll_hz = 10;
+        // One miss would be enough to fire, so a single wrongly-classified poll during or after
+        // the disconnect fails this test. That is the point.
+        config.mount.serial.heartbeat_misses = 1;
+
+        let bus = EventBus::new();
+        // No fault plan: this link is not lost, it is put away.
+        let device: Arc<dyn MountDevice> = Arc::new(
+            astroctl_drivers::simulator::SimulatorMount::new(
+                &config.mount,
+                astroctl_drivers::simulator::SimulatorProfile::default(),
+                &astroctl_drivers::simulator::FaultPlan::none(),
+            )
+            .expect("builds"),
+        );
+        let facade = Arc::new(MountFacade::new(
+            Arc::new(astroctl_safety::SafeMount::from_config(
+                device,
+                &config,
+                bus.clone(),
+            )),
+            bus.clone(),
+            &config.mount,
+        ));
+
+        let mut events = bus.subscribe();
+        let poll_task = tokio::spawn(poll(Arc::clone(&facade)));
+
+        facade.device.connect().await.expect("connects");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        facade.device.disconnect().await.expect("disconnects");
+
+        assert!(
+            next_alert(&mut events, Duration::from_secs(1))
+                .await
+                .is_none(),
+            "the operator pressed Disconnect; that is not a mount that stopped answering"
+        );
+        poll_task.abort();
     }
 }

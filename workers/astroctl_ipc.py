@@ -46,6 +46,10 @@ ERROR_CODES = frozenset(
         # A motion stopped by an e-stop or a safety limit (M1-T03). Nothing a worker raises, but
         # the vocabulary is shared and the conformance test compares the whole set.
         "ABORTED",
+        # REL-02's watchdog verdict: the mount stopped answering for `heartbeat_misses`
+        # consecutive polls (M1-T17). Alert-only and nothing a worker raises; the set is shared
+        # and compared whole.
+        "MOUNT_LINK_LOST",
         "MOUNT_TIMEOUT",
         "CAMERA_TIMEOUT",
         "DEVICE_TIMEOUT",

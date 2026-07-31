@@ -193,6 +193,19 @@ pub enum ErrorCode {
     /// re-issued the goto automatically would drive the mount straight back into it.
     Aborted,
     // --- device communication (502) ---
+    /// The mount stopped answering altogether — REL-02's watchdog verdict (M1-T17).
+    ///
+    /// Distinct from [`MountTimeout`](Self::MountTimeout), and the distinction is the whole
+    /// point. One missed reply is a timeout: the operator's move is to wait a second and look
+    /// again, and the facade already retries on their behalf. `mount.serial.heartbeat_misses`
+    /// consecutive misses is a *link*, and their move is to walk out to the rig — the tube may
+    /// still be slewing, because nothing about an unplugged cable stops a motor.
+    ///
+    /// Alert-only in M1: the watchdog publishes it on `alert`, and no route returns it. The
+    /// status and retryable answers below are therefore hypothetical, and are the ones
+    /// `DEVICE_TRANSPORT` already gives for the same condition — a lost link is worth retrying,
+    /// which is what a reconnect is.
+    MountLinkLost,
     /// The mount did not respond in time.
     MountTimeout,
     /// The camera did not respond in time.
@@ -264,6 +277,7 @@ impl ErrorCode {
         ErrorCode::Unsupported,
         ErrorCode::Busy,
         ErrorCode::Aborted,
+        ErrorCode::MountLinkLost,
         ErrorCode::MountTimeout,
         ErrorCode::CameraTimeout,
         ErrorCode::DeviceTimeout,
@@ -296,6 +310,7 @@ impl ErrorCode {
             Self::Unsupported => "UNSUPPORTED",
             Self::Busy => "BUSY",
             Self::Aborted => "ABORTED",
+            Self::MountLinkLost => "MOUNT_LINK_LOST",
             Self::MountTimeout => "MOUNT_TIMEOUT",
             Self::CameraTimeout => "CAMERA_TIMEOUT",
             Self::DeviceTimeout => "DEVICE_TIMEOUT",
@@ -338,6 +353,9 @@ impl ErrorCode {
             | Self::DeviceTimeout
             | Self::DeviceTransport
             | Self::DeviceProtocol
+            // A dead link is a transport failure that has stopped being intermittent; the same
+            // 502 the individual failures behind it were already answering.
+            | Self::MountLinkLost
             // The other *node*, not a device — but the same 502: something upstream of this
             // process did not answer, and the client's move is to retry, not to fix its request.
             | Self::NodeUnreachable => 502,
@@ -380,6 +398,10 @@ impl ErrorCode {
             | Self::CameraTimeout
             | Self::DeviceTimeout
             | Self::DeviceTransport
+            // A cable that came out goes back in, and the operator's own retry is the reconnect.
+            // Retryable also keeps the PWA from offering "give up" as the only affordance next to
+            // an alert whose whole purpose is to send someone outside to fix it.
+            | Self::MountLinkLost
             // A tunnel that is down comes back — that is what REL-10 is about — and the
             // transfer agent's whole design assumes a retryable "the other node is not
             // answering" (§5.10.1 keeps such a frame queued rather than failing it).
@@ -669,8 +691,14 @@ mod tests {
         // `NODE_UNREACHABLE`, which §4.2 has specified since change note 1.9.0 with no producer
         // — the `/stack/*` proxy was answering `DEVICE_TRANSPORT`, the exact conflation that row
         // was written to prevent. Found by M1-T14 (the stack panel has to tell "the stacking
-        // server is down" from "a cable came out" while a capture is running).
-        assert_eq!(before, 26);
+        // server is down" from "a cable came out" while a capture is running). 26 → 27 is
+        // `MOUNT_LINK_LOST` (M1-T17, SDD §4.2 change note 1.29.0): REL-02's watchdog had no code
+        // to fire, and `mount.serial.heartbeat_misses` had been shipped and range-validated since
+        // M0 while being read by nothing — a validated key that does nothing tells the operator a
+        // protection exists. Unlike the four above it, no route returns this one; it is
+        // alert-only, like `DISK_FULL`'s warning twin, and the row is here so `alert.code` can
+        // draw from the same closed set §4.2 says it draws from.
+        assert_eq!(before, 27);
     }
 
     #[test]
