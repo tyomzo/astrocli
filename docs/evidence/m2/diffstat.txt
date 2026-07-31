@@ -5,36 +5,42 @@
 # The acceptance criterion: "zero code changes outside astroctl-drivers, the decoder
 # variant, config, and tests". astroctl-drivers does not appear below at all — M2-T02
 # through T04 had already finished it, so driving a real camera end to end needed no
-# driver change either.
+# driver change either. That is the strongest form the criterion could have taken.
 #
 # NOT PRESENT, and that absence is the result:
-#   astroctl-core, astroctl-hal, astroctl-session, astroctl-transfer, astroctl-stack,
-#   astroctl-safety, astroctl-ipc, astroctl-solver, astroctl-guiding, astroctl-planning,
-#   astroctl-llm, workers/, frontend/, deploy/, tests/e2e/
+#   astroctl-core, astroctl-hal, astroctl-drivers, astroctl-session, astroctl-transfer,
+#   astroctl-stack, astroctl-safety, astroctl-ipc, astroctl-solver, astroctl-guiding,
+#   astroctl-planning, astroctl-llm, workers/, frontend/, deploy/, tests/e2e/
 #
-# The two astroctl-field entries are the ones M2-T04's handoff named as outstanding work
-# for this task: registering the gphoto2 factory, and publishing the link state §4.3 has
-# no field for.
- Cargo.lock                                  | 823 +++++++++++++++++++++++++++-
- Cargo.toml                                  |  14 +
- config/field-node.example.yaml              |  12 +-
- crates/astroctl-field/Cargo.toml            |  15 +
- crates/astroctl-field/src/camera.rs         | 338 ++++++++++++
- crates/astroctl-field/src/main.rs           |  62 ++-
- crates/astroctl-field/src/test_support.rs   |   6 +-
- crates/astroctl-pipeline/Cargo.toml         |  22 +-
- crates/astroctl-pipeline/src/cr3.rs         | 249 +++++++++
- crates/astroctl-pipeline/src/decode.rs      |  55 +-
- crates/astroctl-pipeline/src/jpeg.rs        | 126 +++++
- crates/astroctl-pipeline/src/lib.rs         |   7 +
- crates/astroctl-pipeline/tests/cr3_frame.rs | 269 +++++++++
- docs/intent/ASTROCTL-PRD-001.md             |  12 +-
- docs/plan/tasks/M1-walking-skeleton/DEMO.md |  73 +++
- scripts/desk-cable-pull.sh                  | 128 +++++
- scripts/desk-e2e.sh                         | 532 ++++++++++++++++++
- scripts/desk-soak.sh                        | 224 ++++++++
- scripts/lib/desk_timings.py                 | 180 ++++++
- scripts/lib/pull_report.py                  | 119 ++++
- scripts/lib/soak_report.py                  | 141 +++++
- scripts/lib/wsobserve.py                    | 278 ++++++++++
- 22 files changed, 3660 insertions(+), 25 deletions(-)
+# The astroctl-field entries are the ones M2-T04's handoff named as outstanding work for
+# this task — registering the gphoto2 factory, and publishing the link state §4.3 has no
+# field for — plus one bug that work uncovered: `build_camera`/`build_mount` printed only
+# the top of a startup error and dropped the `#[source]` that says why.
+#
+# `docs/intent/ASTROCTL-PRD-001.md` is in the list because §8.1's YAML block and
+# `config/field-node.example.yaml` are asserted equal verbatim by a test; changing the
+# config means changing the block it is copied from.
+ Cargo.lock                                         | 823 ++++++++++++++++++++-
+ Cargo.toml                                         |  14 +
+ config/field-node.example.yaml                     |  12 +-
+ crates/astroctl-field/Cargo.toml                   |  15 +
+ crates/astroctl-field/src/camera.rs                | 338 +++++++++
+ crates/astroctl-field/src/main.rs                  |  93 ++-
+ crates/astroctl-field/src/test_support.rs          |   6 +-
+ crates/astroctl-pipeline/Cargo.toml                |  22 +-
+ crates/astroctl-pipeline/src/cr3.rs                | 249 +++++++
+ crates/astroctl-pipeline/src/decode.rs             |  55 +-
+ crates/astroctl-pipeline/src/jpeg.rs               | 126 ++++
+ crates/astroctl-pipeline/src/lib.rs                |   7 +
+ crates/astroctl-pipeline/tests/cr3_frame.rs        | 269 +++++++
+ docs/intent/ASTROCTL-PRD-001.md                    |  12 +-
+ docs/plan/tasks/M1-walking-skeleton/DEMO.md        |  73 ++
+ .../tasks/M2-camera/M2-T05-desk-integration.md     | 133 +++-
+ scripts/desk-cable-pull.sh                         | 128 ++++
+ scripts/desk-e2e.sh                                | 536 ++++++++++++++
+ scripts/desk-soak.sh                               | 224 ++++++
+ scripts/lib/desk_timings.py                        | 180 +++++
+ scripts/lib/pull_report.py                         | 119 +++
+ scripts/lib/soak_report.py                         | 158 ++++
+ scripts/lib/wsobserve.py                           | 278 +++++++
+ 23 files changed, 3837 insertions(+), 33 deletions(-)
