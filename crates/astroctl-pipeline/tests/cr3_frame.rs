@@ -168,6 +168,32 @@ fn a_real_r10_frame_previews_within_the_budget() {
          not a broken decoder: re-shoot with the lens cap on or a shorter exposure."
     );
 
+    // ...and the same claim about the JPEG the operator actually receives, which is a stronger
+    // one and caught something the sample range alone did not.
+    //
+    // **A blown frame renders black, exactly as a dark frame does.** The first desk run produced a
+    // 10 s bulb at f/1.8 with the cap off; its samples spanned 12573..14336 — a healthy-looking
+    // range — and its preview was a uniform 0/255. The mechanism is `stretch::Window::from_samples`:
+    // with more than 99.5 % of the frame at one value both percentiles land on it, the window
+    // collapses, and the `white = black + 1.0` guard maps that value to *zero*. That guard is
+    // deliberate and matches `workers/compute_worker.py` line for line, so this is not a defect to
+    // fix here — but it does mean over-exposed and under-exposed are the same picture on the
+    // operator's screen, which is worth knowing at 2 a.m. Recorded in the M2-T05 notes.
+    //
+    // For this test it means the fixture must be a *normally exposed* frame. Both failure modes
+    // are flat, so the assertion catches either, and the message says which.
+    let shown = astroctl_pipeline::decode(&preview.jpeg, SourceFormat::Jpeg)
+        .expect("the preview this crate just wrote must be readable");
+    let dimmest = shown.samples().iter().copied().min().expect("samples") / 257;
+    let brightest_shown = shown.samples().iter().copied().max().expect("samples") / 257;
+    println!("preview tones: {dimmest}..{brightest_shown} of 0..255");
+    assert!(
+        brightest_shown - dimmest > 16,
+        "the preview is a flat {dimmest}/255 rectangle. The samples ran {darkest}..{brightest}, so \
+         if that range is narrow relative to the sensor the frame is saturated or capped and the \
+         stretch window has collapsed — re-shoot at a lower ISO or a narrower aperture."
+    );
+
     // PRF-05 gives the whole node 512 MB. This is one stage of one pipeline, so the bar here is
     // deliberately far under that: a 24 MP frame is 48 MB as u16, the binned half is 12 MB, and a
     // decoder that needed several multiples of the frame would be the thing that pushes a Pi over.
