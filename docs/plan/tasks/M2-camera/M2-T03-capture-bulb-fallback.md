@@ -20,15 +20,18 @@ frame store's begin/commit discipline, and the composable CLI fallback.
 ## Acceptance criteria
 
 - [~] 10 real captures incl. 2× bulb (30 s, 60 s): all CR3s open in libraw, durable, metadata correct exposure values
-  — **partially met, and the shortfall is physical.** Bulb, download and durability are proved on the
-  real R10: 10 s holds land well-formed CR3s (1.5 MB dark, 23.5 MB lit) under the request's stem with
-  no temporary left behind, and the exposure recorded is the **camera's own** `BulbExposureTime` (9 s
-  for a 10 s hold), not the request echoed. Outstanding: the body's **physical mode dial was on Bulb**
-  for every run, so `shutterspeed` offered only `bulb` and no *timed* capture could be taken — the
-  driver correctly refuses one and says so, which is itself asserted on hardware. The 30 s/60 s bulb
-  pair and a 10-frame run need a session at the camera; `libraw`/`rawler` decoding cannot run from
-  this crate at all (ADD §5.6 rule 1 — `rawler` lives in `astroctl-pipeline`), so the hardware test
-  checks the CR3 container header instead and M2-T01's decode stands as the decode evidence.
+  — **substantially met on real hardware, in both mode-dial positions.** With the dial on **Bulb**:
+  10 s holds land well-formed CR3s (1.5–1.6 MB dark, 23.5 MB lit) under the request's stem with no
+  temporary left behind, and the exposure recorded is the **camera's own** `BulbExposureTime` (9 s for
+  a 10 s hold), not the request echoed. With the dial on **M**: timed capture in 1.83–1.98 s giving
+  26.5–27.3 MB CR3s, `1/20` parsed to a 50 ms exposure, and **RAW+JPEG landing both files under one
+  stem** (15.5 MB CR3 + 3.7 MB JPEG) with a following capture getting exactly its own pair — which is
+  the check that the event queue was left clean. The suite passes in either dial position and asserts
+  the *refusal* for whichever mechanism the dial has taken away.
+  Outstanding: the 30 s/60 s bulb pair and a full 10-frame sequence run; `libraw`/`rawler` decoding
+  cannot run from this crate at all (ADD §5.6 rule 1 — `rawler` lives in `astroctl-pipeline`), so the
+  hardware tests check the CR3 and JPEG container headers instead and M2-T01's decode stands as the
+  decode evidence.
 - [x] Abort mid-bulb: shutter closes (audible/EXIF check), no partial frame, FSM recovers
   — **met on hardware.** Abort during a 60 s bulb returned in **846–919 ms**, `Aborted`, with the
   session directory empty (frames *and* temporaries), and the camera answering normally afterwards.
