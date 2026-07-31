@@ -467,25 +467,24 @@ impl CameraFacade {
     /// Returns what was published, so a route that has just connected can answer with the same
     /// value the event carried instead of reading the camera twice.
     pub async fn publish_status(&self, force: bool) -> event::CameraStatus {
-        let status = match (self.device.battery().await, self.device.storage().await) {
-            (Ok(battery), Ok(storage)) => {
-                event::CameraStatus::connected(battery.percent, battery.charging, storage.free_mb)
-            }
-            // Either read failing means the camera is not answering, and §4.3 is explicit that the
-            // battery and storage fields are `null` rather than `0` in that case: a zeroed battery
-            // renders as an empty gauge, which is a lie the operator would act on.
-            _ => event::CameraStatus::disconnected(),
-        };
+        let battery = self.device.battery().await;
+        let storage = self.device.storage().await;
 
         let changed = {
             let mut last = self
                 .last_status
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let status = status_from(battery, storage, *last);
             let changed = last.as_ref() != Some(&status);
             *last = Some(status);
             changed
         };
+        let status = self
+            .last_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .expect("just stored");
 
         if changed || force {
             self.bus.publish(status);
@@ -861,6 +860,44 @@ pub async fn poll(facade: Arc<CameraFacade>) {
 // Helpers
 // ---------------------------------------------------------------------------------------------
 
+/// Decide what one pair of vitals reads means, given what was last reported.
+///
+/// Pure, so the three cases are testable without a camera that can be made to produce them — the
+/// facade's test harness builds simulator cameras, and the simulator has no reason to be busy.
+///
+/// **`Busy` is not `disconnected`, and that distinction is the whole reason this is a function.**
+/// A camera that answers "I am exposing" is present, working, and doing the thing the operator
+/// asked for. The gphoto2 driver returns exactly that for a status read taken during a capture,
+/// because one libgphoto2 context means one queue and a status read may not wait in it (SDD
+/// §5.3.2 obligation 5). Folding it in with the failures would flip the connection badge to
+/// *disconnected* partway through every bulb frame — the most alarming possible way to report a
+/// camera that is working perfectly. The last known vitals stand instead: they are at most one
+/// exposure old, and neither battery charge nor free space moves fast enough for that to mislead.
+///
+/// With no previous reading to stand on — a status poll that races the very first capture — the
+/// honest answer is the same as for any other unanswered read.
+fn status_from(
+    battery: Result<astroctl_core::types::BatteryStatus, DeviceError>,
+    storage: Result<astroctl_core::types::StorageInfo, DeviceError>,
+    last: Option<event::CameraStatus>,
+) -> event::CameraStatus {
+    if matches!(battery, Err(DeviceError::Busy(_))) || matches!(storage, Err(DeviceError::Busy(_)))
+    {
+        if let Some(last) = last {
+            return last;
+        }
+    }
+    match (battery, storage) {
+        (Ok(battery), Ok(storage)) => {
+            event::CameraStatus::connected(battery.percent, battery.charging, storage.free_mb)
+        }
+        // Either read failing means the camera is not answering, and §4.3 is explicit that the
+        // battery and storage fields are `null` rather than `0` in that case: a zeroed battery
+        // renders as an empty gauge, which is a lie the operator would act on.
+        _ => event::CameraStatus::disconnected(),
+    }
+}
+
 /// Turn a shutter token into seconds, or `None` for `bulb`.
 ///
 /// A second copy of the driver's own parser, and deliberately so: this one runs *above* the HAL, on
@@ -1223,7 +1260,93 @@ mod tests {
     use crate::test_support::{state_with, state_with_camera, TestNode};
     use astroctl_core::bus::Recv;
     use astroctl_core::event::{CaptureState, Event, Topic};
+    use astroctl_core::types::{BatteryStatus, StorageInfo};
     use astroctl_drivers::simulator::CameraProfile;
+
+    // -----------------------------------------------------------------------------------------
+    // Vitals interpretation
+    // -----------------------------------------------------------------------------------------
+
+    fn battery() -> BatteryStatus {
+        BatteryStatus {
+            percent: 82,
+            charging: false,
+        }
+    }
+
+    fn storage() -> StorageInfo {
+        StorageInfo {
+            free_mb: 66_265,
+            total_mb: 121_910,
+        }
+    }
+
+    #[test]
+    fn a_camera_that_is_busy_exposing_is_not_reported_as_disconnected() {
+        // The gphoto2 driver refuses status reads during a capture rather than queueing them
+        // behind a five-minute bulb exposure, which would wedge the camera thread. That refusal
+        // must not read as "the camera is gone" — it would flip the badge to disconnected partway
+        // through every bulb frame.
+        let last = event::CameraStatus::connected(82, false, 66_265);
+
+        let during_capture = status_from(
+            Err(DeviceError::Busy("the camera is exposing")),
+            Ok(storage()),
+            Some(last),
+        );
+        assert_eq!(during_capture, last, "the last known vitals must stand");
+
+        // Either read being busy is enough; they are taken a moment apart.
+        assert_eq!(
+            status_from(
+                Ok(battery()),
+                Err(DeviceError::Busy("the camera is exposing")),
+                Some(last)
+            ),
+            last
+        );
+    }
+
+    #[test]
+    fn a_camera_that_is_not_answering_is_still_reported_as_disconnected() {
+        // The distinction only holds if the other direction still works: a genuinely unreachable
+        // camera must not be papered over with a stale reading.
+        let last = event::CameraStatus::connected(82, false, 66_265);
+        assert_eq!(
+            status_from(Err(DeviceError::NotConnected), Ok(storage()), Some(last)),
+            event::CameraStatus::disconnected()
+        );
+        assert_eq!(
+            status_from(
+                Err(DeviceError::Transport("cable pulled".to_owned())),
+                Ok(storage()),
+                Some(last)
+            ),
+            event::CameraStatus::disconnected()
+        );
+    }
+
+    #[test]
+    fn a_busy_camera_with_nothing_previously_reported_has_nothing_to_stand_on() {
+        // A status poll racing the very first capture. There is no earlier reading to keep, so
+        // the answer is the same as for any other unanswered read rather than an invented one.
+        assert_eq!(
+            status_from(
+                Err(DeviceError::Busy("the camera is exposing")),
+                Ok(storage()),
+                None
+            ),
+            event::CameraStatus::disconnected()
+        );
+    }
+
+    #[test]
+    fn two_good_reads_are_reported_as_connected() {
+        assert_eq!(
+            status_from(Ok(battery()), Ok(storage()), None),
+            event::CameraStatus::connected(82, false, 66_265)
+        );
+    }
 
     // -----------------------------------------------------------------------------------------
     // Harness
