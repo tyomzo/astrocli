@@ -6,7 +6,7 @@ site:
   timezone: Europe/Oslo
 
 mount:
-  driver: skywatcher        # "skywatcher", "indi", "ascom_alpaca", "simulator"
+  driver: simulator        # "skywatcher", "indi", "ascom_alpaca", "simulator"
   port: auto                # "auto" for detection, or "/dev/ttyUSB0"
   baud: 9600
   park_position:
@@ -56,7 +56,7 @@ camera:
 
 # Where sessions, frames and logs live on the field node (PRD §5.9 layout)
 storage:
-  sessions_dir: /data/astro/sessions
+  sessions_dir: /tmp/astroctl-desk-mk1sGe/field-sessions
   disk_warn_free_gb: 20      # warning alert threshold (REL-12). GiB = 2^30 bytes, matching
   disk_critical_free_gb: 5   #   `df -h`; capture pauses after the in-flight frame (REL-12)
 
@@ -93,18 +93,18 @@ equipment:
 
 stacking_server:
   enabled: true
-  host: 192.168.1.100      # stacking server IP on LAN
-  port: 8471
+  host: 127.0.0.1
+  port: 18471
   transfer_method: http     # "http" (upload endpoint) or "rsync"
   retry_interval: 10        # seconds between retries if server unreachable (backoff base)
-  queue_dir: /data/astro/transfer_queue  # local spool for unsent frames
+  queue_dir: /tmp/astroctl-desk-mk1sGe/field-queue
   pacing:                   # keep bulk uploads from queueing operator commands behind them
     bandwidth_cap_mbps: null   # null = uncapped; set on constrained links
     interactive_floor_pct: 20  # % of cap allowed while the operator is actively commanding
     interactive_window_seconds: 10  # motion command within this window triggers the floor
 
 llm:
-  enabled: true
+  enabled: false
   provider: anthropic       # "anthropic", "openai", or "ollama"
   model: claude-sonnet-5    # example — pin to a current model at deploy time
   api_key_env: ANTHROPIC_API_KEY  # read key from environment variable (SEC-04)
@@ -119,8 +119,8 @@ llm:
   session_history: true     # maintain conversation context per session
 
 server:
-  host: 0.0.0.0             # bind to the VPN interface IP in production (SEC-01)
-  port: 8470
+  host: 127.0.0.1
+  port: 18470
   auth_token_env: ASTROCTL_TOKEN  # shared token for REST/WebSocket auth (SEC-02)
   max_command_age_ms: 2000  # motion-initiating commands older than this are rejected
                             #   COMMAND_STALE; stopping commands are never age-rejected
@@ -128,7 +128,7 @@ server:
                             #   Deliberately NOT one-per-core: the camera OS thread and the
                             #   decode pool need cores reserved on a 4-core Pi (SDD §7)
   log_level: INFO
-  log_dir: /data/astro/logs
+  log_dir: /tmp/astroctl-desk-mk1sGe/field-logs
   deployment_label: null    # null = production. A short name ("Dev", "Bench") for a non-production
                             #   node: the PWA installs as "AstroCtl Dev" with its own icon and
                             #   carries a persistent marker. Origin already separates the installs;

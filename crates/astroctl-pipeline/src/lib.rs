@@ -30,6 +30,13 @@ pub mod decode;
 pub mod preview;
 pub mod stretch;
 
+// The two M2-T05 decode arms. Private: they are reached through [`decode::decode`] and
+// [`decode::decode_any`] like every other format, and a caller that picks an arm directly is a
+// caller that has decided what a file is from its name — the thing [`decode::SourceFormat::sniff`]
+// exists to stop.
+mod cr3;
+mod jpeg;
+
 pub use decode::{decode, decode_any, DecodeError, DecodedFrame, SourceFormat};
 pub use preview::{render_decoded, render_preview, Preview, PreviewParams};
 pub use stretch::{Curve, Window};

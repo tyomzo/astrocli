@@ -208,7 +208,80 @@ one.
 * **No hardware.** Simulated mount and camera throughout. The mount's timings are the measured
   HEQ5 and the camera's are the measured R10, so the *pacing* is real — a capture takes two
   seconds to download because that is what the reference body takes. But no photons.
+
+  **M2-T05 added the version with photons.** `scripts/desk-e2e.sh` runs this same walkthrough
+  against a real Canon R10 on USB — same PWA, same events, same stack node, one line of config
+  different. See ["The real-camera variant"](#the-real-camera-variant) below.
 * **No stacking.** The stacking server's worker stretches one frame into a preview. It does not
   register, reject or accumulate anything; that is Phase 2b.
 * **No plate solving, no guiding, no sequencing, no catalog.** Targets are entered by hand.
 * **No TLS and no VPN** in this harness. Both are real-hardware gates.
+
+---
+
+## The real-camera variant
+
+Added by M2-T05, the M2 exit task. Everything above this line is the simulator; everything below
+is the same demo with a Canon R10 on the end of a USB cable.
+
+**The point of running it is what does not change.** The PWA is the same build, the events are the
+same events, the stack node is the same binary, and the only difference in the whole tree is
+`camera.driver` and a build feature. If the demo feels identical, the HAL contract held — which is
+the claim M2 exists to make, and the reason the acceptance criterion is a *diffstat*.
+
+### One command
+
+```sh
+scripts/desk-e2e.sh                 # builds, starts a pair, runs the sequence, leaves it up
+scripts/desk-e2e.sh --simulator     # the same script with no camera, to check the harness itself
+```
+
+It connects the camera, reads and *writes* settings, streams live view, takes five timed frames
+and one bulb frame, waits for each preview, checks the stack node acked the frames, and writes an
+evidence bundle to `docs/evidence/m2/desk-e2e/`. It leaves both nodes running, so the next thing
+to do is open the PWA against a real camera.
+
+### What you need in front of you
+
+* The R10 on USB, **battery charged** — M2-T03 lost an evening to a body that was browning out
+  rather than misbehaving, and every symptom looked like a driver bug.
+* `libgphoto2-dev` installed, or the no-root unpack the script prints if it is missing.
+* **A hand on the mode dial.** This is the one thing the script cannot do, and it is not a
+  limitation of the script:
+
+  | dial | the body offers | so you get |
+  |---|---|---|
+  | **M** | `30"` … `1/4000`, no `bulb` | the five timed frames |
+  | **B** | `bulb` and nothing else | the one bulb frame |
+
+  A single run gets one or the other. The script detects which, does that half, and prints the
+  exact command for the other. Run it twice, moving the dial in between, for the full set.
+
+* **gvfs off the camera.** A desktop auto-mounts a camera the moment it appears and holds the USB
+  claim. The script releases it before starting; if you are doing this by hand:
+
+  ```sh
+  gio mount -l | grep -i canon
+  gio mount -u "gphoto2://Canon_Inc._Canon_Digital_Camera_.../"
+  ```
+
+### Two things that will look like bugs and are not
+
+* **The preview of a badly exposed frame is black — and so is the preview of a dark frame.** With
+  more than 99.5 % of a frame at one value the stretch's window collapses and everything maps to
+  zero. That rule matches `workers/compute_worker.py` deliberately, so both implementations agree
+  about a dark. The consequence is that *over*-exposed and *under*-exposed look the same on the
+  screen. Cap the lens for a dark; drop the ISO and stop down for a real picture.
+* **With the dial on B the body reports its other shutter as `Unknown value df00`.** That is
+  libgphoto2 declining to name a Canon code, not the driver losing a setting. `bulb` is the one
+  that works and the one the driver uses.
+
+### The other two desk runs
+
+```sh
+scripts/desk-soak.sh --hours 2 --bulb 4     # capture every 60 s, RSS against PRF-05's 512 MB
+scripts/desk-cable-pull.sh                  # arms a watcher; you pull the cable; it times REL-03
+```
+
+Both attach to the pair `desk-e2e.sh` left running. `desk-cable-pull.sh` prints its procedure when
+started with `--help`, and the cable comes out at the **camera** end.

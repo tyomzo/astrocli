@@ -76,6 +76,21 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# M2-T05. The other end of the split `astroctl-drivers` set up in M2-T02: `libgphoto2_sys` runs
+# `pkg-config` *and* `bindgen` in its build script, so on a machine without `libgphoto2-dev` the
+# crate fails to compile rather than to link — and CI has no libgphoto2. That crate's manifest
+# names this binary as the thing that must make the choice ("only the binaries may name this
+# crate, so the deployable is the only thing that can make that choice"), and this is the line
+# where it makes it.
+#
+# **Off by default, so all six gates and the sim E2E build and run untouched.** A real camera
+# needs `cargo build -p astroctl-field --features libgphoto2` on a machine with the dev package.
+# Without it the gphoto2 driver is still registered and still reachable from config; it fails at
+# `create` with a message naming the missing library, which is the true thing to say.
+[features]
+default = []
+libgphoto2 = ["astroctl-drivers/libgphoto2"]
+
 [dev-dependencies]
 tower = { workspace = true }
 # M1-T03: a real WebSocket client for the §5.8.3 and §4.5 acceptance criteria.

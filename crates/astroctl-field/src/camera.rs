@@ -857,6 +857,189 @@ pub async fn poll(facade: Arc<CameraFacade>) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The link state §4.3 has no word for
+// ---------------------------------------------------------------------------------------------
+
+/// Alert code for a camera link that failed and is being rebuilt (REL-03, SDD §5.3.1).
+///
+/// A free string rather than a `CameraStatus` field, and the reasoning is
+/// `crate::watchdog::DISK_LOW`'s exactly. §4.3 fixes `camera.status` as
+/// `{connected, battery_pct, charging, storage_free_mb}` — a two-state boolean — while SDD §5.3.1
+/// and M2-T04's acceptance criterion both ask for the transition to reach the operator as
+/// `camera.status: reconnecting`. Adding the field is a frozen-contract change touching the golden
+/// wire fixtures and the PWA's mirror of them, which `tasks/README` rule 2 says an implementation
+/// task does not invent. M2-T04 recorded the gap and left the choice here; this is the
+/// no-schema-change route `DISK_LOW` and `CLOCK_UNSYNCED` already took.
+///
+/// **The schema is not lying while this alert is live, and that is what makes the choice honest
+/// rather than merely convenient.** During a recovery the driver's `link()` returns
+/// `DeviceError::NotConnected` — not `Busy` — so [`status_from`] takes its failure arm and
+/// `camera.status` publishes `connected: false` with null vitals, which is true: the camera is not
+/// answering. What the boolean cannot say is *why*, and whether anyone is doing anything about it.
+/// That is the whole content of "reconnecting", and it is what this alert carries.
+const CAMERA_RECONNECTING: &str = "CAMERA_RECONNECTING";
+
+/// Alert code for a link that used up its recovery attempts (SDD §5.3.1's bounded retries).
+const CAMERA_LINK_FAULTED: &str = "CAMERA_LINK_FAULTED";
+
+/// Republish `camera.status` and narrate the link's transitions, for a driver that has them.
+///
+/// Started only for the gphoto2 driver, because it is the only one with a recovery protocol —
+/// `crate::build_camera` explains why the concrete type has to be kept to reach this.
+///
+/// # Why this publishes the status as well as the alert
+///
+/// `Topic::Alert` is deliberately **not** stateful (`astroctl_core::event::Topic::is_stateful`), so
+/// it is never replayed into a client's connect snapshot, while `camera.status` is. A PWA that
+/// loads during a recovery therefore sees `connected: false` from the snapshot and no alert — it
+/// learns the camera is down, which is the part that matters, and misses the sentence about why.
+/// Forcing the status publish on every transition is what makes the first half of that true
+/// promptly: without it the flip to `connected: false` waits for the next 60 s tick, and REL-03
+/// asks for recovery inside 30 s. The badge would then still read *connected* after the camera had
+/// come back and gone away again.
+pub async fn publish_link_state(
+    facade: Arc<CameraFacade>,
+    mut links: tokio::sync::watch::Receiver<astroctl_drivers::gphoto2::LinkState>,
+) {
+    use astroctl_drivers::gphoto2::LinkState;
+
+    let mut announced: Option<Announced> = None;
+
+    loop {
+        if links.changed().await.is_err() {
+            // The driver was dropped: the node is shutting down, or the camera facade outlived
+            // its device. Either way there is nothing left to report on.
+            return;
+        }
+        let state = links.borrow_and_update().clone();
+
+        // Always, and before the alert. The alert explains a state the operator can already see
+        // in the badge; publishing the other way round would explain a state that has not
+        // arrived yet.
+        facade.publish_status(true).await;
+
+        let current = Announced::of(&state);
+        if announced.as_ref() == Some(&current) {
+            // A retry of a failure already reported. The counter belongs in the log.
+            if let LinkState::Reconnecting { attempt, of, .. } = &state {
+                tracing::info!(attempt, of, "camera link recovery attempt");
+            }
+            continue;
+        }
+        let previous = announced.replace(current);
+
+        match &state {
+            LinkState::Reconnecting { attempt, of, .. } => {
+                tracing::warn!(attempt, of, "the camera link is being rebuilt");
+            }
+            LinkState::Faulted { reason } => {
+                tracing::error!(%reason, "the camera link could not be rebuilt");
+            }
+            LinkState::Connected => tracing::info!("the camera link is up"),
+            LinkState::Disconnected => tracing::info!("the camera link is down"),
+        }
+        if let Some(alert) = link_alert(previous.as_ref(), &state) {
+            facade.bus.publish(alert);
+        }
+    }
+}
+
+/// The part of a [`LinkState`](astroctl_drivers::gphoto2::LinkState) that decides whether the
+/// operator has already been told about it.
+///
+/// Deliberately *not* the whole state: the attempt counter is excluded, which is what makes four
+/// retries of one unplugged cable one alert rather than four.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Announced {
+    kind: LinkKind,
+    because: String,
+}
+
+/// The four link states, without their payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    Disconnected,
+    Connected,
+    Reconnecting,
+    Faulted,
+}
+
+impl Announced {
+    fn of(state: &astroctl_drivers::gphoto2::LinkState) -> Self {
+        use astroctl_drivers::gphoto2::LinkState;
+        match state {
+            LinkState::Disconnected => Self {
+                kind: LinkKind::Disconnected,
+                because: String::new(),
+            },
+            LinkState::Connected => Self {
+                kind: LinkKind::Connected,
+                because: String::new(),
+            },
+            LinkState::Reconnecting { because, .. } => Self {
+                kind: LinkKind::Reconnecting,
+                because: because.clone(),
+            },
+            LinkState::Faulted { reason } => Self {
+                kind: LinkKind::Faulted,
+                because: reason.clone(),
+            },
+        }
+    }
+}
+
+/// What a link transition should say to the operator, given what they were last told.
+///
+/// Pure, for exactly the reason [`status_from`] is: the interesting cases are sequences — a retry
+/// of a known failure, a diagnosis that changes mid-recovery, a `Connected` that is an operator's
+/// first connect rather than a recovery — and reproducing those through a real driver would mean
+/// a camera that can be made to fail on cue. A `tokio::sync::watch` cannot be driven through them
+/// from a test either: it holds only the latest value, so a test that sent four states in a row
+/// would be testing the channel's coalescing rather than this decision.
+fn link_alert(
+    previous: Option<&Announced>,
+    state: &astroctl_drivers::gphoto2::LinkState,
+) -> Option<event::Alert> {
+    use astroctl_drivers::gphoto2::LinkState;
+    match state {
+        LinkState::Reconnecting {
+            attempt,
+            of,
+            because,
+        } => Some(event::Alert::warning(
+            CAMERA_RECONNECTING,
+            format!(
+                "the camera link failed and is being rebuilt automatically (attempt {attempt} of \
+                 {of}): {because}"
+            ),
+        )),
+        LinkState::Faulted { reason } => Some(event::Alert::critical(
+            CAMERA_LINK_FAULTED,
+            format!(
+                "the camera link could not be rebuilt after repeated attempts and needs a hand: \
+                 {reason}"
+            ),
+        )),
+        // Only worth saying if something was said before it. A node announcing "the camera is
+        // back" as the first thing it ever says would be startling — and an operator's own
+        // `connect()` arrives here as exactly that.
+        LinkState::Connected => matches!(
+            previous.map(|p| p.kind),
+            Some(LinkKind::Reconnecting | LinkKind::Faulted)
+        )
+        .then(|| {
+            event::Alert::info(
+                CAMERA_RECONNECTING,
+                "the camera link is back and captures can resume",
+            )
+        }),
+        // An operator's own `disconnect`. The status publish carries it; there is nothing wrong
+        // to report.
+        LinkState::Disconnected => None,
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
 
@@ -2227,5 +2410,160 @@ mod tests {
         );
         assert_eq!(shutter_seconds("1/0"), None, "not an infinite exposure");
         assert_eq!(shutter_seconds("nonsense"), None);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The link state (M2-T05)
+    // -----------------------------------------------------------------------------------------
+
+    use astroctl_drivers::gphoto2::LinkState;
+
+    fn unplugged(attempt: u32) -> LinkState {
+        LinkState::Reconnecting {
+            attempt,
+            of: 6,
+            because: "the camera was unplugged".to_owned(),
+        }
+    }
+
+    /// Fold a sequence of link states through the decision, collecting what each would publish.
+    ///
+    /// This is what [`publish_link_state`]'s loop does, minus the awaits — which is the point of
+    /// splitting [`link_alert`] out of it.
+    fn narrate(states: &[LinkState]) -> Vec<(String, String)> {
+        let mut announced: Option<Announced> = None;
+        let mut published = Vec::new();
+        for state in states {
+            let current = Announced::of(state);
+            if announced.as_ref() == Some(&current) {
+                continue;
+            }
+            let previous = announced.replace(current);
+            if let Some(alert) = link_alert(previous.as_ref(), state) {
+                let json = serde_json::to_value(&alert).expect("an alert serialises");
+                published.push((
+                    json["code"].as_str().unwrap_or_default().to_owned(),
+                    json["severity"].as_str().unwrap_or_default().to_owned(),
+                ));
+            }
+        }
+        published
+    }
+
+    #[test]
+    fn a_recovery_is_announced_as_an_alert_and_withdrawn_when_it_succeeds() {
+        // The §4.3 gap M2-T04 recorded, closed the way `DISK_LOW` closed its own: the schema keeps
+        // its two-state boolean and the *reason* rides an alert with a free-string code.
+        assert_eq!(
+            narrate(&[LinkState::Connected, unplugged(1), LinkState::Connected]),
+            vec![
+                ("CAMERA_RECONNECTING".to_owned(), "warning".to_owned()),
+                ("CAMERA_RECONNECTING".to_owned(), "info".to_owned()),
+            ],
+            "one warning going down, one info coming back"
+        );
+    }
+
+    #[test]
+    fn the_drivers_diagnosis_survives_into_the_operators_alert() {
+        // M2-T04 spent real effort on these sentences — the gvfs branch names the mount and the
+        // command that releases it. Losing them here would waste that.
+        let alert = link_alert(None, &unplugged(2)).expect("a warning");
+        let json = serde_json::to_value(&alert).expect("an alert serialises");
+        let message = json["message"].as_str().expect("a message");
+        assert!(message.contains("the camera was unplugged"), "{message}");
+        assert!(message.contains("attempt 2 of 6"), "{message}");
+    }
+
+    #[test]
+    fn the_first_connect_is_not_announced_as_a_recovery() {
+        // An operator pressing Connect must not be told the camera "is back" — it was never gone.
+        assert_eq!(narrate(&[LinkState::Connected]), Vec::new());
+        assert!(link_alert(None, &LinkState::Connected).is_none());
+    }
+
+    #[test]
+    fn retries_of_one_failure_do_not_produce_an_alert_each() {
+        // The recovery loop rewrites the state once per attempt, up to six times. Keying the
+        // alert on the raw value would give the operator six warnings for one unplugged cable —
+        // the alert-per-tick failure `crate::watchdog` avoids with the same edge trigger.
+        let attempts: Vec<LinkState> = (1..=4).map(unplugged).collect();
+        assert_eq!(
+            narrate(&attempts),
+            vec![("CAMERA_RECONNECTING".to_owned(), "warning".to_owned())],
+            "four attempts at one failure is one alert"
+        );
+    }
+
+    #[test]
+    fn a_changed_diagnosis_is_worth_a_second_alert() {
+        // The exception that earns the rule: M2-T04 found that a replug can turn a plain
+        // disconnect into gvfs holding the claim, and the second message names the process and the
+        // command that releases it. An operator who was told the cable was out needs telling that
+        // it is now something else entirely.
+        let states = vec![
+            unplugged(1),
+            LinkState::Reconnecting {
+                attempt: 2,
+                of: 6,
+                because: "gvfs holds the camera; run `gio mount -u gphoto2://...`".to_owned(),
+            },
+        ];
+        assert_eq!(narrate(&states).len(), 2, "a new diagnosis is a new alert");
+    }
+
+    #[test]
+    fn running_out_of_attempts_is_critical_and_says_so() {
+        assert_eq!(
+            narrate(&[LinkState::Faulted {
+                reason: "six attempts, still nothing on the USB port".to_owned(),
+            }]),
+            vec![("CAMERA_LINK_FAULTED".to_owned(), "critical".to_owned())]
+        );
+    }
+
+    #[test]
+    fn an_operators_own_disconnect_is_not_an_alert() {
+        assert_eq!(
+            narrate(&[LinkState::Connected, LinkState::Disconnected]),
+            Vec::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transition_republishes_the_status_before_it_explains_it() {
+        // The wiring, once, around the pure decision above — and the load-bearing half of the
+        // design. `Topic::Alert` is not stateful and is never replayed into a client's connect
+        // snapshot, so `camera.status` is all a PWA loading mid-recovery will see; REL-03 gives
+        // recovery 30 s, half the status poll's own period, so waiting for the tick would leave
+        // the badge reading *connected* for a camera that had gone and come back.
+        //
+        // One transition, not a sequence: `watch` keeps only the latest value, so driving several
+        // through it would test the channel rather than this task. That is what `narrate` is for.
+        let node = TestNode::authenticated("s3cret");
+        let (_, declarations) = crate::api::router();
+        let state = state_with(&node, declarations).await;
+        let mut events = state.bus.subscribe();
+
+        let (tx, rx) = tokio::sync::watch::channel(LinkState::Connected);
+        let task = tokio::spawn(publish_link_state(Arc::clone(&state.camera), rx));
+        tx.send(unplugged(1)).expect("the receiver is alive");
+
+        // The alert is the last thing the task does for a transition, so draining to it captures
+        // the status publish that came first.
+        let observed = drain(&mut events, |event| event.topic == Topic::Alert).await;
+        task.abort();
+        let _ = task.await;
+
+        let status_first = observed
+            .iter()
+            .position(|event| event.topic == Topic::CameraStatus);
+        let alert_at = observed
+            .iter()
+            .position(|event| event.topic == Topic::Alert);
+        assert!(
+            matches!((status_first, alert_at), (Some(s), Some(a)) if s < a),
+            "the status must reach the operator before the sentence explaining it: {observed:?}"
+        );
     }
 }

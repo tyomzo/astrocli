@@ -338,8 +338,12 @@ pub async fn state_with_camera(
             .await
             .expect("the fixture must open a session"),
     );
+    // The link-state receiver is dropped: these fixtures configure the simulator (the config
+    // rewrite above), which has no recovery protocol and hands back `None`.
+    let (camera_device, _links) =
+        crate::build_camera(&config, profile).expect("the fixture must build a camera driver");
     let camera = Arc::new(crate::camera::CameraFacade::new(
-        crate::build_camera(&config, profile).expect("the fixture must build a camera driver"),
+        camera_device,
         Arc::clone(&store),
         bus.clone(),
     ));

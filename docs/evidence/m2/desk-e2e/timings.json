@@ -1,0 +1,18 @@
+{
+  "driver": "gphoto2",
+  "budget_s": 3.0,
+  "frames": [
+    {
+      "frame_id": "light_00001",
+      "exposure_s": 9.0,
+      "saved_t": 21.1695,
+      "preview_t": 21.2935,
+      "latency_s": 0.12400000000000233,
+      "verdict": "ok"
+    }
+  ],
+  "worst_s": 0.12400000000000233,
+  "median_s": 0.12400000000000233,
+  "liveview_frames": 40,
+  "alerts": []
+}

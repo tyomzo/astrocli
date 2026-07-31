@@ -5,10 +5,15 @@
 //!
 //! # Why the format is an enum and not a guess at the call site
 //!
-//! SDD §5.7 and the M1-T09 task both say the same thing: M1 decodes the simulator's FITS and
+//! SDD §5.7 and the M1-T09 task both said the same thing: M1 decodes the simulator's FITS and
 //! M2 adds the R10's CR3 through `rawler`. [`SourceFormat`] exists so that arrival is a new
 //! variant and a new `match` arm rather than a second entry point that callers have to choose
 //! between — the difference between adding a format and rewriting the pipeline.
+//!
+//! M2-T05 collected on that: [`SourceFormat::Cr3`] and [`SourceFormat::Jpeg`] are two more arms
+//! here and two more modules ([`crate::cr3`], [`crate::jpeg`]), and **nothing else in the crate
+//! changed** — not [`crate::preview`], not [`crate::stretch`], not one caller. Both new arms
+//! produce the same [`DecodedFrame`] the FITS arm does, which is what made that possible.
 //!
 //! # The row order that looks like it works
 //!
@@ -30,13 +35,17 @@ const CARD: usize = 80;
 
 /// The source formats the decode path understands.
 ///
-/// Non-exhaustive against the M2 addition: `rawler`'s CR3 becomes a variant here, and every
-/// `match` in this crate is written so that adding one is a compile error at the arms that must
-/// change rather than a silent fall-through.
+/// M1-T09 wrote this enum with one variant and the note that M2 would add CR3; M2-T05 added that
+/// arm and the JPEG one beside it. Every `match` in this crate is still written so that a fourth
+/// format is a compile error at the arms that must change rather than a silent fall-through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceFormat {
     /// The simulator's 16-bit FITS (M1-T06), and the format the field node writes today.
     Fits,
+    /// Canon's raw, as the R10 writes it (M2-T05). Decoded by [`crate::cr3`].
+    Cr3,
+    /// A camera JPEG — the `RAW+JPEG` sibling, or a `JPEG`-format capture. See [`crate::jpeg`].
+    Jpeg,
 }
 
 impl SourceFormat {
@@ -44,13 +53,26 @@ impl SourceFormat {
     ///
     /// Content sniffing rather than the file extension: the frame store names files from the
     /// *camera's* extension (`crate::store::begin_frame`), so an extension is a claim made by a
-    /// driver about a file it produced, and the decoder should not have to trust it.
+    /// driver about a file it produced, and the decoder should not have to trust it. The R10 makes
+    /// the point concretely — the driver's download path falls back to naming an unrecognised file
+    /// `.raw`, so a CR3 can reach the store under an extension no decoder claims.
     #[must_use]
     pub fn sniff(bytes: &[u8]) -> Option<Self> {
         // Every conforming FITS file begins with this exact card — the standard fixes the
         // keyword, the spacing and the position of the `T`.
         if bytes.starts_with(b"SIMPLE  =                    T") {
             return Some(Self::Fits);
+        }
+        // CR3 is ISO base media (the MP4 container family): a `ftyp` box whose major brand is
+        // `crx `. Checked at 4..12 because the first four bytes are the box length, which varies.
+        // This is the same test the driver's hardware run asserts a captured frame against.
+        if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"crx " {
+            return Some(Self::Cr3);
+        }
+        // SOI, then any marker. Two bytes is a weak signature, which is why it is tested last:
+        // anything that looked like FITS or CR3 has already claimed the frame.
+        if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+            return Some(Self::Jpeg);
         }
         None
     }
@@ -60,6 +82,8 @@ impl fmt::Display for SourceFormat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fits => f.write_str("FITS"),
+            Self::Cr3 => f.write_str("CR3"),
+            Self::Jpeg => f.write_str("JPEG"),
         }
     }
 }
@@ -161,6 +185,8 @@ impl std::error::Error for DecodeError {}
 pub fn decode(bytes: &[u8], format: SourceFormat) -> Result<DecodedFrame, DecodeError> {
     match format {
         SourceFormat::Fits => decode_fits(bytes),
+        SourceFormat::Cr3 => crate::cr3::decode_cr3(bytes),
+        SourceFormat::Jpeg => crate::jpeg::decode_jpeg(bytes),
     }
 }
 
@@ -484,13 +510,24 @@ mod tests {
     }
 
     #[test]
-    fn sniffing_recognises_fits_and_refuses_everything_else() {
+    fn sniffing_recognises_every_format_and_refuses_everything_else() {
         let encoded = simulator_fits(2, 2, &[0; 4]);
         assert_eq!(SourceFormat::sniff(&encoded), Some(SourceFormat::Fits));
-        // A CR3 (M2) is an ISO base-media file; today it is simply not recognised, which is the
-        // failure the operator should see rather than a decoder guessing.
-        assert_eq!(SourceFormat::sniff(b"\0\0\0\x18ftypcrx "), None);
+        // M2-T05: a CR3 is an ISO base-media file whose major brand is `crx `. Until this task it
+        // sniffed to `None` and the node logged an undecodable frame once per capture.
+        assert_eq!(
+            SourceFormat::sniff(b"\0\0\0\x18ftypcrx "),
+            Some(SourceFormat::Cr3)
+        );
+        // ISO base media, but somebody else's — an MP4 is not a frame.
+        assert_eq!(SourceFormat::sniff(b"\0\0\0\x18ftypisom"), None);
+        assert_eq!(
+            SourceFormat::sniff(b"\xFF\xD8\xFF\xE0\x00\x10JFIF"),
+            Some(SourceFormat::Jpeg)
+        );
         assert_eq!(SourceFormat::sniff(b""), None);
+        // A prefix of the CR3 signature must not be read past its end.
+        assert_eq!(SourceFormat::sniff(b"\0\0\0\x18ftyp"), None);
         assert!(matches!(
             decode_any(b"not a frame at all"),
             Err(DecodeError::UnknownFormat)

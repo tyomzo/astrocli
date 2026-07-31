@@ -201,6 +201,20 @@ zune-jpeg = { version = "0.5.15" }
 # crate's manifest for the feature argument in full.
 gphoto2 = { version = "3.4.1" }
 
+# --- added by M2-T05 (the CR3 preview arm) ---
+# The RAW decoder the M2-T01 survey selected and the spike then decoded a real R10 frame with.
+# `rawloader` has no CRX code at all and `libraw` needs a system `libraw_r` — the C-library
+# dependency this tree spends real effort avoiding everywhere except libgphoto2, where there is no
+# alternative. `rawler` is pure Rust, carries `data/cameras/canon/r10.toml` (RGGB, the colour
+# matrices) and ships R10 regression fixtures upstream.
+#
+# **Licence note: LGPL-2.1, where every other dependency here is permissive and the workspace is
+# MIT.** Compatible, but weak copyleft: a *distributed* binary statically linking it owes
+# recipients the means to relink. The survey (`docs/evidence/dependency-survey-2026-07-29.md`)
+# recorded this crate's decoders, profiles and fixtures and did not record its licence. Running it
+# on the operator's own desk raises nothing; shipping an image does. See the M2-T05 task notes.
+rawler = { version = "0.7.2" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
