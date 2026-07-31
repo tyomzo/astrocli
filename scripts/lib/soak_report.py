@@ -56,6 +56,7 @@ def main():
     breaches = [v for v in rss if v > args.rss_limit]
 
     alerts = []
+    alerts_at = []
     if args.events:
         try:
             with open(args.events) as handle:
@@ -65,7 +66,9 @@ def main():
                     except json.JSONDecodeError:
                         continue
                     if event.get("topic") == "alert":
-                        alerts.append(event.get("data") or {})
+                        data = event.get("data") or {}
+                        alerts.append(data)
+                        alerts_at.append((event.get("t", 0.0), data))
         except OSError:
             pass
 
@@ -121,9 +124,23 @@ def main():
 
     if lost or refused or breaches:
         lines.append("## Failures\n")
+        # A loss the node *diagnosed* and a loss it was silent about are different failures, and
+        # only one of them is a defect in this system. Correlating each lost round with any alert
+        # published while it was in flight is what tells them apart — the R10's long-exposure
+        # noise reduction shoots a matching dark frame after every bulb, roughly doubling the
+        # wait, and the driver says exactly that. A soak that reported "2 lost frames" without it
+        # would send somebody looking for a bug in the pipeline.
         for row in lost:
+            start = float(row["t_s"])
+            window = [a for a in alerts_at if start <= a[0] <= start + 2 * args.interval]
             lines.append(f"- round {row['round']} (t={row['t_s']}s): frame `{row['frame_id']}` "
                          "was accepted but no preview arrived in its slot")
+            for when, data in window:
+                lines.append(f"  - the node said so at t={when:.0f}s: `{data.get('code')}` — "
+                             f"{data.get('message')}")
+            if not window:
+                lines.append("  - **and the node published nothing about it**, which is the worse "
+                             "of the two cases: a frame that vanished silently")
         for row in refused:
             lines.append(f"- round {row['round']} (t={row['t_s']}s): the capture was refused")
         if breaches:

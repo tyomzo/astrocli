@@ -139,9 +139,51 @@ scripts/desk-soak.sh --minutes 16 --bulb 4  # the short proving run recorded her
 
 Bundle: `desk-soak/` — `soak.md`, `samples.csv`, `events.jsonl`.
 
-**The full two-hour soak has not been run.** What is recorded here is a short run proving the
+**The full two-hour soak has not been run.** What is recorded here is a 16-minute run proving the
 machinery works; the two-hour version is one command and belongs to the operator. Said plainly
 because a soak nobody ran is not evidence of anything.
+
+### The 16-minute run: memory clean, and one real hardware failure
+
+| | result |
+|---|---|
+| rounds | 16, one 4 s bulb every 60 s |
+| field-node RSS | min 77 · median 94 · **peak 101 MB** — 19 % of PRF-05's 512 MB |
+| preview latency | median 0.05 s, worst 0.07 s |
+| wedges (node) | **0** — it answered health and accepted every capture throughout |
+| lost frames | **6** — rounds 11 to 16, and they are the interesting part |
+
+**Memory is the clean result.** 101 MB peak with the decode spikes *inside* the samples, flat
+across sixteen rounds. Nothing here threatens PRF-05.
+
+**Rounds 11-16 is a hardware finding, and it is the third sighting of the same thing.** After ten
+successful bulb frames the R10 stopped announcing files. It kept answering: battery 100 %, storage
+66 265 MB, config reads fine, `lsusb` fine, every capture accepted, every shutter fired and every
+`exposing` → `downloading` transition published. It simply never handed a file over again — for
+six consecutive rounds, and for a further single capture taken after the soak ended and the body
+had rested.
+
+The driver's own diagnosis appears six times and is worth quoting because it is *plausible and
+does not fit*:
+
+> protocol error: the shutter closed on a 4 s bulb exposure but the camera had not announced a
+> file 26 s later. A Canon with long-exposure noise reduction on shoots a matching dark frame
+> first, which roughly doubles the wait — raise `camera.timeouts.capture_extra_seconds` or turn
+> that off on the body.
+
+Long-exposure noise reduction is a per-frame property. If it were on, **round 1 would have failed
+too** — instead rounds 1-10 completed in about five seconds each. Something changed at round 11
+and did not change back. So the message names the wrong cause here, though it is the right first
+guess for a single slow frame.
+
+What this does settle: **M2-T03 saw this failure and left it confounded with a fading battery;
+M2-T04 called the battery "an equally good explanation".** This run had a battery at 100 % from
+first frame to last. The battery is not the cause. The remaining candidates are cumulative —
+sensor or body temperature after sustained bulb use, or an internal buffer that fills and is not
+being drained — and separating them needs a longer run and a thermometer, which is what the
+two-hour soak is for.
+
+This is exactly the class of thing a soak exists to find, and it was found in sixteen minutes.
 
 Definitions the script asserts against, because "no wedges, zero lost frames" needs them:
 

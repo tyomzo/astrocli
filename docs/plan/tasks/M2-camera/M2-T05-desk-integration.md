@@ -80,6 +80,26 @@ also forces the status publish on **every** transition, because `Topic::Alert` i
 never reaches a client's connect snapshot, and because REL-03's 30 s recovery is half the status
 poll's own 60 s period.
 
+### The soak found the thing M2-T03 could not pin down
+
+A 16-minute run (16 × 4 s bulb at 60 s): **RSS peak 101 MB** — 19 % of PRF-05's 512 MB, flat, with
+the decode spikes inside the samples. Memory is not a concern on this path.
+
+**Rounds 11-16 lost their frames, and it is the third sighting of one failure.** After ten good
+bulbs the R10 stopped announcing files while continuing to answer everything else: battery 100 %,
+storage unchanged, config reads fine, every capture accepted, every shutter fired, every
+`exposing` → `downloading` published. No node wedge — it kept working perfectly, the camera did
+not.
+
+The driver's diagnostic fires six times and blames long-exposure noise reduction. That is the
+right first guess for one slow frame and **the wrong cause here**: LENR is per-frame, so round 1
+would have failed too. Something cumulative changed at round 11.
+
+M2-T03 saw this and left it confounded with a fading battery; M2-T04 called the battery "an
+equally good explanation". **This run held 100 % battery throughout, so the battery is not the
+cause.** What remains is thermal or an internal buffer, and separating those needs the two-hour
+run. Worth its own task if the 2 h soak reproduces it.
+
 ## Spec gaps and findings
 
 - **The shipped example config could not start a node.** `config/field-node.example.yaml` has said

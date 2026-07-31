@@ -1,0 +1,17 @@
+round,t_s,frame_id,accepted,preview_s,rss_mb,verdict
+1,0,light_00002,yes,0.059,77,ok
+2,60,light_00003,yes,0.047,90,ok
+3,120,light_00004,yes,0.056,85,ok
+4,180,light_00005,yes,0.051,99,ok
+5,240,light_00006,yes,0.071,96,ok
+6,300,light_00007,yes,0.055,81,ok
+7,360,light_00008,yes,0.054,101,ok
+8,420,light_00009,yes,0.052,96,ok
+9,480,light_00010,yes,0.046,100,ok
+10,540,light_00011,yes,0.055,95,ok
+11,600,light_00012,yes,,94,LOST
+12,660,light_00013,yes,,94,LOST
+13,720,light_00014,yes,,94,LOST
+14,780,light_00015,yes,,94,LOST
+15,840,light_00016,yes,,94,LOST
+16,900,light_00017,yes,,94,LOST

@@ -651,8 +651,10 @@ fn build_mount(
         .create_mount(config.mount.driver.as_str(), &config.mount)
         .map_err(|e| {
             format!(
-                "cannot build the mount driver named by `mount.driver` ({}): {e}",
-                config.mount.driver.as_str()
+                // The camera's twin had the same swallowed-source bug; see `error_chain`.
+                "cannot build the mount driver named by `mount.driver` ({}): {}",
+                config.mount.driver.as_str(),
+                error_chain(&e)
             )
         })?;
 
@@ -775,11 +777,32 @@ fn build_camera(
         .create_camera(config.camera.driver.as_str(), &config.camera)
         .map_err(|e| {
             format!(
-                "cannot build the camera driver named by `camera.driver` ({}): {e}",
-                config.camera.driver.as_str()
+                "cannot build the camera driver named by `camera.driver` ({}): {}",
+                config.camera.driver.as_str(),
+                error_chain(&e)
             )
         })?;
     Ok((camera, None))
+}
+
+/// An error and everything underneath it, joined — because the useful half is usually underneath.
+///
+/// `RegistryError::Construction` is deliberately terse ("driver `gphoto2` cannot be built from
+/// this configuration") and carries the driver's own sentence as its `#[source]`; its own docs say
+/// "a binary printing the chain shows both halves". This binary was not printing the chain, so the
+/// half that says *why* never reached the operator. On a build without libgphoto2 that meant the
+/// gphoto2 factory's carefully written "rebuild with `--features astroctl-drivers/libgphoto2` on a
+/// machine that has libgphoto2-dev installed, or set `camera.driver: simulator`" was thrown away
+/// and the operator got the terse half alone. Found by running exactly that build (M2-T05).
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(next) = source {
+        rendered.push_str(": ");
+        rendered.push_str(&next.to_string());
+        source = next.source();
+    }
+    rendered
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).

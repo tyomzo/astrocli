@@ -3,7 +3,7 @@
 # desk-soak.sh — the M2-T05 soak: capture every 60 s, watch RSS, catch a wedge or a lost frame.
 #
 # Usage:  scripts/desk-soak.sh [--hours 2 | --minutes N] [--interval 60] [--evidence DIR]
-#                              [--base http://127.0.0.1:18470] [--rss-limit 512]
+#                              [--base http://127.0.0.1:18480] [--rss-limit 512]
 # Exit:   0 = clean soak, 1 = a wedge, a lost frame or an RSS breach, 2 = the script could not run
 #
 #   --hours H     the M2-T05 figure is 2. Overrides --minutes.
@@ -45,7 +45,7 @@ NAME="desk-soak"
 MINUTES=120
 INTERVAL=60
 RSS_LIMIT_MB=512
-BASE="http://127.0.0.1:${ASTROCTL_FIELD_PORT:-18470}"
+BASE="http://127.0.0.1:${ASTROCTL_FIELD_PORT:-18480}"
 EVIDENCE="$ROOT/docs/evidence/m2/desk-soak"
 TOKEN="${ASTROCTL_TOKEN:-s3cret}"
 # 0 = a timed capture at whatever shutter the body is set to. Non-zero sends a bulb of that many

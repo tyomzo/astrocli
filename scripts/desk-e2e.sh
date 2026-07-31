@@ -61,8 +61,12 @@ WORKDIR=""
 EVIDENCE="$ROOT/docs/evidence/m2/desk-e2e"
 KEEP=1
 
-FIELD_PORT="${ASTROCTL_FIELD_PORT:-18470}"
-STACK_PORT="${ASTROCTL_STACK_PORT:-18471}"
+# **Not 18470.** `deploy/compose.yaml` publishes the container harness's field node there, so a
+# desk pair left running on it — which is the whole point of `--keep` — makes the next
+# `scripts/e2e.sh` fail during container startup with a Docker port-binding error that says
+# nothing about a camera. Found exactly that way.
+FIELD_PORT="${ASTROCTL_FIELD_PORT:-18480}"
+STACK_PORT="${ASTROCTL_STACK_PORT:-18481}"
 TOKEN="${ASTROCTL_TOKEN:-s3cret}"
 
 while [[ $# -gt 0 ]]; do

@@ -2,7 +2,7 @@
 #
 # desk-cable-pull.sh — watch a field node through a real cable pull, and time the recovery.
 #
-# Usage:  scripts/desk-cable-pull.sh [--base http://127.0.0.1:18470] [--seconds 180]
+# Usage:  scripts/desk-cable-pull.sh [--base http://127.0.0.1:18480] [--seconds 180]
 #                                    [--evidence DIR] [--no-liveview]
 # Exit:   0 = the node recovered to a working capture, 1 = it did not, 2 = could not run
 #
@@ -50,7 +50,7 @@ set -uo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 NAME="desk-cable-pull"
 
-BASE="http://127.0.0.1:${ASTROCTL_FIELD_PORT:-18470}"
+BASE="http://127.0.0.1:${ASTROCTL_FIELD_PORT:-18480}"
 SECONDS_TO_WATCH=180
 EVIDENCE="$ROOT/docs/evidence/m2/cable-pull"
 TOKEN="${ASTROCTL_TOKEN:-s3cret}"
