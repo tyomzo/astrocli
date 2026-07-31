@@ -183,6 +183,30 @@ sensor or body temperature after sustained bulb use, or an internal buffer that 
 being drained — and separating them needs a longer run and a thermometer, which is what the
 two-hour soak is for.
 
+**And then the body left the USB bus.** A few minutes after the soak ended — with the node idle,
+nothing capturing, and the battery still reading 100 % — `lsusb` stopped listing `04a9:32f8`
+altogether. No software reset was involved; nothing was unplugged. The R10 needs a physical power
+cycle to come back.
+
+So the full progression, observed in one sitting on a fully charged battery:
+
+1. ten 4 s bulb frames at 60 s intervals, each completing in about five seconds;
+2. six more where the shutter fires and `downloading` is published but no file is ever announced,
+   while battery, storage and config reads all keep answering;
+3. the device disappearing from the bus.
+
+M2-T03 met stage 2 and left it confounded with a fading battery. M2-T04 met stage 3 after a
+`USBDEVFS_RESET` and recorded "a second independent sighting of the drop-off M2-T03 had to leave
+confounded with a flat battery — it is *not* only the battery." **This is the third sighting, with
+neither a flat battery nor a reset to blame, so it is neither.** Sustained bulb capture alone
+reaches it.
+
+This matters for M2's exit criteria: the two-hour soak asks for 120 captures, and this body stopped
+delivering at ten. Whoever runs it should expect to meet this, and the useful experiment is to vary
+one thing at a time — exposure length, interval, `capture_extra_seconds`, and long-exposure noise
+reduction on the body — to find which one moves the boundary. That is a task of its own, not a
+line item in this one.
+
 This is exactly the class of thing a soak exists to find, and it was found in sixteen minutes.
 
 Definitions the script asserts against, because "no wedges, zero lost frames" needs them:
@@ -220,7 +244,18 @@ body off the bus until it was physically power-cycled.
 
 ## 6. Operator checklist
 
-Three things need a human at the desk. Each is one command.
+Four things need a human at the desk. Each is one command.
+
+### 0. First: power-cycle the R10
+
+**The body is off the USB bus** as of the end of this run — see §4. Switch it off and on again
+before anything below; nothing else brings it back. Then check the desktop has not grabbed it:
+
+```sh
+lsusb -d 04a9:32f8                                   # it should be listed
+gio mount -l | grep -i canon                         # and gvfs should not hold it
+gio mount -u "gphoto2://Canon_Inc._Canon_Digital_Camera_.../"
+```
 
 ### a. The timed half of the E2E
 

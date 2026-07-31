@@ -95,10 +95,22 @@ The driver's diagnostic fires six times and blames long-exposure noise reduction
 right first guess for one slow frame and **the wrong cause here**: LENR is per-frame, so round 1
 would have failed too. Something cumulative changed at round 11.
 
-M2-T03 saw this and left it confounded with a fading battery; M2-T04 called the battery "an
-equally good explanation". **This run held 100 % battery throughout, so the battery is not the
-cause.** What remains is thermal or an internal buffer, and separating those needs the two-hour
-run. Worth its own task if the 2 h soak reproduces it.
+**Then the body left the USB bus.** Minutes after the soak, node idle, nothing capturing, battery
+still 100 %: `lsusb` stopped listing `04a9:32f8` at all. No software reset, nothing unplugged. It
+needs a physical power cycle.
+
+The whole progression, on a full battery, in one sitting: ten good bulbs → six where the shutter
+fires and no file is ever announced → the device off the bus.
+
+M2-T03 met the middle stage and left it confounded with a fading battery. M2-T04 met the last one
+after a `USBDEVFS_RESET` and wrote "it is *not* only the battery". **This is the third sighting,
+with neither a flat battery nor a reset available to blame.** Sustained bulb capture alone reaches
+it.
+
+This bears on M2's exit criteria directly: the 2 h soak asks for ~120 captures and this body
+stopped at ten. The useful next step is one variable at a time — exposure, interval,
+`capture_extra_seconds`, and long-exposure NR on the body — to find what moves the boundary.
+**That is a task of its own**, and it is the biggest open question M2 leaves.
 
 ## Spec gaps and findings
 
