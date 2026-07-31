@@ -172,7 +172,11 @@ describe('events', () => {
       }),
     });
 
-    expect(after).toEqual(before);
+    // Everything a panel reads is untouched — but `lastEvent` moves, and that is the point of it
+    // being separate from the slots. "Is any telemetry current" and "is the telescope still
+    // talking" are different questions (§8.3(8)), and a `transfer.acked` answers the second one.
+    expect({ ...after, lastEvent: null }).toEqual({ ...before, lastEvent: null });
+    expect(after.lastEvent).toEqual({ at: at + 1, ts: '2026-07-30T21:04:05.123Z' });
   });
 
   it('rebuilds telemetry from a snapshot but keeps what it has already been told happened', () => {
@@ -255,5 +259,53 @@ describe('link phases', () => {
       { type: 'link/snapshot', at, events: [POSITION] },
     );
     expect(state.skewMs).toBe(-60_000);
+  });
+});
+
+describe('when the telescope last said anything', () => {
+  // The denominator of SDD §8.3(8)'s telemetry age. Its failure mode is a header that reads
+  // "0.2 s" on a link that has delivered nothing for a minute, which is the exact silent
+  // degradation the requirement exists to forbid.
+
+  it('starts out knowing nothing, rather than assuming now', () => {
+    expect(EMPTY.lastEvent).toBeNull();
+  });
+
+  it('takes the newest stamp in a snapshot, not the last one listed', () => {
+    // A connect snapshot delivers every stateful topic in one frame, so they share an arrival
+    // instant and the hub orders them however it likes. Taking the last would let a topic the node
+    // has not refreshed in a while set the age of a connection that is one millisecond old.
+    const fresh = event('mount.position', POSITION.data, '2026-07-30T21:04:09.000Z');
+    const older = event('camera.status', CAMERA.data, '2026-07-30T21:03:00.000Z');
+
+    const state = apply(EMPTY, { type: 'link/snapshot', at, events: [fresh, older] });
+
+    expect(state.lastEvent).toEqual({ at, ts: '2026-07-30T21:04:09.000Z' });
+  });
+
+  it('rebuilds with the snapshot, because a reconnect knows only what it was just told', () => {
+    const old = apply(EMPTY, {
+      type: 'link/event',
+      at,
+      event: event('mount.position', POSITION.data, '2026-07-30T21:04:09.000Z'),
+    });
+    const resnapshotted = apply(old, { type: 'link/snapshot', at: at + 5000, events: [] });
+
+    expect(resnapshotted.lastEvent).toBeNull();
+  });
+
+  it('survives a drop, so the age keeps climbing while the app is out of touch', () => {
+    // Rule 3 of the store's docs. A cleared value here would render as "no age" at precisely the
+    // moment the age is the most useful number on the screen.
+    const live = apply(EMPTY, { type: 'link/snapshot', at, events: [POSITION] });
+    const dropped = apply(live, {
+      type: 'link/retrying',
+      at: at + 100,
+      attempt: 1,
+      retryAt: at + 600,
+      failure: { kind: 'transport', message: 'closed' },
+    });
+
+    expect(dropped.lastEvent).toEqual(live.lastEvent);
   });
 });

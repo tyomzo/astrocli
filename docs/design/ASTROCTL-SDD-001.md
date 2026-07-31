@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.21.0
+**Version:** 1.22.0
 **Author:** Artiom
 **Date:** 2026-07-29
 **Status:** Draft
@@ -90,6 +90,28 @@ frame is never offered at all. §5.10.2's loop gains the §5.11.1 pre-flight and
 tiebreak that makes "drains in order" true at millisecond resolution. `synchronous = FULL` is argued
 rather than assumed. §8.3(7) remains unenforced per §5.10.4, and the agent now says so in its startup
 log rather than only in this document. Landed by M1-T11.
+
+**Change note (1.22.0):** §5.9's predictive-display sentence corrected by implementing it. **"A
+tracking mount's motion is exactly predictable" is true and reads as the opposite of what it
+means.** §5.2.3 stores a mechanical hour angle and recovers RA as `LST − HA`, and LST advances
+whether or not the motors do — so a mount tracking at the sidereal rate holds its RA, and it is the
+**idle** mount whose RA climbs, at the full sidereal rate of 1.00274 h per hour. Read as an
+instruction to "dead-reckon a tracking mount forward" the sentence produces a display that invents
+motion in the state an operator spends the whole night in, and stands still in the state that is
+actually moving; §5.9 now states the direction. **The confirmed/predicted/stale triad needs a
+fourth state for a slewing mount**, because a position measured 300 ms into an 835× goto is
+perfectly fresh *and* already wrong by arcminutes — freshness and trustworthiness come apart there,
+and the three names are all on the freshness axis. The display holds and says so; `mount.position`
+keeps its 1 Hz cadence through a slew, so the event stream remains the truth channel and there is
+nothing to extrapolate. **alt/az are not client-predictable** and §5.9's "dead-reckons the
+displayed coordinates" should not be read as including them: both change under a tracking mount as
+well as an idle one, and computing them needs the site coordinates §5.2.3 gives the *node* — a
+second implementation of the number the altitude limit refuses a slew on. They are shown as last
+reported, labelled. Two smaller ones: the **guardrail is quoted against §4.3's declared 1 Hz
+cadence, not the observed one**, since a link delivering a fifth of the contract is degraded rather
+than slower and the operator is entitled to see that; and **telemetry age must be skew-corrected**
+via §5.8.1's estimate, or a device forty seconds fast reports every event as forty seconds stale —
+§8.3's 3 s amber, thirteen times over, on a link that is working. Landed by M1-T15.
 
 ---
 
@@ -1060,9 +1082,37 @@ corresponding event arrives. On a link where a command may not have landed, opti
 lies about where the mount is, which is the one thing this display must never do. The store is
 shaped as an explicit reducer over the event stream, and subscription is selector-based because
 `mount.position` ticks at 1 Hz and must not re-render panels that do not read it. Telemetry carries
-three states — **confirmed, predicted, stale** — for the predictive display below. If the hub drops
-this client as a slow consumer (§5.8.3), the store must **resnapshot rather than resume from a
-hole**. Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state (a tracking mount's motion is exactly predictable), rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
+three states — **confirmed, predicted, stale** — for the predictive display below, plus a fourth,
+**in motion**, for a slewing mount (see below: it is not a fourth level of freshness). If the hub
+drops this client as a slow consumer (§5.8.3), the store must **resnapshot rather than resume from a
+hole**. Two link-latency affordances (§8.3): **predictive position display** — between `mount.position` updates the UI dead-reckons the displayed coordinates from the last update and the known tracking/slew state, rendering predicted values in a visually distinct "aging" style that resolves to confirmed on the next event; and **link-health surfacing** — header shows WS RTT and telemetry age, turning amber past 500 ms RTT / 3 s age and red on disconnect, so the operator always knows how stale their picture is before issuing commands. Telemetry age is `now − ts` **corrected by §5.8.1's skew estimate**, floored at the time since arrival.
+
+Four things about that dead reckoning are easy to get backwards, and all four were found by
+building it (M1-T15):
+
+- **A tracking mount's RA holds still; an idle mount's RA climbs.** §5.2.3 stores a mechanical hour
+  angle and recovers `RA = LST − HA`, and LST advances whether or not the motors do. Tracking at the
+  sidereal rate *is* standing still relative to the sky. It is the idle mount whose displayed RA
+  advances — at the full sidereal rate, 1.00274 h per hour — and that drift is the picture that tells
+  an operator their tracking is off before the stars trail. Lunar and solar are the same subtraction,
+  `sidereal − axis rate`, and are slower than sidereal because both bodies drift east against the
+  stars. One formula, not three branches; the PWA uses the driver's rate constants so the display and
+  the drive cannot disagree about which way the sky turns.
+- **Nothing is extrapolated during a slew.** A goto runs at up to 835× sidereal, so a model built on
+  tracking rates is wrong by degrees within a second. `mount.position` keeps its 1 Hz cadence
+  through a slew, so the event stream is still the truth channel: the display holds the last
+  confirmed numbers and marks them "in motion". This is a state of its own rather than a flavour of
+  `confirmed` because a position measured 300 ms into a goto is perfectly fresh and already wrong.
+- **alt/az are not predicted.** They change under a tracking mount as well as an idle one, and
+  computing them needs the site coordinates the *node* holds (§5.2.3) — reimplementing that in the
+  PWA would mean a second, worse version of the number the altitude limit refuses a slew on. They
+  are shown as last reported and labelled as such.
+- **The guardrail is quoted against the declared cadence.** Beyond 5 × §4.3's 1 Hz the model stops
+  and the value is marked stale rather than frozen. Not derived from the *observed* rate: a link
+  delivering one position every five seconds is a degraded link, not a link with a slower contract.
+
+The four states must be distinguishable by **shape and typography**, with colour only agreeing —
+the same requirement, for the same reasons, as the nudge badge's redundant encoding below. Phase 1 screens: connect panel, mount panel (coordinates, tracking, D-pad with press-and-hold slew — hold renews the slew TTL per §5.8.1, release sends stop, speed selector), camera panel (settings, capture, bulb countdown), live view/preview panel, header status bar (USB-04), e-stop button fixed in the header on every screen (USB-03, 44 px targets USB-12). Manifest + service worker per USB-09/10 (shell cached, data never cached).
 
 **The live-view panel must explain its own pauses.** During a capture the stream stops for about
 two seconds (§5.3.1 — one gphoto2 context, unavoidable). Driven by `capture.progress`, the panel

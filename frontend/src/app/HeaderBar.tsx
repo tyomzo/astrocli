@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { useDeploymentLabel } from '../lib/deployment';
 import { clockUtc } from '../lib/format';
 import { useNow } from '../lib/useNow';
-import type { LinkPhase, TelemetryState } from '../store/telemetry';
+import type { TelemetryState } from '../store/telemetry';
 import {
   selectCameraStatus,
   selectLink,
@@ -15,6 +15,7 @@ import { useUiStore } from '../store/ui';
 import type { Status } from '../ui/StatusBadge';
 import { StatusBadge } from '../ui/StatusBadge';
 import { EStopButton } from './EStopButton';
+import { LinkHealthBadge } from './LinkHealthBadge';
 
 /**
  * The header status bar — USB-04, SDD §5.9.
@@ -28,17 +29,22 @@ import { EStopButton } from './EStopButton';
  * §5.9 draws `●mnt ●cam ○stk`. Those three describe subsystems the *node* reports on, which makes
  * every one of them a claim that is only as current as the socket carrying it. Without a fourth
  * badge for the socket itself, a dead link renders as three healthy subsystems — the precise
- * failure §8.3(8) means by "degradation is explicit, never silent". M1-T15 hangs the RTT and
- * telemetry-age numerals off this badge.
+ * failure §8.3(8) means by "degradation is explicit, never silent". M1-T15 hung the RTT and
+ * telemetry-age numerals off that badge; it owns its own file now, and its own tap.
  *
  * For the same reason the three subsystem badges go to `unknown` — hollow, "not probed yet" —
  * whenever the link is not live. They are not reporting a subsystem that is down; they are
  * reporting that nobody is currently telling us anything about it, which is a different fact and
  * the honest one.
  *
- * The whole strip is a button. The operator who wants to know *why* a badge is hollow is already
- * looking at it, and the system panel behind it holds node health, the credential and the device
- * capabilities. Making them tap something elsewhere would be a navigation puzzle solved at night.
+ * # The strip is two buttons, not one
+ *
+ * It used to be one, opening the system detour, on the reasoning that the operator who wants to
+ * know *why* a badge is hollow is already looking at it. That still holds for `mnt`/`cam`/`stk`:
+ * the answer is node health, the credential and the device capabilities, all of which live on that
+ * screen. It does not hold for `link`, whose answer is two numbers that fit in the header — so the
+ * link badge reveals them in place instead, and since a button cannot nest inside a button, the
+ * strip became a row of two. The deployment marker sits outside both because it is not a control.
  */
 export function HeaderBar(): ReactNode {
   const link = useTelemetryStore(selectLink);
@@ -53,25 +59,33 @@ export function HeaderBar(): ReactNode {
   return (
     <header className="sticky top-0 z-20 border-b border-edge bg-surface/95 backdrop-blur">
       <div className="mx-auto flex w-full max-w-5xl items-start justify-between gap-3 px-3 py-2">
-        <button
-          type="button"
-          onClick={openSystem}
-          aria-label="Connection detail, credential and device capabilities"
-          className="flex min-h-touch min-w-0 flex-wrap items-center gap-x-4 gap-y-1 rounded-md px-1 text-left"
-        >
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           {deployment !== null && <DeploymentMarker label={deployment} />}
-          <StatusBadge label="link" status={linkStatus(link)} />
-          <StatusBadge label="mnt" status={live ? mountStatus(mount) : 'unknown'} />
-          <StatusBadge
-            label="cam"
-            status={live ? connectedStatus(camera, (value) => value.connected) : 'unknown'}
-          />
-          <StatusBadge
-            label="stk"
-            status={live ? connectedStatus(stack, (value) => value.connected) : 'unknown'}
-          />
-          <Clock />
-        </button>
+          <LinkHealthBadge />
+          <button
+            type="button"
+            onClick={openSystem}
+            aria-label="Connection detail, credential and device capabilities"
+            // Deliberately **not** `flex-1`. Letting this button absorb the leftover width packs
+            // it beside the link badge and saves a row while the link is green — and then, when
+            // the badge expands its numerals, the leftover width collapses and these three wrap
+            // onto three lines. Measured on a 412 px viewport: 97 px green against 185 px amber.
+            // A header that grows the moment the link degrades pushes the whole screen down at
+            // exactly the moment the operator is reading it, so the fixed two-row shape wins.
+            className="flex min-h-touch min-w-0 flex-wrap items-center gap-x-4 gap-y-1 rounded-md px-1 text-left"
+          >
+            <StatusBadge label="mnt" status={live ? mountStatus(mount) : 'unknown'} />
+            <StatusBadge
+              label="cam"
+              status={live ? connectedStatus(camera, (value) => value.connected) : 'unknown'}
+            />
+            <StatusBadge
+              label="stk"
+              status={live ? connectedStatus(stack, (value) => value.connected) : 'unknown'}
+            />
+            <Clock />
+          </button>
+        </div>
         <EStopButton />
       </div>
     </header>
@@ -92,22 +106,6 @@ function DeploymentMarker({ label }: { label: string }): ReactNode {
       {label}
     </span>
   );
-}
-
-function linkStatus(link: LinkPhase): Status {
-  switch (link.phase) {
-    case 'live':
-      return 'ok';
-    case 'authorizing':
-    case 'connecting':
-    case 'syncing':
-      return 'starting';
-    case 'retrying':
-    case 'unauthorized':
-      return 'down';
-    case 'idle':
-      return 'unknown';
-  }
 }
 
 function mountStatus(slot: TelemetryState['mountStatus']): Status {
