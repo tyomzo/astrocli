@@ -189,6 +189,18 @@ fitsrs = { version = "0.4.1" }
 # ...and the same argument for the JPEG side: `zune-jpeg` decodes what `jpeg-encoder` encoded.
 zune-jpeg = { version = "0.5.15" }
 
+# --- added by M2-T02 (the Canon gPhoto2 camera driver) ---
+# The libgphoto2 binding, pinned at the version M2-T01 proved every R10 operation against —
+# bulb included, which was ADD §10's highest risk (spikes/gphoto2-r10/FINDINGS.md).
+#
+# **This is the workspace's only dependency that needs a C library at *build* time**, and that is
+# why `astroctl-drivers` puts it behind a non-default `libgphoto2` feature rather than beside
+# `simulator`. `libgphoto2_sys` 1.2.3 runs `pkg-config` and then `bindgen` in its build script, so
+# without `libgphoto2-dev` on the machine the crate does not fail to *link* — it fails to
+# *compile*, and takes `cargo test --workspace` down with it. CI has no libgphoto2. See that
+# crate's manifest for the feature argument in full.
+gphoto2 = { version = "3.4.1" }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 
