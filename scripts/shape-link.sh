@@ -2,14 +2,15 @@
 #
 # shape-link.sh — constrain the field↔stack link of the M0-T08 harness with `tc`.
 #
-# Usage:  scripts/shape-link.sh [--latency <time>] [--loss <pct>] [--burst <size>]
-#                               [--queue <time>] <bandwidth>
+# Usage:  scripts/shape-link.sh [--to peer|operator] [--latency <time>] [--loss <pct>]
+#                               [--burst <size>] [--queue <time>] <bandwidth>
 #         scripts/shape-link.sh off
 #         scripts/shape-link.sh status
 #         scripts/shape-link.sh measure [MiB]
 # Exit:   0 = done, 1 = the shaping or the measurement failed, 2 = the script could not run
 #
-#   scripts/shape-link.sh 1mbit                     the T-HOL-1 link (SDD §9, T-HOL-1)
+#   scripts/shape-link.sh 1mbit                     the field↔stack link, for transfer pacing
+#   scripts/shape-link.sh --to operator 1mbit       the *operator's* link — the T-HOL-1 one
 #   scripts/shape-link.sh --latency 80ms --loss 1% 2mbit    a bad night on a phone tether
 #   scripts/shape-link.sh --latency 300ms 5mbit     a satellite-ish link, no rate ceiling worth
 #                                                   worrying about but a punishing RTT
@@ -46,18 +47,25 @@
 # What gets shaped
 # ---------------------------------------------------------------------------------------------
 #
-# Egress on each container's eth0, filtered to the *other node's address*:
+# Egress on a container's eth0, filtered to one destination:
 #
 #     prio 1:                      root, three bands, ordinary traffic through band 1 untouched
-#      └─ 1:3  netem  (delay/loss) the shaped band, reached only via the filter below
-#          └─  tbf    (rate)
-#     filter: ip dst <peer>  →  1:3
+#      └─ 1:3  netem    (delay/loss)  the shaped band, reached only via the filter below
+#          └─  tbf      (rate)
+#              └─ fq_codel            per-flow scheduling inside the shaped band
+#     filter: ip dst <destination>  →  1:3
 #
-# The filter is the point. A root qdisc with no filter would also throttle the operator's own
-# traffic — the PWA is served over the same eth0 through the published port — and a "1 Mbit link"
-# that also makes the UI crawl would prove the opposite of what T-HOL-1 asks. The two nodes are
-# shaped symmetrically, so both the frame upload (field→stack) and the preview push (stack→field)
-# meet the same link.
+# The filter is the point, and there are **two links to point it at** (`--to`). `peer` names the
+# other node's address and shapes field↔stack symmetrically, so both the frame upload and the
+# preview push meet the same ceiling; that is what M0-T08 built. `operator` names the bridge
+# gateway and shapes everything leaving for the workstation — the phone's link, and the one
+# T-HOL-1 is about, since `/ws`, `/ws/liveview` and the e-stop all travel it. Neither mode touches
+# the other's traffic, which is why "a 1 Mbit link" can mean either without also meaning both.
+#
+# `fq_codel` under the rate limiter is load-bearing rather than decorative; the comment in
+# `tc_apply_script` has the argument, but in one line: `tbf` alone is a single FIFO, so a
+# saturating stream delays everything behind it regardless of how many connections there are, and
+# connection separation could not be demonstrated on such a link because it would not help on one.
 #
 # `tc` has no ingress shaping worth the name without an ifb device, which is why this is done as
 # egress on both sides rather than ingress on one.
@@ -86,9 +94,21 @@ BURST="32kbit"
 QUEUE="400ms"
 BANDWIDTH=""
 COMMAND="apply"
+# Which of the harness's two links to constrain.
+#
+#   peer      field↔stack, filtered to the other node's address. The transfer agent's link; what
+#             ADD §5.4.4's degraded mode and PRD §8.1's pacing are about.
+#   operator  field→gateway, i.e. everything leaving the bridge for the workstation. This is the
+#             phone's link (ADD §5.5) and the one T-HOL-1 means: `/ws`, `/ws/liveview` and the
+#             e-stop all travel it, and connection separation is a claim about *it*.
+#
+# `peer` stays the default because it is what M0-T08 built this for, and because shaping the
+# operator's link makes the PWA crawl — which is correct when that is the experiment and
+# bewildering when it is not.
+TARGET="peer"
 MEASURE_MIB=1
 
-usage() { sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -106,6 +126,17 @@ while [[ $# -gt 0 ]]; do
         ;;
     --queue)
         QUEUE="${2:-}"
+        shift 2
+        ;;
+    --to)
+        TARGET="${2:-}"
+        case "$TARGET" in
+        peer | operator) ;;
+        *)
+            echo "shape-link: --to takes 'peer' or 'operator', not '$TARGET'" >&2
+            exit 2
+            ;;
+        esac
         shift 2
         ;;
     -h | --help)
@@ -181,7 +212,7 @@ in_netns() { # in_netns <container-id> <image> <privileged:0|1> <script>
 }
 
 # The qdisc chain for one direction, as a script for the sidecar's shell.
-tc_apply_script() { # tc_apply_script <peer-address>
+tc_apply_script() { # tc_apply_script <destination-address>
     local peer="$1" parent="1:3" handle="30:"
     local script="set -e
 tc qdisc del dev $IFACE root 2>/dev/null || true
@@ -200,9 +231,25 @@ tc qdisc add dev $IFACE root handle 1: prio
     if [[ -n "$BANDWIDTH" ]]; then
         script+="tc qdisc add dev $IFACE parent $parent handle $handle tbf rate $BANDWIDTH burst $BURST latency $QUEUE
 "
+        # fq_codel *under* the rate limiter, so the shaped band schedules per flow instead of
+        # first-in-first-out. This is not a refinement; without it the harness models a link no
+        # real network has and T-HOL-1 becomes unanswerable.
+        #
+        # tbf on its own is a single FIFO. A saturating live-view stream fills its ${QUEUE} of
+        # queue and every other packet — a position event, an e-stop's response — waits behind
+        # the whole backlog, no matter how many TCP connections they arrived on. On such a link
+        # connection separation buys exactly nothing, so a T-HOL-1 run against it would be
+        # measuring `tbf`, not the design.
+        #
+        # fq_codel hashes flows into separate queues and schedules between them, which is what
+        # every consumer router, every Linux default and the VPN endpoint in ADD §5.5 actually
+        # does. On *that* link the two-socket split of §8.3(5) is what saves the small flow —
+        # two connections are two flows and get two queues, whereas the multiplexed design it
+        # was chosen over would put both in one. The test then measures the decision.
+        script+="tc qdisc add dev $IFACE parent ${handle%:}: handle $((${handle%:} + 10)): fq_codel
+"
     fi
-    # Everything not addressed to the peer keeps the default band and is untouched — including the
-    # operator's traffic to the published port.
+    # Everything not addressed to the filtered destination keeps the default band and is untouched.
     script+="tc filter add dev $IFACE protocol ip parent 1:0 prio 1 u32 match ip dst $peer/32 flowid 1:3
 "
     printf '%s' "$script"
@@ -211,15 +258,32 @@ tc qdisc add dev $IFACE root handle 1: prio
 case "$COMMAND" in
 # ---------------------------------------------------------------------------------------
 apply)
-    echo "== shaping the field↔stack link =="
     echo "-- bandwidth ${BANDWIDTH:-uncapped}, latency ${LATENCY:-none}, loss ${LOSS:-none}"
-    in_netns "$FIELD_ID" "$FIELD_IMAGE" 1 "$(tc_apply_script "$STACK_IP")"
-    echo "-- field  → stack ($STACK_IP) shaped"
-    in_netns "$STACK_ID" "$STACK_IMAGE" 1 "$(tc_apply_script "$FIELD_IP")"
-    echo "-- stack  → field ($FIELD_IP) shaped"
-    echo
-    echo "OK: both directions shaped. 'scripts/shape-link.sh measure' to see it,"
-    echo "    'scripts/shape-link.sh off' to remove it."
+    if [[ "$TARGET" == "operator" ]]; then
+        # Only the field node's egress. The stack node never talks to the operator (STK-19,
+        # ARC-13), so there is no second direction to shape, and the operator's *requests* are
+        # unshaped — which is honest: an uplink is not the constrained direction on a phone
+        # tether, and the bytes T-HOL-1 is about all flow outward.
+        GATEWAY="$(harness_gateway "$FIELD_ID")"
+        [[ -n "$GATEWAY" ]] || {
+            echo "shape-link: cannot read the bridge gateway from $HARNESS_ENGINE inspect" >&2
+            exit 2
+        }
+        echo "== shaping the operator's link =="
+        in_netns "$FIELD_ID" "$FIELD_IMAGE" 1 "$(tc_apply_script "$GATEWAY")"
+        echo "-- field  → operator (via $GATEWAY) shaped"
+        echo
+        echo "OK: the operator's link is shaped; field↔stack is untouched."
+    else
+        echo "== shaping the field↔stack link =="
+        in_netns "$FIELD_ID" "$FIELD_IMAGE" 1 "$(tc_apply_script "$STACK_IP")"
+        echo "-- field  → stack ($STACK_IP) shaped"
+        in_netns "$STACK_ID" "$STACK_IMAGE" 1 "$(tc_apply_script "$FIELD_IP")"
+        echo "-- stack  → field ($FIELD_IP) shaped"
+        echo
+        echo "OK: both directions shaped."
+    fi
+    echo "    'scripts/shape-link.sh measure' to see it, 'scripts/shape-link.sh off' to remove it."
     ;;
 
 # ---------------------------------------------------------------------------------------

@@ -74,3 +74,15 @@ harness_address() {
 harness_image() {
     "$HARNESS_ENGINE" inspect -f '{{.Config.Image}}' "$1" 2>/dev/null
 }
+
+# The bridge's gateway address, as seen from inside a container — which is where the *operator*
+# is, from the field node's point of view.
+#
+# Needed because the two links this harness has are not the same link. field↔stack is
+# container-to-container and named by the peer's own address; field↔operator leaves the bridge for
+# the workstation, and every packet of it is addressed to the gateway. T-HOL-1 is about the second
+# one (the phone's link, ADD §5.5), so shape-link.sh has to be able to name it.
+harness_gateway() {
+    "$HARNESS_ENGINE" inspect -f \
+        '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' "$1" 2>/dev/null
+}
