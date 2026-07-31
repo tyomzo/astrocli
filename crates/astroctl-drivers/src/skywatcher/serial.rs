@@ -139,13 +139,23 @@ impl From<&SerialConfig> for SerialTimings {
 
 /// What the serial link tells the watchdog about its own health.
 ///
-/// **There is no consumer yet.** M1-T17's watchdog arm is unbuilt, and its task note is explicit
-/// that this heartbeat *replaces* the signal it will otherwise have — the facade currently logs a
-/// failed poll at `debug` and counts nothing — rather than adding a second one. So this is a named
-/// seam with one producer, shaped like `gphoto2::thread::fault_channel` for the same reason: the
-/// driver layer has no event bus (deliberately, per this crate's own rules), so a driver that
-/// learns something the operator needs publishes it on a channel and lets the facade turn it into
-/// an event.
+/// **The consumer exists and is not yet wired to this end.** M1-T17 built the arm —
+/// `astroctl_field::watchdog::MountLink` — against the only signal available without a serial
+/// port: the facade's 1 Hz position poll, whose failures it counts to the same
+/// `heartbeat_misses`. This channel *replaces* that signal rather than adding a second one, and
+/// the arm is written as a state machine over three observations so that the swap is a change of
+/// source with no change of behaviour: [`Heartbeat::Lost`] is the transition it already fires on,
+/// and [`Heartbeat::Recovered`] is its `Reached`-after-a-loss. Two watchdogs on one link would be
+/// two alerts for one cable.
+///
+/// What this end buys when it is wired: every completed exchange counts rather than one poll a
+/// second, so a goto's eight frames are covered; and a link-level verdict can tell "the port is
+/// gone" from "the mount is mute", which a failed position read cannot.
+///
+/// A named seam with one producer, shaped like `gphoto2::thread::fault_channel` for the same
+/// reason: the driver layer has no event bus (deliberately, per this crate's own rules), so a
+/// driver that learns something the operator needs publishes it on a channel and lets the facade
+/// turn it into an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Heartbeat {
     /// `heartbeat_misses` consecutive requests failed at the link level. Fired **once** per
@@ -160,7 +170,7 @@ pub enum Heartbeat {
 
 /// Where [`Heartbeat`] notices go.
 pub type WatchdogSink = mpsc::UnboundedSender<Heartbeat>;
-/// Where they arrive. M1-T17 owns this end.
+/// Where they arrive. M1-T17's watchdog arm owns this end.
 pub type WatchdogSource = mpsc::UnboundedReceiver<Heartbeat>;
 
 /// A watchdog channel.

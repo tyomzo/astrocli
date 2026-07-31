@@ -378,29 +378,21 @@ async fn the_field_node_is_killed_mid_session_and_resumes_the_session_it_was_in(
 
 /// The serial link dies during a goto.
 ///
-/// # This test asserts less than M1-T16 asked for, and the gap is the point
-///
-/// The task asks for a "watchdog alert". **There is no mount watchdog.**
-/// `mount.serial.heartbeat_misses` is in both shipped configs, is range-validated by the config
-/// loader, and is documented as "consecutive poll failures before watchdog fires (REL-02)" — and
-/// is read by nothing. `crates/astroctl-field/src/watchdog.rs` watches disk and clock only and
-/// says so in its own module doc ("the serial-heartbeat and USB-presence watchdogs of SDD §3 have
-/// nothing to watch; they arrive with their drivers in M1–M3"). The drivers arrived in M1-T02/T03;
-/// the watchdog did not follow.
-///
-/// So this scenario asserts what the system *does* do today, and names what it does not, rather
-/// than asserting a watchdog alert and failing — or being quarantined, which would hide a live
-/// REL-02 gap behind a skipped test. What an operator actually gets is:
+/// # What the operator gets
 ///
 ///   * `mount.status` flips to `fault` within about a poll period, and
 ///   * `mount.position` simply stops, and
-///   * `GET /api/mount/position` answers 502 `DEVICE_TRANSPORT`, and
-///   * **no `alert` at all** until they try to command the mount again.
+///   * `GET /api/mount/position` answers 502 `DEVICE_TRANSPORT` and says it is retryable, and
+///   * **one `critical` `MOUNT_LINK_LOST` alert** within `mount.serial.heartbeat_misses` polls of
+///     the loss, saying the mount was slewing when contact was lost — the sentence that sends
+///     them out to the rig rather than back to the phone, because nothing about an unplugged
+///     cable stops a motor.
 ///
-/// The last line is the one to fix. An operator watching the phone sees the pointing readout stop
-/// updating and a status badge change; nothing raises the alert that REL-02 exists to raise, and
-/// the tube is still moving. When the watchdog lands, the assertion marked below flips from
-/// "no alert" to "one alert", and this comment goes away.
+/// The fourth line read **"no `alert` at all"** when M1-T16 wrote this scenario, and the
+/// assertion below was left standing as a live record of REL-02's gap rather than quarantined:
+/// `mount.serial.heartbeat_misses` had been shipped, documented and range-validated since M0 and
+/// was read by nothing, which told the operator a protection existed. M1-T17 built the arm and
+/// this assertion inverted from "no alert" to "one alert", which is what it was there for.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_mount_link_falls_out_mid_slew() {
     let harness = Harness::attach();
@@ -482,18 +474,37 @@ async fn the_mount_link_falls_out_mid_slew() {
         position.body
     );
 
-    // REL-02's gap, asserted so it cannot close silently. When the watchdog lands this becomes
-    // `assert_eq!(alerts.len(), 1)` and the doc comment above goes.
+    // REL-02, the assertion this scenario exists for. One alert, not one per failed poll: the
+    // link stays down for the rest of this test, so an arm that alerted on the condition rather
+    // than on the transition would have raised several by now. `noticed_at` is the `mount.status`
+    // flip, which the poll publishes one tick *after* the first miss, so the alert lands about a
+    // poll period later and is comfortably inside the four seconds slept above.
+    let losses = harness_alerts(&events, "MOUNT_LINK_LOST", noticed_at);
+    assert_eq!(
+        losses.len(),
+        1,
+        "REL-02 asks for exactly one link-loss alert; saw {}",
+        losses.len()
+    );
+    assert_eq!(losses[0].str_field("severity"), "critical");
+    // The tube is still moving — the whole reason this alert outranks a status badge.
+    let message = losses[0].str_field("message");
+    assert!(
+        message.contains("slewing when contact was lost"),
+        "the alert must say the mount was moving when the link went: {message}"
+    );
+
+    // Nothing else fired. The interrupted goto's own `DEVICE_TRANSPORT` warning comes later, when
+    // the operator commands the mount again — see below.
     let alerts = events
         .topic("alert")
         .into_iter()
         .filter(|event| event.at > noticed_at)
         .collect::<Vec<_>>();
-    assert!(
-        alerts.is_empty(),
-        "an alert now fires for a lost mount link — REL-02's watchdog appears to have landed. \
-         That is good news: tighten this assertion to expect exactly one, and delete the comment \
-         above it. Saw: {:?}",
+    assert_eq!(
+        alerts.len(),
+        1,
+        "a lost link should be one alert and no more; saw: {:?}",
         alerts
             .iter()
             .map(|event| event.str_field("code").to_owned())
@@ -561,10 +572,26 @@ async fn the_mount_link_falls_out_mid_slew() {
         position.body
     );
 
+    // …and the critical alert is not left standing with no answer. One `info`, once — the same
+    // edge trigger read from the other side.
+    events
+        .wait_for_since("alert", reconnected_at, Duration::from_secs(30), |event| {
+            event.str_field("code") == "MOUNT_LINK_LOST"
+        })
+        .await;
+    let recoveries = harness_alerts(&events, "MOUNT_LINK_LOST", reconnected_at);
+    assert_eq!(
+        recoveries.len(),
+        1,
+        "recovery is announced once; saw {}",
+        recoveries.len()
+    );
+    assert_eq!(recoveries[0].str_field("severity"), "info");
+
     // Put the node back the way the next scenario needs it. `ensure_pair_running` would do this
     // anyway; doing it here as well keeps the cost off whichever test runs next.
     harness.recreate_field(&[]).await;
-    eprintln!("mount link loss ok: fault observed, no watchdog alert (REL-02 gap), recovered");
+    eprintln!("mount link loss ok: one MOUNT_LINK_LOST critical naming the slew, recovered once");
 }
 
 /// Alerts with `code`, raised after `since`.

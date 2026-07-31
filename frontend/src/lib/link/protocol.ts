@@ -48,7 +48,7 @@ export type WorkerState = 'starting' | 'ready' | 'busy' | 'restarting' | 'failed
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 
 /**
- * The closed `ErrorCode` set of SDD §4.2 — 26 codes, the order of `ErrorCode::ALL`.
+ * The closed `ErrorCode` set of SDD §4.2 — 27 codes, the order of `ErrorCode::ALL`.
  *
  * Exported as a value as well as a type because the UI switches on these strings and a typo in a
  * `case` label is otherwise silent.
@@ -62,6 +62,11 @@ export const ERROR_CODES = [
   // operator their request was malformed at the moment their emergency stop worked. 409, and
   // not retryable — re-issuing the goto would drive the mount back into whatever stopped it.
   'ABORTED',
+  // REL-02's watchdog verdict, added by M1-T17 (§4.2, 27 codes): the mount has missed
+  // `mount.serial.heartbeat_misses` consecutive polls. Alert-only — no route returns it — and it
+  // is the one alert code whose message may say the tube was slewing when contact was lost, which
+  // is what turns "watch the badge" into "go outside".
+  'MOUNT_LINK_LOST',
   'MOUNT_TIMEOUT',
   'CAMERA_TIMEOUT',
   'DEVICE_TIMEOUT',

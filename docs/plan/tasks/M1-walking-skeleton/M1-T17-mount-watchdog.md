@@ -1,7 +1,7 @@
 # M1-T17 — Mount watchdog: link loss becomes an alert
 
 **Milestone:** M1 (post-exit addendum) · **Depends on:** M1-T03, M1-T05 · **Crates:** astroctl-field, frontend/
-**Size:** S · **Status:** not started
+**Size:** S · **Status:** done
 **Spec:** PRD REL-02; SDD §5.4 (watchdog), §4.3 `alert`; config `mount.serial.heartbeat_misses`
 
 ## Why this task exists, added after M1's exit

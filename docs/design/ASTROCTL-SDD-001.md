@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.28.0
+**Version:** 1.29.0
 **Author:** Artiom
 **Date:** 2026-07-31
 **Status:** Draft
@@ -271,6 +271,21 @@ low-speed slew — so `mount.status` is synthesised from the driver's own record
 commanded, with the status word supplying only what that record cannot know. Park/unpark and `sync`
 are recorded as the two places this driver declines to send an unverified opcode. Landed by M3-T04.
 
+**Change note (1.29.0):** §4.2 gains `MOUNT_LINK_LOST`, 26 → 27 codes, and §5.4's watchdog
+paragraph is corrected by building the arm it specifies (M1-T17). **A validated config key with no
+consumer is worse than a missing one**: `mount.serial.heartbeat_misses` has been shipped,
+documented and range-validated since M0 and was read by nothing, which told the operator REL-02's
+protection existed. The alert needed a code of its own rather than `DEVICE_TRANSPORT`, because the
+two send the operator to different places — one is a retry, the other is a walk out to the rig.
+**§5.4's "for serial loss during motion, issue priority-lane stop" is not implementable from this
+arm and is deferred, deliberately**: the arm's evidence *is* that no command reaches the mount, so
+a stop it issues cannot arrive. It becomes possible only from §5.2.4's priority lane, whose
+`Heartbeat::Lost` fires while the port is still open and can still preempt an in-flight exchange —
+so the autonomous stop of REL-02/03 belongs to the driver-level heartbeat, not to the facade's
+poll. **The alert is edge-triggered and carries the motion state**: "the mount was slewing when
+contact was lost" is the sentence that changes what the operator does next, and it is recoverable
+only from the last status the node could read, since by definition it cannot read another.
+
 ---
 
 ## 1. Introduction
@@ -465,6 +480,7 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | `NOT_CONNECTED`, `UNSUPPORTED`, `BUSY` | 409 | no | device state (§5.1), orchestrator FSM (§5.6) |
 | `ABORTED` | 409 | no | `DeviceError::Aborted` — a motion that had *started* was stopped by an e-stop, a safety limit or an operator stop. The 409 twin of `CANCELLED`, and separate from it because `CANCELLED` is a stacking job and this is the telescope; rendering worker copy for an e-stop sends the operator to the wrong place. Never retryable: the request was valid, but re-issuing it drives the mount back into whatever stopped it |
 | `MOUNT_TIMEOUT`, `CAMERA_TIMEOUT`, `DEVICE_TIMEOUT` | 502 | **yes** | `DeviceError::Timeout`, qualified by which device |
+| `MOUNT_LINK_LOST` | 502 | **yes** | alert-only in M1, no route returns it: the §5.4 watchdog's verdict after `mount.serial.heartbeat_misses` consecutive polls failed to reach the mount (REL-02). Distinct from `MOUNT_TIMEOUT`, which is one missed reply and is retried for the operator; this one is a *link*, and the operator's move is to walk out to the rig — the tube may still be slewing, because nothing about an unplugged cable stops a motor. The status and retryability are what `DEVICE_TRANSPORT` already answers for the same condition |
 | `DEVICE_TRANSPORT` | 502 | **yes** | `DeviceError::Transport` |
 | `DEVICE_PROTOCOL` | 502 | no | `DeviceError::Protocol` |
 | `DEVICE_REJECTED` | 422 | no | `DeviceError::Rejected` |
@@ -1043,6 +1059,8 @@ impl SafeMount /* implements MountDevice */ {
 ```
 
 Watchdogs (one task, 1 Hz tick): serial heartbeat freshness; camera thread liveness; disk free vs. thresholds (REL-12: warn → pause-after-frame); clock sync via `adjtimex` state (REL-14 warning). Watchdog actions publish `alert` events and, for serial loss during motion, issue priority-lane stop — a mount slewing on a dead link is the one scenario where the watchdog acts autonomously (REL-02/03). The disk and clock half runs at the §4.3 `system.health` cadence of 60 s rather than 1 Hz, edge-triggered, and has since M0-T05: a `statvfs` sixty times a minute answers a question whose thresholds are in gigabytes. The 1 Hz figure belongs to the hardware watchdogs that arrive with their devices.
+
+**The mount-link arm, and where the autonomous stop actually lives (M1-T17).** The serial-heartbeat half landed at the *facade's* poll cadence, not the watchdog task's: `mount.serial.heartbeat_misses` consecutive position polls that fail to reach the mount raise one `critical` `MOUNT_LINK_LOST` (§4.2), the first successful poll clears it with one `info`, and a deliberate disconnect is not a loss and never alerts. It sits in the poll loop because that is the only place that sees a poll's whole verdict, and it is a pure state machine over three observations (reached / missed / not connected) so that §5.2.4's `Heartbeat::Lost{misses}` can *replace* the signal without becoming a second consumer. **The priority-lane stop of the paragraph above is not part of it, and cannot be**: the arm's evidence is that no command reaches the mount, so a stop it issued would not arrive either. That action belongs to the driver-level heartbeat, which fires while the port is still open and can preempt an in-flight exchange — the one place where "stop a mount slewing on a dying link" is more than a hope.
 
 **Obligations found by implementing this (M1-T05).** The sketch above is accurate about *what* is enforced and silent about six things that decide whether it can be. Each of these was a defect until it was fixed, not a design preference:
 

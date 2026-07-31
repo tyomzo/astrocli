@@ -251,6 +251,13 @@ function describeMount(status: Slot<MountStatus>): string {
     case 'parked':
       return parked ? 'Parked. Motion is refused until it is unparked.' : 'Parked.';
     case 'fault':
-      return 'Faulted. Motion is refused until the fault is acknowledged.';
+      // Not "until it is acknowledged": there is no acknowledgement, here or on the node, and a
+      // sentence that invents one sends the operator looking for a button. What they need is that
+      // this app has stopped commanding — and that the app stopping is not the mount stopping,
+      // which is the one thing REL-02's `MOUNT_LINK_LOST` alert is raised to say.
+      return (
+        'Faulted. Motion commands are withheld until the mount says otherwise — and a mount ' +
+        'that has stopped answering may still be moving.'
+      );
   }
 }
