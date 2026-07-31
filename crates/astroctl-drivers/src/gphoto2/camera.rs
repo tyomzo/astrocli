@@ -53,7 +53,9 @@ use astroctl_core::types::{
     AvailableSettings, BatteryStatus, CameraCapabilities, CameraSettings, DeviceInfo, ImageFormat,
     StorageInfo,
 };
-use astroctl_hal::camera::{Camera, CaptureRequest, CaptureResult, CapturedFile, LiveViewFrame};
+use astroctl_hal::camera::{
+    Camera, CaptureRequest, CaptureResult, CapturedFile, CapturedFileKind, LiveViewFrame,
+};
 use astroctl_hal::registry::{CameraFactory, DetectedDevice, DriverInitError};
 use astroctl_hal::stream::FrameStream;
 use async_trait::async_trait;
@@ -354,8 +356,21 @@ impl CanonGPhoto2Camera {
             return Err(aborted());
         }
 
-        let mut files: Vec<CapturedFile> = Vec::with_capacity(captured.files.len());
-        for file in &captured.files {
+        // **Raw first, which is not the order the body hands them over.** `CaptureResult::files`
+        // is documented as raw first, and the obvious implementation — the trigger's own file,
+        // then whatever the event drain added — gets that wrong on the reference body: shooting
+        // RAW+JPEG, `capture_image()` returned the *JPEG* and the CR3 arrived as the `NewFile`
+        // event, so the pair came out `[Jpeg, Raw]`. `raw()` and `jpeg()` search by kind and were
+        // unaffected, which is exactly why this would have gone unnoticed until something
+        // iterated `files` and treated the first entry as the science frame.
+        let mut ordered = captured.files.clone();
+        ordered.sort_by_key(|file| match file.kind() {
+            CapturedFileKind::Raw => 0,
+            CapturedFileKind::Jpeg => 1,
+        });
+
+        let mut files: Vec<CapturedFile> = Vec::with_capacity(ordered.len());
+        for file in &ordered {
             let dir = request.dir.clone();
             let stem = request.stem.clone();
             let file_ref = file.clone();
@@ -1184,6 +1199,36 @@ mod tests {
         assert_eq!(result.settings.shutter, "30");
         assert_eq!(result.settings.iso, "1600");
         assert_eq!(result.exposure, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn a_raw_plus_jpeg_result_lists_the_raw_first_whatever_order_the_body_used() {
+        // Scripted in the order the R10 actually produced on hardware: shooting RAW+JPEG, the
+        // trigger call returned the *JPEG* and the CR3 arrived as the `NewFile` event. Taking the
+        // body's order would put the JPEG at `files[0]`, against HAL-03's "raw first" — and
+        // `raw()`/`jpeg()` search by kind, so nothing would have noticed until a consumer
+        // iterated the list and treated the first entry as the science frame.
+        let (state, camera) = timed_camera().await;
+        state.capture_yields(&["capt0000.jpg", "capt0000.cr3"]);
+        let dir = scratch_dir("rawjpeg-order");
+
+        let result = camera
+            .capture(&CaptureRequest::new(&dir, "light_pair"))
+            .await
+            .expect("captures");
+
+        assert_eq!(result.files.len(), 2);
+        assert_eq!(
+            result.files[0].kind,
+            astroctl_hal::camera::CapturedFileKind::Raw,
+            "the science file must come first however the body ordered them"
+        );
+        assert_eq!(
+            result.files[1].kind,
+            astroctl_hal::camera::CapturedFileKind::Jpeg
+        );
+        assert_eq!(result.files[0].path, dir.join("light_pair.cr3"));
+        assert_eq!(result.files[1].path, dir.join("light_pair.jpg"));
     }
 
     #[tokio::test]

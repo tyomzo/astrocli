@@ -49,6 +49,7 @@ use std::time::{Duration, Instant};
 
 use astroctl_core::config::{CameraConfig, CameraDriver, CameraTimeouts};
 use astroctl_core::error::DeviceError;
+use astroctl_core::types::ImageFormat;
 use astroctl_drivers::gphoto2::CanonGPhoto2CameraFactory;
 use astroctl_hal::camera::{Camera, CaptureRequest};
 use astroctl_hal::registry::CameraFactory;
@@ -335,6 +336,144 @@ async fn a_timed_capture_lands_a_well_formed_cr3() {
 }
 
 #[tokio::test]
+#[ignore = "needs a Canon camera on USB; FIRES THE SHUTTER; run with --ignored --nocapture"]
+async fn a_raw_plus_jpeg_capture_lands_both_files_under_one_stem() {
+    // **The one path the mock cannot honestly stand in for.** The second file of a RAW+JPEG pair
+    // does not come back from `capture_image()` — it arrives as a separate `NewFile` event, and
+    // whether the body emits it inside the driver's settle window is a fact about the camera, not
+    // about the code. A review found the first version of the drain returning on the first file,
+    // which would land the raw, leave the JPEG queued, and let the *next* capture download it
+    // under the next frame's name. This is that fix, checked against the body that produces it.
+    let camera: Arc<dyn Camera> = CanonGPhoto2CameraFactory::new()
+        .create(&config())
+        .expect("this build has the libgphoto2 backend");
+    camera.connect().await.expect("connect");
+
+    println!("\n=== M2-T03 · RAW+JPEG ===\n");
+    let before = camera.settings().await.expect("settings");
+    if before.shutter.eq_ignore_ascii_case("bulb") {
+        println!("dial is on Bulb, so no timed capture can run; skipping");
+        println!("--- move the mode dial to M and re-run to exercise RAW+JPEG ---");
+        camera.disconnect().await.expect("disconnect");
+        return;
+    }
+
+    let available = camera.available_settings().await.expect("choices");
+    assert!(
+        available.formats.contains(&ImageFormat::RawPlusJpeg),
+        "the body does not offer RAW+JPEG: {:?}",
+        available.formats
+    );
+    camera
+        .set_image_format(ImageFormat::RawPlusJpeg)
+        .await
+        .expect("select RAW+JPEG");
+    println!("format set to RAW+JPEG (was {:?})", before.format);
+
+    let dir = scratch_dir("rawjpeg");
+    let started = Instant::now();
+    let result = camera
+        .capture(&CaptureRequest::new(&dir, "light_pair"))
+        .await
+        .expect("capture");
+    println!(
+        "capture: {} file(s) in {:?}",
+        result.files.len(),
+        started.elapsed()
+    );
+    for file in &result.files {
+        println!(
+            "  {:?} {} ({:.1} MB)",
+            file.kind,
+            file.path.display(),
+            file.size_bytes as f64 / 1e6
+        );
+    }
+
+    let raw = result.raw().expect("a science file");
+    let jpeg = result
+        .jpeg()
+        .expect("the body was set to RAW+JPEG, so the JPEG must have been collected too");
+    assert_eq!(raw.path, dir.join("light_pair.cr3"));
+    assert_eq!(jpeg.path, dir.join("light_pair.jpg"));
+    assert_is_a_cr3(&raw.path);
+    // The JPEG is named from the body's own extension, so it must not have been landed as `.cr3`
+    // and handed to a raw decoder.
+    let jpeg_bytes = std::fs::read(&jpeg.path).expect("the JPEG is readable");
+    assert_eq!(
+        &jpeg_bytes[..2],
+        &[0xFF, 0xD8],
+        "{} does not start with a JPEG SOI marker",
+        jpeg.path.display()
+    );
+    println!(
+        "  jpeg is a well-formed JPEG ({:.1} MB)",
+        jpeg_bytes.len() as f64 / 1e6
+    );
+
+    assert_eq!(
+        listing(&dir),
+        vec!["light_pair.cr3".to_owned(), "light_pair.jpg".to_owned()],
+        "both files, one stem, no temporary"
+    );
+
+    // The event queue must be empty afterwards, or the *next* capture inherits this frame's
+    // JPEG. Proved by taking a second frame and checking it got its own files rather than three.
+    let second = camera
+        .capture(&CaptureRequest::new(&dir, "light_second"))
+        .await
+        .expect("second capture");
+    println!("second capture: {} file(s)", second.files.len());
+    assert_eq!(
+        second.files.len(),
+        2,
+        "the second capture must get exactly its own pair — more means the first frame left an \
+         event queued, which is the failure the drain exists to prevent"
+    );
+
+    // Leave the body as it was found.
+    camera
+        .set_image_format(before.format)
+        .await
+        .expect("restore format");
+    camera.disconnect().await.expect("disconnect");
+    println!("=== run complete ===\n");
+}
+
+/// Whether the body currently offers a bulb mechanism, asserting the refusal when it does not.
+///
+/// The mirror of the timed path's dial check, and it exists for the same reason: **the physical
+/// mode dial decides which of the two mechanisms is reachable, and no test can move it.** With the
+/// dial on M the R10 enumerates 52 timed shutter speeds and no `bulb`, so `has_bulb` is derived
+/// as false and `capture_bulb` must answer `Unsupported` — which is worth proving on hardware
+/// rather than skipping past, because it is the capability report and the operation agreeing with
+/// each other about a body neither of them was told about.
+async fn bulb_available(camera: &Arc<dyn Camera>, dir: &Path) -> bool {
+    if camera.capabilities().has_bulb {
+        return true;
+    }
+    let error = camera
+        .capture_bulb(
+            &CaptureRequest::new(dir, "light_nobulb"),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("a body offering no `bulb` shutter cannot take a bulb exposure");
+    println!("the body offers no bulb mode (mode dial is off Bulb): {error}");
+    assert!(
+        matches!(error, DeviceError::Unsupported),
+        "a body that cannot do it is `Unsupported`, not a failure: {error:?}"
+    );
+    assert_eq!(
+        listing(dir),
+        Vec::<String>::new(),
+        "a refused bulb exposure writes nothing"
+    );
+    println!("--- move the mode dial to Bulb and re-run to exercise the bulb path ---");
+    false
+}
+
+#[tokio::test]
 #[ignore = "needs a Canon camera on USB; FIRES THE SHUTTER for 10 s; run with --ignored --nocapture"]
 async fn a_ten_second_bulb_exposure_lasts_ten_seconds() {
     let camera: Arc<dyn Camera> = CanonGPhoto2CameraFactory::new()
@@ -343,12 +482,12 @@ async fn a_ten_second_bulb_exposure_lasts_ten_seconds() {
     camera.connect().await.expect("connect");
 
     println!("\n=== M2-T03 · 10 s bulb ===\n");
-    assert!(
-        camera.capabilities().has_bulb,
-        "the body did not list `bulb` among its shutters — is the mode dial on Bulb?"
-    );
-
     let dir = scratch_dir("bulb");
+    if !bulb_available(&camera, &dir).await {
+        camera.disconnect().await.expect("disconnect");
+        return;
+    }
+
     let requested = Duration::from_secs(10);
 
     println!("--- LISTEN TO THE SHUTTER: 10 s exposure starting ---");
@@ -404,12 +543,12 @@ async fn an_abort_mid_bulb_returns_promptly_and_leaves_nothing_on_disk() {
     camera.connect().await.expect("connect");
 
     println!("\n=== M2-T03 · abort mid-bulb ===\n");
-    assert!(
-        camera.capabilities().has_bulb,
-        "the body offers no bulb mode"
-    );
-
     let dir = scratch_dir("abort");
+    if !bulb_available(&camera, &dir).await {
+        camera.disconnect().await.expect("disconnect");
+        return;
+    }
+
     let dir_for_task = dir.clone();
     let camera_for_task = Arc::clone(&camera);
 
