@@ -48,23 +48,22 @@ const BULB_KEY: &str = "eosremoterelease";
 /// it; too short and a RAW+JPEG session silently loses its JPEGs.
 const EVENT_POLL: Duration = Duration::from_millis(600);
 
-/// How long to wait for the frame after a bulb release.
+/// How long to let the binding finish previous traffic before opening the shutter.
 ///
-/// Longer than [`EVENT_POLL`] because here the frame has not been handed over at all — the
-/// release returns as soon as the shutter closes and the body then has to read out and encode a
-/// full-size frame. M2-T01 saw the `NewFile` arrive well inside 30 s for a 10 s exposure, and
-/// M2-T03 measured a 10 s bulb complete end-to-end in 11.0 s (1.5 MB dark frame) and 22.0 s
-/// (23.5 MB lit frame).
+/// One poll window's worth. It is not a guess at how long the camera needs — it is one turn of
+/// libgphoto2's event pump, which is what actually advances a transaction that is "in progress".
+const SETTLE_BUDGET: Duration = EVENT_POLL;
+
+/// How long to pause before retrying a shutter press the binding was too busy to accept.
+const BUSY_RETRY_PAUSE: Duration = Duration::from_millis(400);
+
+/// Slack added to an aborted exposure's own length when waiting for its orphaned frame.
 ///
-/// **It must stay comfortably below `camera.timeouts.capture_extra_seconds`** (30 by default),
-/// because that is the *only* slack the async budget has over the exposure —
-/// `OpClass::Capture(d)` is `d + capture_extra_seconds`. Set equal to it, this wait would consume
-/// the entire allowance and any overhead at all would blow the budget and *wedge the camera
-/// thread* instead of returning the "the camera never announced a file" error below, which no
-/// caller could then ever observe. Twenty leaves ten seconds for the press, the release and the
-/// reply. Configuring `capture_extra_seconds` below ~20 trades this diagnosis back for the wedge
-/// protocol, which is a safe outcome but a much less informative one.
-const BULB_EVENT_BUDGET: Duration = Duration::from_secs(20);
+/// The wait is `2 × time the shutter was open + this`, because the body's dark-frame pass matches
+/// the real exposure. The margin covers the readout and the event hop; five seconds was measured
+/// to be *just* too short on its own for a three-second abort, which is how the doubling was
+/// found in the first place.
+const ABORTED_DRAIN_MARGIN: Duration = Duration::from_secs(6);
 
 /// Builds [`LibGphoto2Ops`] on the camera thread.
 #[derive(Debug, Default)]
@@ -177,6 +176,66 @@ impl LibGphoto2Ops {
             .iter()
             .find(|choice| choice.contains("Release Full"))?;
         Some((widget, press, release.clone()))
+    }
+
+    /// Removes a frame from the camera's own storage.
+    ///
+    /// HAL-03 requires an aborted capture to leave nothing behind before it resolves, and with
+    /// `capturetarget=Internal RAM` "behind" includes the camera: the body holds a frame in a
+    /// buffer that only a download or a delete frees, and this path deliberately does not
+    /// download.
+    ///
+    /// **The stronger claim is unproven.** M2-T03 saw every bulb frame fail after one aborted
+    /// exposure — in a *fresh process*, so the state was on the camera rather than in the driver
+    /// — and an occupied buffer was the obvious explanation. Adding this delete did not fix it,
+    /// and the camera then dropped off USB altogether, which makes a fading body an equally good
+    /// explanation for the whole episode and leaves the two confounded. See the pending-hardware
+    /// note in the task file: the sequence to re-run is abort → bulb, on a body known to be
+    /// healthy. This call is kept because the contract asks for it regardless of what it fixes.
+    ///
+    /// Best effort: a body that refuses the delete has told us nothing we can act on here, and
+    /// the failure the operator would see is the same one they would see if we had not tried.
+    fn discard_from_camera(&self, file: &RawFileRef) {
+        let Ok(camera) = self.camera() else {
+            return;
+        };
+        match camera.fs().delete_file(&file.folder, &file.name).wait() {
+            Ok(()) => tracing::debug!(
+                file = %file.name,
+                "removed an abandoned frame from the camera's buffer"
+            ),
+            Err(error) => tracing::warn!(
+                file = %file.name,
+                %error,
+                "could not remove an abandoned frame from the camera; the next capture may find \
+                 the buffer still occupied"
+            ),
+        }
+    }
+
+    /// Opens the shutter, retrying once if the binding is still busy with the previous frame.
+    ///
+    /// `I/O in progress` is not a refusal, it is a *not yet*: libgphoto2 is mid-transaction and
+    /// says so. M2-T03 met it on a 60 s bulb exposure issued straight after a 30 s one, with the
+    /// download of the first frame complete and the driver believing the camera idle. The pre-
+    /// drain above removes most of the window and this closes the rest, because "the camera is
+    /// busy" is a reason to wait rather than to fail a frame the operator asked for.
+    ///
+    /// Exactly one retry, and only for this error: a press that fails twice, or fails for any
+    /// other reason, is a real failure and returning it is what lets the operator see it.
+    fn press_shutter(&self, widget: &RadioWidget, press: &str) -> Result<(), DeviceError> {
+        let Err(error) = self.commit(widget, press) else {
+            return Ok(());
+        };
+        if !format!("{error}").contains("I/O in progress") {
+            return Err(error);
+        }
+        tracing::debug!("the camera was still busy with the previous frame; retrying the shutter");
+        std::thread::sleep(BUSY_RETRY_PAUSE);
+        // Pump the queue once more — this is what actually lets the binding finish, rather than
+        // the sleep.
+        let _ = self.drain_events(SETTLE_BUDGET, false);
+        self.commit(widget, press)
     }
 
     /// Writes one choice to an already-fetched widget.
@@ -454,6 +513,7 @@ impl CamOps for LibGphoto2Ops {
         duration: Duration,
         abort: &AbortSignal,
         since: u64,
+        file_wait: Duration,
     ) -> Result<RawCapture, DeviceError> {
         // SDD §5.3.2's procedure, as M2-T01 proved it on the body: press, hold, release.
         let Some((widget, press, release)) = self.bulb_tokens() else {
@@ -464,17 +524,32 @@ impl CamOps for LibGphoto2Ops {
         // The shutter opens here. From this point there is exactly one thing that must happen on
         // every path out of this function, and it is the release.
         //
-        // **Including this one.** A failing `commit` is precisely the ambiguous case: `set_config`
-        // may have reached the body and only the acknowledgement been lost, in which case the
-        // shutter is open and returning here would leave it open with nothing to close it. The
-        // release is idempotent — it is what `abort` sends at any time — so attempting it costs a
-        // round trip and removes the one failure mode that outlives the request.
-        if let Err(error) = self.commit(&widget, &press) {
+        // **Clear the decks first.** A bulb exposure that follows another one closely meets
+        // `I/O in progress` on the press: libgphoto2's PTP layer is still finishing the previous
+        // frame's traffic, and a `set_config` issued into that is refused outright. M2-T03 hit
+        // this taking a 60 s frame straight after a 30 s one — which is not an edge case, it is
+        // what a sequencer does all night. Pumping the event queue lets the binding finish what
+        // it was doing and, as a bonus, collects any event the previous frame left behind, which
+        // would otherwise be mistaken for this frame's file below.
+        for leftover in self.drain_events(SETTLE_BUDGET, false).files {
+            // Not merely dropped: an orphan still occupying the body's buffer is what stops the
+            // exposure below producing a file at all.
+            self.discard_from_camera(&leftover);
+        }
+
+        // **The shutter is released even if the press failed.** That is the ambiguous case:
+        // `set_config` may have reached the body and only the acknowledgement been lost, leaving
+        // the shutter open with nothing to close it. The release is idempotent — it is what
+        // `abort` sends at any time — so attempting it costs a round trip and removes the one
+        // failure mode that outlives the request.
+        if let Err(error) = self.press_shutter(&widget, &press) {
             let _ = self.commit(&widget, &release);
             return Err(error);
         }
 
+        let opened = std::time::Instant::now();
         let aborted = abort.hold(duration, since);
+        let exposed_for = opened.elapsed();
 
         // Released unconditionally, before anything is allowed to return. The spike flagged the
         // failure of this call as "SHUTTER MAY STILL BE OPEN", which is the one outcome here that
@@ -492,13 +567,31 @@ impl CamOps for LibGphoto2Ops {
         }
 
         if aborted {
-            // The body still made an exposure and will still announce it. Drain the event so the
-            // *next* capture does not read this frame's `NewFile` and download it under the next
-            // frame's name — but do not download it here: an aborted capture leaves nothing on
-            // disk.
-            let orphaned = self.drain_events(BULB_EVENT_BUDGET, true);
+            // **The body still made an exposure, and the frame has to come off the camera before
+            // this returns.** Not for the disk's sake — an aborted capture downloads nothing —
+            // but for the *camera's*: with `capturetarget=Internal RAM` the buffer holds one
+            // frame, and only a download or a delete frees it. HAL-03 requires the cleanup before
+            // the abort resolves; this is the camera-side half of it. See
+            // [`discard_from_camera`](Self::discard_from_camera) for what is and is not proven
+            // about the consequences of skipping it.
+            //
+            // The wait scales with how long the shutter was actually open, because the dark-frame
+            // pass matches the *real* exposure rather than the requested one — an abort three
+            // seconds into a 300 s frame is followed by about three seconds of processing, not
+            // three hundred. Capped by the completed path's own budget so a late abort cannot
+            // outlast the operation.
+            let settle = exposed_for
+                .saturating_mul(2)
+                .saturating_add(ABORTED_DRAIN_MARGIN)
+                .min(file_wait);
+            let orphaned = self.drain_events(settle, true);
+            for file in &orphaned.files {
+                self.discard_from_camera(file);
+            }
             tracing::debug!(
                 files = orphaned.files.len(),
+                exposed_s = exposed_for.as_secs_f64(),
+                settle_s = settle.as_secs_f64(),
                 "discarded the frame from an aborted bulb exposure"
             );
             return Err(DeviceError::Aborted(
@@ -508,11 +601,16 @@ impl CamOps for LibGphoto2Ops {
 
         // Unlike the timed path there is no returned path: the frame arrives only as an event,
         // and so does the exposure the body reports.
-        let drained = self.drain_events(BULB_EVENT_BUDGET, true);
+        let drained = self.drain_events(file_wait, true);
         if drained.files.is_empty() {
-            return Err(DeviceError::Protocol(
-                "the bulb exposure completed but the camera never announced a file".to_owned(),
-            ));
+            return Err(DeviceError::Protocol(format!(
+                "the shutter closed on a {:.0} s bulb exposure but the camera had not announced a \
+                 file {:.0} s later. A Canon with long-exposure noise reduction on shoots a \
+                 matching dark frame first, which roughly doubles the wait — raise \
+                 `camera.timeouts.capture_extra_seconds` or turn that off on the body.",
+                duration.as_secs_f64(),
+                file_wait.as_secs_f64()
+            )));
         }
 
         Ok(RawCapture {
