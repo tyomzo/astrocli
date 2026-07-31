@@ -28,7 +28,17 @@ mount:
 
 camera:
   driver: gphoto2            # "gphoto2", "indi", "simulator" ("ascom_alpaca" needs an
-                             #   address key that does not exist yet — arrives with HAL-10)
+                             #   address key that does not exist yet — arrives with HAL-10).
+                             #   `gphoto2` needs a binary built with that feature and
+                             #   `libgphoto2-dev` present at build time:
+                             #     cargo build -p astroctl-field --features libgphoto2
+                             #   A default build registers the driver anyway and refuses to
+                             #   create it, naming the missing library. `simulator` is the
+                             #   alternative — no camera, no feature, no C library — and is
+                             #   what CI and scripts/e2e.sh run. Nothing above the driver
+                             #   behaves differently between the two; M2-T05 exists to prove it.
+                             #   Before a desk session, check gvfs has not claimed the body:
+                             #     gio mount -l | grep -i canon
   default_iso: "1600"
   default_shutter: "30"
   default_format: "RAW+JPEG"

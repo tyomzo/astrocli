@@ -264,11 +264,12 @@ async fn serve(
     // error rather than a hardware one.
     let device = build_mount(&config, bus.clone())?;
     let mount = Arc::new(mount::MountFacade::new(device, bus.clone(), &config.mount));
+    let (camera_device, camera_links) = build_camera(
+        &config,
+        astroctl_drivers::simulator::CameraProfile::default(),
+    )?;
     let camera = Arc::new(camera::CameraFacade::new(
-        build_camera(
-            &config,
-            astroctl_drivers::simulator::CameraProfile::default(),
-        )?,
+        camera_device,
         Arc::clone(&store),
         bus.clone(),
     ));
@@ -406,6 +407,10 @@ async fn serve(
     // `camera.status` on change and every 60 s (§4.3). Same accounting as the position poll: it
     // publishes, so it holds a bus clone and is aborted before `drop(bus)`.
     let camera_poll = tokio::spawn(camera::poll(Arc::clone(&camera)));
+    // The other half of `camera.status`, for a driver that can lose its camera and get it back
+    // (REL-03). Same accounting again: it publishes, so it is aborted before `drop(bus)`.
+    let camera_links = camera_links
+        .map(|links| tokio::spawn(camera::publish_link_state(Arc::clone(&camera), links)));
     let snapshot_task = tokio::spawn(ws::maintain_snapshot(
         Arc::clone(&snapshots),
         bus.subscribe(),
@@ -475,6 +480,11 @@ async fn serve(
     // The camera status poll publishes too, so it stops here with the others.
     camera_poll.abort();
     let _ = camera_poll.await;
+    // ...and the link-state narrator beside it, for the same reason.
+    if let Some(task) = camera_links {
+        task.abort();
+        let _ = task.await;
+    }
     // The stack.status republisher, same accounting again: it publishes, so it must not outlive
     // the bus. Aborting mid-poll is safe — the poll is a GET, and abandoning one loses nothing
     // but a health reading the node is about to stop caring about.
@@ -714,26 +724,62 @@ async fn open_session(
 /// The binary passes the measured R10 profile; the test fixtures pass `CameraProfile::fast()`, and
 /// still come through this function so they exercise the registry lookup the operator's
 /// `camera.driver` actually goes through.
+/// A subscription to the camera driver's link state, for the drivers that have one.
+///
+/// `None` for every driver but gphoto2 — see [`build_camera`].
+type CameraLinks = Option<tokio::sync::watch::Receiver<astroctl_drivers::gphoto2::LinkState>>;
+
 fn build_camera(
     config: &FieldConfig,
     profile: astroctl_drivers::simulator::CameraProfile,
-) -> Result<Arc<dyn astroctl_hal::camera::Camera>, Box<dyn std::error::Error>> {
+) -> Result<(Arc<dyn astroctl_hal::camera::Camera>, CameraLinks), Box<dyn std::error::Error>> {
     let mut registry = astroctl_hal::registry::DriverRegistry::new();
     registry
         .register_camera(
             astroctl_drivers::simulator::SimulatorCameraFactory::new().with_profile(profile),
         )
         .map_err(|e| format!("cannot register the simulator camera driver: {e}"))?;
-
+    // M2-T05. Registered **whether or not this build has libgphoto2**, which is the factory's own
+    // instruction: without the library it builds and fails in `create` with a message naming the
+    // missing library, where leaving it unregistered would tell an operator whose config says
+    // `camera.driver: gphoto2` that no such driver exists. It does — this binary was built
+    // without what it needs.
+    //
+    // Until this line the shipped `config/field-node.example.yaml`, which has said
+    // `driver: gphoto2` since M0, could not start a node: the registry held `simulator` alone and
+    // the lookup failed. The test fixtures rewrote the string to `simulator` on the way past
+    // (`test_support`), so nothing caught it.
     registry
+        .register_camera(astroctl_drivers::gphoto2::CanonGPhoto2CameraFactory::new())
+        .map_err(|e| format!("cannot register the gphoto2 camera driver: {e}"))?;
+
+    // The gphoto2 driver is the only one with a recovery protocol, and its link state is not
+    // expressible on the `Camera` trait — deliberately, per that factory's own docs: a state
+    // accessor there would oblige the simulator, the guide cameras and the INDI adapter to model
+    // a protocol only this driver has. So when it *is* the configured driver, build it as its
+    // concrete type and keep the watch handle; `camera::publish_link_state` is the consumer.
+    //
+    // This is the third place in the workspace that names a concrete driver, after `build_mount`
+    // and the registration above, and it stays inside the rule ADD §5.6 rule 1 is protecting:
+    // only the binary chooses drivers, and this is the binary.
+    #[cfg(feature = "libgphoto2")]
+    if config.camera.driver == astroctl_core::config::CameraDriver::Gphoto2 {
+        let camera = astroctl_drivers::gphoto2::CanonGPhoto2CameraFactory::new()
+            .create_gphoto2(&config.camera)
+            .map_err(|e| format!("cannot build the gphoto2 camera driver: {e}"))?;
+        let links = camera.watch_link_state();
+        return Ok((camera, Some(links)));
+    }
+
+    let camera = registry
         .create_camera(config.camera.driver.as_str(), &config.camera)
         .map_err(|e| {
             format!(
                 "cannot build the camera driver named by `camera.driver` ({}): {e}",
                 config.camera.driver.as_str()
             )
-            .into()
-        })
+        })?;
+    Ok((camera, None))
 }
 
 /// Resolve on SIGTERM (systemd's stop signal) or SIGINT (a terminal).
