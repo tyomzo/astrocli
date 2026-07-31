@@ -1,0 +1,44 @@
+# astroctl-e2e — the M1-T16 end-to-end suite.
+#
+# Deliberately NOT a workspace member; the root manifest's `exclude` carries the three reasons.
+# Its own `[workspace]` stanza and its own lockfile follow from that: this crate resolves its
+# dependencies independently of the product, which is the point — the client that asserts the
+# wire contract should not be pinned to the same tree as the server that serves it.
+[workspace]
+
+[package]
+name = "astroctl-e2e"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+description = "Drives the M0-T08 container pair as a client and asserts M1's exit criteria."
+
+[dependencies]
+# `default-features = false` drops reqwest's TLS stack. The suite speaks to a published port on
+# loopback and to nothing else, so pulling openssl or rustls in would be a compile-time cost and
+# an attack surface for a capability no test uses. SEC-05's TLS path is gated on real hardware
+# (M0-T08), not on this harness.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "time", "sync", "process", "fs", "io-util"] }
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "now"] }
+
+[lints.clippy]
+# The suite is held to the same bar as the product (scripts/check.sh names this manifest), with
+# the exceptions below — each one a place where the rule that is right for a library is wrong for
+# a scenario.
+pedantic = { level = "deny", priority = -1 }
+# `unwrap`/`expect` in a scenario *is* the assertion. Routing failures through `?` would report
+# "None" where the panic reports "the field node never published frame.saved for light_00042".
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+# An end-to-end scenario is one narrative — connect, goto, capture, transfer, preview — and its
+# value comes from being readable top to bottom as the demo it mirrors. Splitting T-E2E-1 into
+# six helpers to satisfy a line count would hide the order of events, which is the thing the
+# test is about.
+too_many_lines = "allow"

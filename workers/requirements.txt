@@ -12,8 +12,13 @@
 # M1-T13 adds the two the preview job actually uses. Both are imported *late*, inside the job,
 # so a stacking server whose venv is not yet populated still handshakes, still answers health
 # pings and still refuses a protocol mismatch correctly — and reports the missing dependency as
-# a structured error naming this file. The M0-T08 stack image ships a bare python3 for exactly
-# that reason, and the supervision half of T-IPC-1 runs against it unchanged.
+# a structured error naming this file. That property is why the supervision half of T-IPC-1 needs
+# no dependencies at all, and it is worth keeping.
+#
+# The M0-T08 stack image originally shipped a bare python3 to lean on it. It no longer does:
+# M1-T14 put the preview job behind the same worker and T-E2E-1 asserts the preview arrives, so
+# deploy/Dockerfile.stack installs this file. The late imports still earn their keep — they are
+# what turned "the demo produces no preview" into a one-line error naming this file (M1-T16).
 
 # Array maths for the asinh stretch. Floor is the first release supporting the Python versions
 # this deployment targets; the ceiling is a major-version wall, because numpy 3 has not happened
