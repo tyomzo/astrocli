@@ -3,6 +3,8 @@
 //! | Submodule | Contents | Task |
 //! |-----------|----------|------|
 //! | [`codec`] | the wire protocol: framing, hex widths, typed commands, the goto program | M3-T01 |
+//! | [`math`] | counters ↔ coordinates: the mech↔sky decomposition, pier side, goto targeting | M3-T03 |
+//! | [`controller`] | per-axis motion: handshake parameters, rates and step periods, goto, status | M3-T03 |
 //!
 //! The serial task (M3-T02), the motor controller (M3-T03) and the `MountDevice`
 //! implementation (M3-T04) join it here, in that order, each one layered on the one before
@@ -22,3 +24,5 @@
 //! unreachable from above is what turns that into a compile error.
 
 pub mod codec;
+pub mod controller;
+pub mod math;
