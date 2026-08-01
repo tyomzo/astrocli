@@ -5,6 +5,7 @@
 # Usage:  scripts/build-frontend.sh [--no-install] [--check]
 # Exit:   0 = dist/ built, 1 = the build failed, 2 = the script could not run
 #
+export ASTROCTL_GIT_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 #   --no-install  skip `npm ci` and use the existing node_modules. For iterating; a release build
 #                 should not use it, because node_modules is the one input to this build that is
 #                 not in git.

@@ -43,6 +43,18 @@ const proxyTarget = { target: FIELD_NODE, secure: false, changeOrigin: true };
 export default defineConfig({
   plugins: [tailwindcss(), react()],
 
+  // The build identifies itself. Injected at build time so the running page can *say* which
+  // bundle it is — the alternative, observed in the field, is an operator staring at a phone
+  // with no way to tell a stale service-worker copy from the deploy they were promised.
+  define: {
+    __ASTROCTL_BUILD__: JSON.stringify(
+      `${process.env.ASTROCTL_GIT_SHA ?? 'dev'} · ${new Date()
+        .toISOString()
+        .slice(0, 16)
+        .replace('T', ' ')}Z`,
+    ),
+  },
+
   build: {
     // Android/Chrome is the only target (SDD §5.9), so there is no reason to down-level to a
     // baseline no device in this deployment runs. Every byte of transpilation output is a byte

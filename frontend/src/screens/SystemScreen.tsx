@@ -11,6 +11,7 @@ import { useUiStore } from '../store/ui';
 import { Button } from '../ui/Button';
 import { Card } from '../ui/Card';
 import { PanelGrid } from '../ui/PanelGrid';
+import { BUILD, useUpdateWaiting } from '../lib/pwa/updateReady';
 import { ConnectPanel } from './ConnectPanel';
 import { DeviceCard } from './DeviceCard';
 import { NodeCard } from './NodeCard';
@@ -73,7 +74,29 @@ export function SystemScreen(): ReactNode {
         <DeviceCard />
         <AlertHistory />
       </PanelGrid>
+
+      <BuildLine />
     </div>
+  );
+}
+
+/**
+ * Which bundle is actually running, and whether a newer one is waiting.
+ *
+ * Small and permanent rather than a toast: the operator's question — "am I on the version I was
+ * promised?" — recurs every deploy, and a dismissable notice answers it exactly once.
+ */
+function BuildLine(): ReactNode {
+  const waiting = useUpdateWaiting();
+  return (
+    <p className="text-center font-mono text-xs text-faint">
+      build {BUILD}
+      {waiting && (
+        <span className="ml-2 text-warn">
+          — an update is ready: close the app fully, then open it again
+        </span>
+      )}
+    </p>
   );
 }
 
