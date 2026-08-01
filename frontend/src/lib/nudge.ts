@@ -51,7 +51,7 @@ export function nudgeAvailability(
       return {
         available: false,
         reason:
-          'The mount is not connected. Connect it from the pointing panel — startup never ' +
+          'The mount is not connected. Connect it at the top of the target panel — startup never ' +
           'connects hardware on its own, so that no telescope moves because a machine rebooted.',
       };
     case 'fault':

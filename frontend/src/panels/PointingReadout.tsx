@@ -1,8 +1,5 @@
-import { useState } from 'react';
 import type { ReactNode } from 'react';
 
-import type { RequestFailure } from '../lib/api';
-import { mountConnect, mountDisconnect } from '../lib/commands';
 import { formatDecDegrees, formatDegrees, formatRaHours } from '../lib/coords';
 import type { Reckoning } from '../lib/predict';
 import { PREDICT_TICK_MS, reckon } from '../lib/predict';
@@ -15,10 +12,7 @@ import {
   selectSkewMs,
   useTelemetryStore,
 } from '../store/telemetry';
-import { useTokenStore } from '../store/token';
-import { Button } from '../ui/Button';
 import { Card, Field } from '../ui/Card';
-import { FailureNote } from '../ui/FailureNote';
 
 /**
  * Where the telescope is pointing, in astronomical notation — USB-05, SDD §5.9's `now …` block.
@@ -62,32 +56,11 @@ export function PointingReadout(): ReactNode {
   const position = useTelemetryStore(selectMountPosition);
   const status = useTelemetryStore(selectMountStatus);
   const skewMs = useTelemetryStore(selectSkewMs);
-  const token = useTokenStore((state) => state.token);
   const now = useNow(PREDICT_TICK_MS);
-  const [failure, setFailure] = useState<RequestFailure | null>(null);
 
-  const connected = status.state === 'observed' && status.value.state !== 'disconnected';
 
   return (
-    <Card
-      title="Pointing"
-      accessory={
-        <Button
-          onClick={() => {
-            setFailure(null);
-            const command = connected ? mountDisconnect : mountConnect;
-            void command(token).then((result) => {
-              // Only the failure is kept. The success case changes nothing here on purpose: the
-              // panel moves when `mount.status` arrives, which is the only report that the mount
-              // itself agrees (SDD §5.9).
-              if (!result.ok) setFailure(result.failure);
-            });
-          }}
-        >
-          {connected ? 'Disconnect' : 'Connect'}
-        </Button>
-      }
-    >
+    <Card title="Pointing">
       <PointingBlock
         position={position}
         status={status}
@@ -95,10 +68,6 @@ export function PointingReadout(): ReactNode {
         skewMs={skewMs ?? 0}
         describeState={describeMount(status)}
       />
-
-      {failure !== null && (
-        <FailureNote failure={failure} action={connected ? 'disconnect' : 'connect'} />
-      )}
     </Card>
   );
 }

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { MountConnect } from './MountConnect';
 
 import { Card } from '../ui/Card';
 import { ManualTargetChooser } from './ManualTargetChooser';
@@ -25,7 +26,7 @@ import { PointingReadout } from './PointingReadout';
 export function TargetRegion({ chooser }: { chooser?: ReactNode }): ReactNode {
   return (
     <div className="flex flex-col gap-3">
-      <Card title="Target">{chooser ?? <ManualTargetChooser />}</Card>
+      <Card title="Target" accessory={<MountConnect />}>{chooser ?? <ManualTargetChooser />}</Card>
       <PointingReadout />
     </div>
   );
