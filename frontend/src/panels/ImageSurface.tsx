@@ -104,10 +104,18 @@ export function ImageSurface(): ReactNode {
   // a second at a time. 250 ms reads as smooth and costs far less than a frame rate.
   const now = useNow(250);
 
-  const available = availability.available;
+  // The summoned D-pad closes itself only for states that make it *meaningless* — mount gone,
+  // faulted, parked, link down — and never for `slewing`. Slewing is either the operator's own
+  // hold (the driver honestly reports a nudge as a slew, so closing on it evicted the controls
+  // from under the operator's finger — found by a thumb on a real phone, invisible to every
+  // desktop test) or a goto in flight, during which the buttons refuse with a reason, which is
+  // strictly more useful than vanishing. The *badge* still gates summoning on the full
+  // availability rule; an already-open overlay is the operator's to close.
+  const mountState = mount.state === 'observed' ? mount.value.state : null;
+  const evict = mountState === null || mountState === 'disconnected' || mountState === 'fault' || mountState === 'parked';
   useEffect(() => {
-    if (!available) setSummoned(false);
-  }, [available]);
+    if (evict) setSummoned(false);
+  }, [evict]);
 
   // The camera going away takes live view with it, server-side; the button must agree rather than
   // offering to stop something that is already stopped.
