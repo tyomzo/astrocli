@@ -26,7 +26,7 @@ monitoring, and the full wedge-recovery protocol (the REL-03 path).
   - On hardware the run got as far as reproducing the *claim* branch live and no further — see "Hardware evidence" below. The full pull→recover→capture sequence is pending.
   - **"UI shows reconnecting→connected" is not achievable as specified** — see the §4.3 gap below.
 - [ ] Live view runs 10 min without fps decay or memory growth (watch RSS) — `the_ten_minute_live_view_soak` is written and `#[ignore]`d; the mock soak (`a_short_live_view_soak_leaks_nothing_and_does_not_decay`) proves the plumbing holds no backlog and does not decay, which is all a mock can say.
-- [ ] Battery percentage matches camera body display ±5 % — needs human eyes on the body. `battery_and_storage_for_the_operator_to_check_against_the_body` prints the driver's reading in a box for comparison and asserts what a machine can (plausible range, and the byte/kilobyte conversion M2-T03 established).
+- [x] Battery check closed 2026-08-01, as precisely as the hardware allows: the R10 body shows a segmented meter, not a percentage, so ±5 % cannot be read off it — the driver reported **100 %** and the body showed a **full meter**, which is agreement at the display's own quantisation. Recording the limitation rather than inventing a number
 
 ## Hardware evidence (2026-07-31)
 
