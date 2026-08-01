@@ -1,0 +1,32 @@
+[package]
+name = "sep-extraction-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+# The *spike harness* is MIT, like the rest of the tree. The vendored C library under
+# `vendor/sep/` is **not** — it is LGPLv3, and that is the single most important thing this
+# spike found. See FINDINGS.md §1.
+license = "MIT"
+
+# Deliberately NOT a workspace member, following spikes/gphoto2-r10 and the root manifest's
+# `exclude = ["spikes", "tests"]`. This is a report task; nothing here is production code.
+[workspace]
+
+[dependencies]
+# Path deps on the workspace crates, which is what makes the ground-truth score possible: the
+# simulator's star catalogue is *computable*, so SEP's output can be scored against the real
+# answer rather than against another detector's opinion.
+#
+# `default-features = false` + `simulator` matters. The default feature set pulls the `gphoto2`
+# driver, and `libgphoto2` would need libgphoto2-dev at build time. The simulator feature needs
+# no system library at all.
+astroctl-core = { path = "../../crates/astroctl-core" }
+astroctl-drivers = { path = "../../crates/astroctl-drivers", default-features = false, features = [
+    "simulator",
+] }
+# The real-sensor arm: decodes the M2-T01 spike's genuine R10 CR3s so the memory question is
+# answered on real sensor data with real noise, not only on synthetic frames.
+rawler = "0.7.2"
+
+[build-dependencies]
+cc = "1"

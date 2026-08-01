@@ -1,0 +1,5 @@
+target/
+out/
+Cargo.lock
+venv/
+__pycache__/
