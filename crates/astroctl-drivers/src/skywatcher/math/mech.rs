@@ -8,8 +8,8 @@
 //! `[-180, 180)`:
 //!
 //! ```text
-//! d ≥ 0   (normal)    dec = s·(90 − d)    HA = s·h
-//! d < 0   (flipped)   dec = s·(90 + d)    HA = s·h + 180°
+//! d ≥ 0   (normal)    dec = s·(90 − d)    HA = s·(h + 90°)
+//! d < 0   (flipped)   dec = s·(90 + d)    HA = s·(h + 90°) + 180°
 //! RA = LST − HA                                       (SDD §5.2.3)
 //! ```
 //!
@@ -19,13 +19,115 @@
 //! pointing at the celestial pole, which is where the operator leaves an HEQ5 and what the spike
 //! measured at power-on (both axes read exactly home, `FINDINGS.md`).
 //!
+//! # The `s·90°` is the home hour angle, and it was measured (M3-T06)
+//!
+//! Until 2026-08-01 this module carried `HA = s·h`, i.e. **home is the meridian**. It is not.
+//! The correction is derived below and was measured twice on the operator's HEQ5 from the home
+//! pose — counterweight shaft down, tube along the polar axis, both counters at home after a
+//! power cycle. [`tests::the_two_swings_measured_from_the_home_pose`] is those two observations
+//! as assertions, and it is the only test in this file that is not the model checked against
+//! itself. That distinction is the whole lesson of the defect: every fixture here derives its
+//! expectations from this same arithmetic, and the mount's counters mean whatever the arithmetic
+//! says they mean, so a wrong constant is invisible to the software. It took an operator looking
+//! at metal.
+//!
+//! ## The derivation
+//!
+//! Work in the equatorial frame with an orthonormal right-handed triad `(M, W, P)`:
+//!
+//! * `P` — the **north** celestial pole (always north, in both hemispheres: declination is
+//!   measured north-positive and hour angle is measured about the NCP wherever you stand).
+//! * `M` — declination 0, hour angle 0: the point where the celestial equator crosses the
+//!   meridian.
+//! * `W` — declination 0, hour angle **+6 h**: due west on the horizon, for every latitude.
+//!
+//! A direction at `(HA, dec)` is `cos(dec)·cos(HA)·M + cos(dec)·sin(HA)·W + sin(dec)·P`, so a
+//! rotation about `P` in the right-hand sense increases the hour angle. Now two body-fixed facts
+//! about the mechanism, neither of which changes when the mount is carried across the equator:
+//!
+//! 1. **The polar axis** points at the pole of the hemisphere: `A = s·P`. The tube lies along it
+//!    at home, which is `dec = s·90` — [`Hemisphere::home_declination`].
+//! 2. **The counterweight shaft lies *along* the declination axis** and hangs down at home. It is
+//!    therefore perpendicular to `A` and in the meridian plane, which leaves only `±M`; and the
+//!    downward one is `C = −M` in **both** hemispheres. (North: `M` is due south at altitude
+//!    `90 − φ`, above the horizon, so `−M` is the one pointing down. South: `M` is due *north* at
+//!    altitude `90 − |φ|`, still above the horizon, so `−M` is still the one pointing down.)
+//!
+//! Rotating the tube about the declination axis by the counter angle `d` therefore sweeps it
+//! through the plane perpendicular to `M` — the `P`/`W` plane. **East–west.** A pure declination
+//! move from home cannot reach the meridian, which is exactly what `HA = s·h` claimed it did.
+//!
+//! Concretely, with `σ = ±1` the wiring's handedness about `C`:
+//!
+//! ```text
+//! tube(d, h=0) = R(C, σd)·A = cos(σd)·A + sin(σd)·(C × A)
+//! northern: C × A = (−M) × P = W       so  tube = cos(d)·P + sin(d)·W   (σ = +1, below)
+//! southern: C × A = (−M) × (−P) = −W   so  tube = −[cos(d)·P + sin(d)·W]
+//! ```
+//!
+//! `σ = +1` is the measurement, not an assumption: from home, `d = +90°` put the tube **due west
+//! on the horizon**, which is `+W`, so `sin(σ·90°) = +1`.
+//!
+//! Reading `(HA, dec)` off those vectors for `d ∈ (0°, 180°)`: northern gives `dec = 90 − d` and
+//! `HA = +90°`; southern is the antipode, `dec = −(90 − d)` and `HA = +90° + 180°`, and the RA
+//! axis rotation is about `A = −P`, so it *subtracts*. Both collapse to
+//!
+//! ```text
+//! dec = s·(90 − d)        HA = s·(h + 90°)
+//! ```
+//!
+//! which is the northern `HA = h + 90°` the mount was measured at, and the sign `s` on the
+//! constant rather than a bare `+90°`. That sign is the one thing the hardware could not tell us
+//! — the mount is in Norway — and it follows from the same `A = s·P` that already puts `s` on
+//! `h` and on the declination.
+//!
+//! ## Why the flipped branch is the *same* offset plus the 180° it already had
+//!
+//! The two branches are not two models. There is one rotation, and the branch split is only how
+//! `(HA, dec)` is written down once `cos(dec)` changes sign. Take the normal-branch expressions
+//! as unfolded quantities and let `d` go negative:
+//!
+//! ```text
+//! dec_pre = s·(90 − d)    HA_pre = s·(h + 90°)
+//! ```
+//!
+//! For `s = +1, d < 0` that gives `dec_pre > 90°`, which is not a declination. The standard fold
+//! past a pole is `(dec, HA) → (180° − dec, HA + 180°)` — the tube has gone over the top, so the
+//! declination comes back down the other side and the hour angle jumps half a turn:
+//!
+//! ```text
+//! dec = 180° − s·(90 − d) = s·(90 + d)        HA = s·(h + 90°) + 180°
+//! ```
+//!
+//! So the `s·90°` is carried by **both** branches and the `180°` is the fold's own companion
+//! term, not a competing offset. They compose by addition because they come from different
+//! places: one is where home points, the other is what going past the pole does. A reader can
+//! check the composition without a mount by taking the branch difference — it is still exactly
+//! `180°`, as [`tests::the_two_branches_reach_the_same_sky_from_opposite_declination_counters`]
+//! asserts, so the meridian flip is unchanged by this correction.
+//!
+//! Note also what the constant does *not* touch: `∂HA/∂h = s` and `∂dec/∂d = ∓s` are unchanged,
+//! so [`motor_direction`], [`tracking_direction`] and every rate in the driver are exactly as
+//! they were. A constant has no derivative. What was wrong was only *where the sky is*, never
+//! *which way it moves* — which is why the spike's motion experiments all stand.
+//!
 //! # What this agrees with, and how you can tell
 //!
-//! `simulator::mount` carries the same decomposition — "RA = LST − hour angle, so a mount that is
-//! *not* tracking shows its RA climbing at the sidereal rate, and a mount that *is* tracking
-//! turns its hour-angle axis at exactly that rate and holds RA still". `tests/position_math.rs`
-//! asserts both implementations against one fixture set rather than against each other's shapes,
-//! because two implementations that agree by construction agree about their shared mistakes too.
+//! `simulator::mount` carries the *second half* of this decomposition and not the first, and the
+//! difference is worth stating precisely because M3-T06 turned on it. The simulator holds an
+//! hour angle and a declination **directly**, in degrees, and applies "RA = LST − hour angle, so
+//! a mount that is *not* tracking shows its RA climbing at the sidereal rate, and a mount that
+//! *is* tracking turns its hour-angle axis at exactly that rate and holds RA still". What it has
+//! no equivalent of is the *counters*: there is no home, no `0x800000`, and therefore no
+//! `HA = s·(h + 90°)`. Its axis zero is a bookkeeping origin that sidereal time is anchored
+//! against at connect, not a pose a mount can be left in.
+//!
+//! So the simulator could not have caught the home hour angle, and no arrangement of it could
+//! have: the defect lived in the one conversion the two implementations never shared.
+//! `tests/position_math.rs`'s `the_driver_and_the_simulator_agree` asserts both against one
+//! fixture set — including, since M3-T06, the correspondence `simulator hour-angle axis =
+//! s·(h + 90°)` written out as an equation, so that a future edit which gives the simulator a
+//! home offset of its own has somewhere to fail.
 //!
 //! # Two things here are structure, and one is a label
 //!
@@ -110,15 +212,34 @@ impl Hemisphere {
     }
 }
 
+/// The hour angle the tube is at with both counters at home, before the hemisphere sign.
+///
+/// **The correction M3-T06 exists for.** Home is *not* the meridian: the counterweight shaft is
+/// the declination axis and hangs in the meridian plane, so the tube swings east–west about it
+/// and sits six hours from the meridian at `d = 0`. Measured — see the module docs for the
+/// derivation and `spikes/skywatcher-heq5/FINDINGS.md` for the two swings that pinned it.
+///
+/// One named constant rather than a literal in four places, because the four places must move
+/// together: `mech_to_sky` and `sky_to_mech`, each on both branches.
+const HOME_HOUR_ANGLE_DEGREES: f64 = 90.0;
+
+/// What the declination axis passing the pole adds to the hour angle.
+///
+/// Not the same kind of number as [`HOME_HOUR_ANGLE_DEGREES`] and deliberately spelled
+/// separately: this one is the pole fold's companion term (module docs), it is unsigned by the
+/// hemisphere because `±180°` name the same half-turn, and it is what makes a meridian flip a
+/// flip. The two compose by addition.
+const THROUGH_THE_POLE_DEGREES: f64 = 180.0;
+
 /// The two mechanical branches, named for what distinguishes them.
 ///
 /// Public because the no-flip goto selection is expressed in these terms and a caller reading a
 /// log wants the mechanical fact, not only the pier-side label derived from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Branch {
-    /// The declination axis has not passed the pole: `d ≥ 0`, `HA = s·h`.
+    /// The declination axis has not passed the pole: `d ≥ 0`, `HA = s·(h + 90°)`.
     Normal,
-    /// The declination axis is past the pole: `d < 0`, `HA = s·h + 180°`.
+    /// The declination axis is past the pole: `d < 0`, `HA = s·(h + 90°) + 180°`.
     ThroughThePole,
 }
 
@@ -222,9 +343,17 @@ pub fn mech_to_sky(mech: MechPosition, lst: Lst, hemisphere: Hemisphere) -> SkyP
     let d = mech.dec_axis.degrees();
     let branch = mech.branch();
 
+    // `h + 90°` and not `h`: home is six hours from the meridian (M3-T06). The hemisphere sign
+    // multiplies the whole bracket because the constant comes from the same `A = s·P` the `h`
+    // does — see the module docs.
+    let hour_angle_from_home = sign * (mech.ra_axis.degrees() + HOME_HOUR_ANGLE_DEGREES);
+
     let (declination, hour_angle_degrees) = match branch {
-        Branch::Normal => (sign * (90.0 - d), sign * mech.ra_axis.degrees()),
-        Branch::ThroughThePole => (sign * (90.0 + d), sign * mech.ra_axis.degrees() + 180.0),
+        Branch::Normal => (sign * (90.0 - d), hour_angle_from_home),
+        Branch::ThroughThePole => (
+            sign * (90.0 + d),
+            hour_angle_from_home + THROUGH_THE_POLE_DEGREES,
+        ),
     };
 
     let hour_angle = HourAngle::wrapped(hour_angle_degrees);
@@ -261,9 +390,23 @@ pub fn sky_to_mech(
     // The branch decides both halves at once, which is why they are computed together: a
     // declination taken from one branch and an hour angle from the other is a mount pointing
     // twelve hours away with a plausible-looking declination.
+    //
+    // The right-ascension half is [`mech_to_sky`] undone term by term, in reverse order: take
+    // the flipped branch's half-turn back off, undo the hemisphere sign (`s⁻¹ = s`), then take
+    // the home hour angle off. So `h = s·HA − 90°` on the normal branch and
+    // `h = s·(HA − 180°) − 90°` past the pole — which the `[-180, 180)` fold below reduces to
+    // `s·HA + 90°`, since `−s·180°` and `+180°` name the same half-turn in either hemisphere.
+    // The two branches therefore still differ by exactly 180°, which is what makes them one
+    // meridian flip apart.
     let (dec_axis, ra_axis) = match branch {
-        Branch::Normal => (90.0 - sign * dec, sign * hour_angle),
-        Branch::ThroughThePole => (sign * dec - 90.0, sign * hour_angle + 180.0),
+        Branch::Normal => (
+            90.0 - sign * dec,
+            sign * hour_angle - HOME_HOUR_ANGLE_DEGREES,
+        ),
+        Branch::ThroughThePole => (
+            sign * dec - 90.0,
+            sign * (hour_angle - THROUGH_THE_POLE_DEGREES) - HOME_HOUR_ANGLE_DEGREES,
+        ),
     };
 
     MechPosition {
@@ -366,6 +509,187 @@ mod tests {
                 "{hemisphere:?} home pointed at {}",
                 sky.coords.dec.degrees()
             );
+        }
+    }
+
+    /// Altitude and azimuth of an hour angle and declination, seen from a latitude.
+    ///
+    /// The textbook spherical triangle, written out here rather than called from
+    /// `astroctl-safety::horizontal` because this crate may not depend on that one (ADD §5.6
+    /// rule 1). That is a happy constraint for this particular test: the arithmetic below shares
+    /// nothing with the model under test, so "the tube was pointing west, on the horizon" is
+    /// checked against geometry rather than against another reading of `mech_to_sky`.
+    ///
+    /// Azimuth is degrees from north through east, matching `AzDegrees`.
+    fn horizontal(hour_angle_degrees: f64, dec_degrees: f64, latitude_degrees: f64) -> (f64, f64) {
+        let (sin_ha, cos_ha) = hour_angle_degrees.to_radians().sin_cos();
+        let (sin_dec, cos_dec) = dec_degrees.to_radians().sin_cos();
+        let (sin_lat, cos_lat) = latitude_degrees.to_radians().sin_cos();
+        let altitude = (sin_dec * sin_lat + cos_dec * cos_lat * cos_ha)
+            .clamp(-1.0, 1.0)
+            .asin()
+            .to_degrees();
+        let azimuth = (-cos_dec * sin_ha)
+            .atan2(sin_dec * cos_lat - cos_dec * sin_lat * cos_ha)
+            .to_degrees()
+            .rem_euclid(360.0);
+        (altitude, azimuth)
+    }
+
+    #[test]
+    fn the_two_swings_measured_from_the_home_pose() {
+        // **The ground truth of M3-T06, and the only assertion in this file that is not the model
+        // checked against itself.** Two swings run on the operator's HEQ5 on 2026-08-01 from the
+        // home pose — counterweight shaft down, tube along the polar axis, both counters at
+        // `0x800000` after a power cycle — and recorded in `spikes/skywatcher-heq5/FINDINGS.md`
+        // ("The home hour angle is +6h"). Every other fixture in the tree derives its expectation
+        // from this arithmetic, so only these two numbers can fail when the arithmetic is wrong.
+        //
+        // The site is Oslo, 59.9139° N. It is not stated in the finding, but it is recoverable
+        // from it and worth recovering, because it is what pins the second swing's axis angle:
+        // the finding records what the *old* model displayed, and only one reading of the
+        // commanded moves reproduces those numbers. See below.
+        let hemisphere = Hemisphere::Northern;
+        const OSLO_LATITUDE: f64 = 59.9139;
+
+        // Swing 1 — "DEC axis +90° (dec 90 → 0), RA axis untouched".
+        //
+        //   old model said:  south, altitude 30°   (HA 0, dec 0 → alt = cos φ = 30.08°)
+        //   the tube was at: due west, on the horizon
+        //
+        // The declination is the half that was never in doubt, and it confirms the reading of
+        // the command: `dec 90 → 0` is `d = +90°`, since `dec = 90 − d`.
+        let after_dec_swing = MechPosition {
+            ra_axis: axis(0.0),
+            dec_axis: axis(90.0),
+        };
+        let sky = mech_to_sky(after_dec_swing, lst(0.0), hemisphere);
+        assert!(
+            sky.coords.dec.degrees().abs() < 1e-9,
+            "a 90° declination move from home leaves the tube on the celestial equator, not at {}",
+            sky.coords.dec.degrees()
+        );
+        let hour_angle = HourAngle::of(lst(0.0), sky.coords.ra).degrees();
+        assert!(
+            (hour_angle - 90.0).abs() < 1e-9,
+            "the home hour angle is +6h, so this swing ends at HA +6h, not {hour_angle}°"
+        );
+
+        // ...and said the way the operator saw it. Both of these are *exact* and independent of
+        // the latitude: hour angle +6h at declination 0 is the west point of the horizon at every
+        // site on Earth, which is what makes this observation such good evidence — there is no
+        // site error, no clock error and no polar-alignment error hiding in it.
+        let (altitude, azimuth) = horizontal(hour_angle, sky.coords.dec.degrees(), OSLO_LATITUDE);
+        assert!(
+            altitude.abs() < 1e-9,
+            "the tube was on the horizon; the model puts it at altitude {altitude}°"
+        );
+        assert!(
+            (azimuth - 270.0).abs() < 1e-9,
+            "the tube was due west; the model puts it at azimuth {azimuth}°"
+        );
+
+        // Swing 2 — "then DEC to 60°, then RA axis 90° (HA −6h)".
+        //
+        //   old model said:  north-east, altitude 48.5°
+        //   the tube was at: straight up — the zenith
+        //
+        // `dec = 90 − d` puts the declination axis at `d = +30°`. The right-ascension axis is at
+        // **−90°**, and the finding's own parenthetical is what says so: it records the old model
+        // reading HA −6h, and the old model was `HA = h`. The check below is that this is the
+        // reading which reproduces the recorded display — `h = +90°` would have shown HA +6h,
+        // altitude 29.9° and due *north*, which is not what was written down. So the finding's
+        // "RA axis +90°" is the size of the commanded move in the operator's own direction
+        // labels, and the hour angle beside it is the authority on its sign.
+        let after_ra_swing = MechPosition {
+            ra_axis: axis(-90.0),
+            dec_axis: axis(30.0),
+        };
+        let (old_model_altitude, old_model_azimuth) = horizontal(-90.0, 60.0, OSLO_LATITUDE);
+        assert!(
+            (old_model_altitude - 48.5).abs() < 0.05 && (old_model_azimuth - 49.0).abs() < 0.5,
+            "this is the reading of the commanded moves that reproduces the display the finding \
+             recorded (north-east, alt 48.5°); got azimuth {old_model_azimuth}°, altitude \
+             {old_model_altitude}°"
+        );
+
+        let sky = mech_to_sky(after_ra_swing, lst(0.0), hemisphere);
+        assert!(
+            (sky.coords.dec.degrees() - 60.0).abs() < 1e-9,
+            "declination 60°, not {}",
+            sky.coords.dec.degrees()
+        );
+        let hour_angle = HourAngle::of(lst(0.0), sky.coords.ra).degrees();
+        assert!(
+            hour_angle.abs() < 1e-9,
+            "this swing ends on the meridian, not at HA {hour_angle}°"
+        );
+
+        // The zenith, which is the observation the finding calls the stronger of the two because
+        // it is unmistakable. Declination 60° on the meridian at latitude 59.9139° is 0.086° from
+        // straight up — the corrected model lands there, and *no* value of the missing constant
+        // other than +6h does.
+        let (altitude, _) = horizontal(hour_angle, sky.coords.dec.degrees(), OSLO_LATITUDE);
+        assert!(
+            altitude > 89.9,
+            "the tube was pointing straight up; the model puts it at altitude {altitude}°"
+        );
+    }
+
+    #[test]
+    fn the_home_hour_angle_is_six_hours_and_carries_the_hemisphere_sign() {
+        // The constant on its own, in both hemispheres, so the `s` on it is pinned by a test and
+        // not only by the derivation. The mount that measured it is in Norway, so the southern
+        // half here is derived rather than observed — flagged in the module docs and in M3-T06's
+        // report, and it follows from the same `A = s·P` that already signs `h` and the
+        // declination.
+        //
+        // Stated on the declination axis a hair off home, because *at* home the tube is on the
+        // pole and every hour angle names the same direction — which is exactly why this error
+        // could hide at the one pose an operator leaves the mount in.
+        for hemisphere in BOTH {
+            let just_off_home = MechPosition {
+                ra_axis: AxisAngle::HOME,
+                dec_axis: axis(1.0),
+            };
+            let sky = mech_to_sky(just_off_home, lst(0.0), hemisphere);
+            let hour_angle = HourAngle::of(lst(0.0), sky.coords.ra).degrees();
+            assert!(
+                (hour_angle - hemisphere.sign() * 90.0).abs() < 1e-9,
+                "{hemisphere:?} home sits at HA {hour_angle}°, not {}°",
+                hemisphere.sign() * 90.0
+            );
+        }
+    }
+
+    #[test]
+    fn a_pure_declination_move_from_home_can_never_reach_the_meridian() {
+        // The geometric statement the defect violated, asserted as an impossibility rather than
+        // as a value: the counterweight shaft *is* the declination axis and hangs in the meridian
+        // plane, so swinging the tube about it sweeps east–west and stays six hours from the
+        // meridian for the whole sweep. The old model had this reaching HA 0 at `d = 90°`.
+        //
+        // A test that only checked `d = 90°` would pass again the moment someone "fixed" the
+        // constant to some other wrong value; this one holds across the entire sweep.
+        for hemisphere in BOTH {
+            for tenths in -1_800..1_800 {
+                let d = f64::from(tenths) / 10.0;
+                let mech = MechPosition {
+                    ra_axis: AxisAngle::HOME,
+                    dec_axis: axis(d),
+                };
+                let sky = mech_to_sky(mech, lst(0.0), hemisphere);
+                // At a pole every hour angle is the same direction, so it is not asserted there.
+                if sky.coords.dec.degrees().abs() >= 90.0 - 1e-9 {
+                    continue;
+                }
+                let hour_angle = HourAngle::of(lst(0.0), sky.coords.ra).degrees();
+                assert!(
+                    (hour_angle.abs() - 90.0).abs() < 1e-9,
+                    "declination axis {d}° with the RA axis at home reached HA {hour_angle}°, \
+                     which the counterweight shaft's geometry forbids"
+                );
+            }
         }
     }
 

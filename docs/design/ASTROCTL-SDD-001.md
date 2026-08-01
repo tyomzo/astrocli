@@ -1,9 +1,9 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.29.0
+**Version:** 1.30.0
 **Author:** Artiom
-**Date:** 2026-07-31
+**Date:** 2026-08-02
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
 **Governing documents:** ASTROCTL-PRD-001 v1.19.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
@@ -285,6 +285,23 @@ so the autonomous stop of REL-02/03 belongs to the driver-level heartbeat, not t
 poll. **The alert is edge-triggered and carries the motion state**: "the mount was slewing when
 contact was lost" is the sentence that changes what the operator does next, and it is recoverable
 only from the last status the node could read, since by definition it cannot read another.
+
+**Change note (1.30.0):** §5.2.3's mech↔sky map is corrected by six hours (M3-T06). The section
+gave `HA = s·h`, making both counters at `0x800000` the meridian; the home pose is six hours west
+of it, because the counterweight shaft *is* the declination axis and hangs in the meridian plane,
+so swinging the tube about it sweeps east–west and can never reach the meridian from home.
+`HA = s·(h + 90°)`. **Two things about this are worth more than the constant.** First, *how it was
+found*: not by a test, because no test could — every fixture in the tree derived its expectations
+from this formula, and an open-loop step counter means whatever the formula says it means, so the
+software agreed with itself perfectly for as long as it was wrong. It took an operator looking at
+the mount and seeing the tube point at the horizon where the model said 30° up. Second, *what it
+did not touch*: declination, every rate, every motor direction and every timing, because the error
+was a constant and a constant has no derivative — which is why the spike's whole motion campaign
+stands unamended. What it did corrupt is everything computed from *reported* RA, which is §5.4's
+altitude limit and meridian watch on the current position, and the operator's alt/az readout. The
+through-the-pole branch keeps its own 180°: that term is the pole fold's companion, not a
+competing offset, so the two compose by addition and the branches still differ by exactly a
+half-turn.
 
 ---
 
@@ -794,11 +811,35 @@ M3-T05 may add it once something has watched both axes respond to one frame.
 Per axis: `counts_home = 0x800000`. With CPR read at handshake:
 
 ```
-ra_counts→hours:  ra_h  = ((counts - counts_home) / CPR) * 24.0   (mod 24, hemisphere-adjusted)
-dec_counts→deg:   dec_d = ((counts - counts_home) / CPR) * 360.0
+h = ((ra_counts  - counts_home) / CPR) * 360.0      mechanical RA axis angle, folded [-180,180)
+d = ((dec_counts - counts_home) / CPR) * 360.0      mechanical DEC axis angle, folded [-180,180)
+
+with s = +1 northern, -1 southern:
+  d >= 0  (normal)         dec = s*(90 - d)    HA = s*(h + 90 deg)
+  d <  0  (through pole)   dec = s*(90 + d)    HA = s*(h + 90 deg) + 180 deg
+  RA = LST - HA
 ```
 
-RA axis position is mechanical hour angle; conversion to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
+**The `s*90 deg` is a correction of 2026-08-01 (M3-T06).** This section previously gave
+`ra_h = ((counts - counts_home) / CPR) * 24.0`, i.e. `HA = s*h`, which makes both counters at
+`0x800000` mean hour angle zero — the meridian. It is wrong by exactly six hours. The home pose
+hangs the counterweight shaft *along the declination axis* and in the meridian plane, so swinging
+the tube about it sweeps east–west and a pure declination move from home can never reach the
+meridian, which is what the old formula claimed. Measured twice from the home pose on the
+operator's HEQ5: a 90° declination move put the tube due west on the horizon (HA +6h, where the
+old model said south at altitude 30°), and a following 90° right-ascension move put it at the
+zenith (HA 0, where the old model said north-east at altitude 48.5°). See
+`spikes/skywatcher-heq5/FINDINGS.md`, "The home hour angle is +6h".
+
+No test could have caught it: every fixture derived its expectations from this same formula, and
+an open-loop counter means whatever the formula says it means. Consequences while it stood —
+reported RA was six hours out whenever the declination axis was off the pole, and the altitude
+limit and meridian watch of §5.4 judged the *current* position from that RA, so they refused and
+permitted the wrong targets. Declination was never affected; nor was any rate, direction or
+motor sense, because a constant has no derivative.
+
+RA axis position is mechanical hour angle **offset by the home hour angle above**; conversion
+to/from RA requires LST — Phase 1 computes LST from system clock + site longitude (REL-14 warns when clock is unsynced; full erfa-based apparent-place pipeline arrives with `astroctl-planning` in Phase 2a, and this module keeps the conversion behind `fn mech_to_sky(&self, counts: AxisCounts, lst: Lst) -> RaDec` so the upgrade is internal). Pier-side handling: DEC counts beyond ±90° imply the flipped pier state; `pier_side` is derived, reported in `mount.position` events, and consumed by the meridian limit (§5.4).
 
 Goto: the wire protocol takes a **relative increment** (`H`), not an absolute target — so the driver computes absolute target counts from target RaDec + LST + chosen pier side, then sends the delta from the current counter. Relative is also the safer primitive: an arithmetic slip yields a small wrong move rather than a slew across the sky. long slews use high-speed motion mode with the ramp handled by the motor controller; the driver polls `j`/`f` at 2 Hz during goto, declares completion when both axes report stopped within tolerance (default 10 counts; measured error is **0 counts across six gotos from 0.04° to 4°, both directions**, so the tolerance is ample and loose in the safe direction), then restores tracking if it was active (SES-06).
 

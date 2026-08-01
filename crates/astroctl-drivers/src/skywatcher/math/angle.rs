@@ -3,8 +3,9 @@
 //! # Three angles that are not interchangeable
 //!
 //! [`Lst`], [`HourAngle`] and [`AxisAngle`] are all "an angle in degrees" and all three appear in
-//! one expression — `RA = LST − HA`, `HA = ±axis angle (+180°)`. They are separate types because
-//! the folding conventions differ (`[0, 360)` for sidereal time, `[-180, 180)` for the other two)
+//! one expression — `RA = LST − HA`, `HA = ±(axis angle + 90°) (+180°)`. They are separate types
+//! because the folding conventions differ (`[0, 360)` for sidereal time, `[-180, 180)` for the
+//! other two)
 //! and because a transposition in that expression is a pointing error of up to twelve hours that
 //! nothing downstream can detect: the mount would answer every inquiry consistently and point at
 //! the wrong sky.
