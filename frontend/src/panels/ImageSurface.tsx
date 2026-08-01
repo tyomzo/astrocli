@@ -186,7 +186,20 @@ export function ImageSurface(): ReactNode {
     <section className="flex flex-col gap-2">
       <SourceToggle source={source} onSelect={showImage} />
 
-      <div className="relative overflow-hidden rounded-lg border border-edge bg-raised">
+      {/*
+        The stage suppresses the browser's own long-press behaviours for everything inside it —
+        the live image, the summoned D-pad, the badge. The D-pad's buttons carry their own
+        guards, but they float over an <img>, and Android's long-press on an *image* opens the
+        save-image sheet regardless of what the element on top prevents: a near-miss lands on
+        the picture, the sheet steals the pointer, the hold dies (the dead-man doing its job
+        against a hijacked gesture), and dismissing the sheet reads as an outside tap that
+        closes the overlay. Found by an operator's thumb, not by any test — a desktop pointer
+        never long-presses.
+      */}
+      <div
+        className="relative touch-none overflow-hidden rounded-lg border border-edge bg-raised select-none [-webkit-touch-callout:none]"
+        onContextMenu={(event) => event.preventDefault()}
+      >
         <Zoomable>
           {showing === null ? (
             <Placeholder
