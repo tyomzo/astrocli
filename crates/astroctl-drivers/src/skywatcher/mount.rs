@@ -559,8 +559,32 @@ impl Shared {
         let ra = link.send(session.ra.read_position()).await?;
         let dec = link.send(session.dec.read_position()).await?;
         let counts = AxisCounts { ra, dec };
-        let branch = session.geometry.mech(counts).branch();
-        self.locked().branch = Some(branch);
+        // **The branch is not updated here**, and the reason is a hardware truth: a Synta counter
+        // counts *commanded* steps, so a stalled axis keeps reporting motion the metal never made
+        // (E11, `spikes/skywatcher-heq5/FINDINGS.md`). This mount parks at the pole, where the
+        // branch boundary lies, so a stall near home walks the phantom counter across it — and a
+        // branch derived from fiction inverts the declination motor's sense on the operator's next
+        // press. Observed exactly that way: a jam at 64×, then the same button driving the other
+        // direction.
+        //
+        // Nothing a *nudge* does can legitimately change pier side either: it moves arcseconds,
+        // and the side is a property of which half of the meridian the mount is working. Only the
+        // deliberate acts change it — a goto that chose a side, or a fresh connect — so those are
+        // the only places that write it (`refresh_branch`).
+        Ok(counts)
+    }
+
+    /// Re-derive the pier branch from the counters, for the deliberate acts that can change it.
+    ///
+    /// Separate from [`Self::read_counts`] so that the 1 Hz position poll — which runs while an
+    /// axis may be stalled and lying — cannot rewrite it. See that method for why.
+    async fn refresh_branch(
+        &self,
+        link: &SerialLink,
+        session: Session,
+    ) -> Result<AxisCounts, DeviceError> {
+        let counts = self.read_counts(link, session).await?;
+        self.locked().branch = Some(session.geometry.mech(counts).branch());
         Ok(counts)
     }
 
@@ -596,7 +620,7 @@ impl Shared {
             (Some(branch), _) => branch,
             (None, Axis::Ra) => Branch::Normal,
             (None, Axis::Dec) => {
-                self.read_counts(link, session).await?;
+                self.refresh_branch(link, session).await?;
                 self.locked().branch.unwrap_or(Branch::Normal)
             }
         };
@@ -925,9 +949,10 @@ async fn poll_to_completion(
             }
         }
         if arrived {
-            // The counters are fresh and the axes stopped: cache the branch so the next manual
-            // slew does not have to read them again.
-            let counts = shared.read_counts(link, session).await?;
+            // A goto is one of the two acts that can legitimately change pier side, and the
+            // counters are fresh with the axes stopped — the one moment they are trustworthy. So
+            // this is where the branch is re-derived, rather than from the running poll.
+            let counts = shared.refresh_branch(link, session).await?;
             let _ = counts;
             return Ok(());
         }
@@ -1782,7 +1807,40 @@ mod tests {
             "home points at the pole, not {}",
             position.dec.degrees()
         );
-        assert_eq!(mount.pier_side(), Some(PierSide::West));
+        // The position poll deliberately does **not** publish a pier side. A Synta counter counts
+        // commanded steps, so a stalled axis reports motion the metal never made; letting the poll
+        // derive the branch let a jam near the pole flip the declination motor's sense under the
+        // operator's next press (E11, observed 2026-08-01). Only `connect` and an arrived `goto`
+        // — the acts that can legitimately change pier side, with the axes stopped — write it.
+        assert_eq!(
+            mount.pier_side(),
+            None,
+            "a routine position read must not derive the branch"
+        );
+    }
+
+    /// The branch *is* established by the deliberate acts, or `sense` would have nothing to use.
+    #[tokio::test(start_paused = true)]
+    async fn a_cold_declination_slew_establishes_the_branch_before_moving() {
+        let port = MockPort::new();
+        let mount = mount(&port);
+        mount.connect().await.expect("connects");
+        port.clear_writes();
+        assert_eq!(mount.pier_side(), None, "cold");
+
+        mount
+            .slew(Axis::Dec, Direction::North, SlewSpeed::Slow)
+            .await
+            .expect("the mount accepted the slew");
+
+        // It read the counters *before* programming motion — that read is the deliberate one.
+        let sent = frames(&port);
+        assert!(
+            sent.iter().position(|f| f.starts_with(":j")).unwrap()
+                < sent.iter().position(|f| f.starts_with(":G")).unwrap(),
+            "the branch is established before the motion mode is chosen, not after: {sent:?}"
+        );
+        assert!(mount.pier_side().is_some(), "and it was cached");
     }
 
     #[tokio::test(start_paused = true)]
