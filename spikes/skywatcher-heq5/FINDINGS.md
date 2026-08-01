@@ -521,3 +521,47 @@ cleanly tonight through a different firmware ramp.
 or payload (it will), and whether the goto path's own ramp — which reached 835× cleanly tonight —
 is a different profile in firmware or merely luckier. The PWA's speed control now labels every rung
 in sidereal multiples so the threshold can be bracketed by ear without a rebuild.
+
+
+## The home hour angle is +6h, not 0 — found by eye, 2026-08-01
+
+SDD §5.2.3 and `math/mech.rs` model the sky as `HA = s·h`, so both counters at `0x800000` mean
+hour angle **zero**: the meridian. That is wrong by exactly six hours, and no test could have
+caught it — every fixture compares the model against itself, and the mount's counters agree with
+whatever the model says they mean. It took an operator looking at metal.
+
+**The evidence, two independent observations from the home pose** (counterweight shaft down, tube
+along the polar axis, both counters at home after a power cycle):
+
+| commanded | model said | tube actually pointed |
+|-----------|-----------|----------------------|
+| DEC axis +90° (dec 90 → 0), RA axis untouched | south, alt 30° (HA 0) | **west**, on the horizon (HA +6h) |
+| then DEC to 60°, then RA axis +90° (HA −6h) | north-east, alt 48.5° | **straight up** — the zenith (HA 0) |
+
+Both resolve to one correction: **`HA_true = HA_model + 90°`**. The second is the stronger of the
+two, because the zenith is unmistakable — there is no confusing it with anything, and it lands
+exactly where the corrected model predicts.
+
+**Why the geometry demands it.** The counterweight shaft lies *along* the declination axis, and at
+home it hangs down — which puts it in the meridian plane. Rotating the tube about that shaft
+therefore sweeps it through the plane perpendicular to the meridian: east–west. A pure declination
+move from home **cannot** put the tube on the meridian, which is precisely what the model claimed.
+Reaching the meridian needs the RA axis to turn 90° as well, and that is the six hours the model
+was missing.
+
+**What this invalidates, and what it does not.** Everything mechanical is sound: both axes moved
+exactly 90.00° as commanded, with correct ramps, readback verification and settling. The codec, the
+serial task, the controller, the goto supervision and the limits all did their jobs. What was wrong
+is only the *map* — the constant relating axis angle to hour angle. Consequences worth naming:
+
+* Reported RA has been six hours out whenever the declination axis was away from the pole. DEC has
+  always been right (it does not depend on this constant).
+* The altitude limit computes from that RA, so it has been refusing and permitting the wrong
+  targets — the alarming "39° below the horizon" earlier the same evening was very likely this
+  error, not a mount that had been driven underground.
+* `goto` still *arrives* at the position it computed; the position simply was not the sky
+  coordinate the operator asked for.
+
+The fix is a constant in `mech.rs`'s four-line model, but it propagates to `goto_solution`, the
+pier-side branch and the altitude limit, so it belongs in a task with fixtures reworked and this
+same swing test as its acceptance criterion — not a one-line patch at midnight.
