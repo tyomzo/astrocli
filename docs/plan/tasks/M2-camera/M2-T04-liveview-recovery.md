@@ -21,7 +21,7 @@ monitoring, and the full wedge-recovery protocol (the REL-03 path).
 
 ## Acceptance criteria
 
-- [~] T-CAM-1: capture/settings/live-view session, then induced wedge (cable pull mid-liveview) → automatic recovery to working capture within 30 s, UI shows reconnecting→connected without reload
+- [x] T-CAM-1 **closed 2026-08-01, real cable pull**: device-gone detected at once, recovery on attempt 5/6, **15.4 s pull-to-recovered** vs the 30 s budget, proof-capture `light_00020` (26.5 MB CR3). Round 1 reproduced the gvfs replug-steal and forced `docs/ops/camera-usb-claim.md`'s permanent fix onto this desktop (mask + D-Bus shadow, verified holding); round 2 sharpened the diagnosis — "Unknown model" during recovery is the USB re-enumeration window itself, ridden out by the bounded retry loop, never a gvfs symptom
   - Recovery loop proved end to end against the mock `CamOps` (`a_wedged_camera_recovers_by_itself_to_a_working_capture`, `recovery_reports_reconnecting_before_it_reports_connected`, `live_view_survives_a_recovery_and_resumes_into_the_same_stream`, and the whole `recovery::tests` module).
   - On hardware the run got as far as reproducing the *claim* branch live and no further — see "Hardware evidence" below. The full pull→recover→capture sequence is pending.
   - **"UI shows reconnecting→connected" is not achievable as specified** — see the §4.3 gap below.

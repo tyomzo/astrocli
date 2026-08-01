@@ -111,3 +111,11 @@ relying on it for an unattended session.
 
 On a machine where you also browse camera contents in a file manager, section 3 removes that. Use
 section 2 when it bites instead. The permanent fix is for the field node, which has one job.
+
+## 5. "Unknown model" during recovery is the replug window, not a claim conflict
+
+Observed 2026-08-01 on a real cable pull: reopen attempts that land while the replugged body is
+still enumerating fail with `transport error: Unknown model` — with the gvfs monitor provably dead.
+It clears by itself within seconds; the bounded retry loop rides it out (recovery succeeded on
+attempt 5/6, 15.4 s end to end). Do not diagnose gvfs from this string; gvfs announces itself as
+`Could not claim the USB device` with a mount present.
