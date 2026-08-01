@@ -100,6 +100,20 @@ export function ImageSurface(): ReactNode {
   const [summoned, setSummoned] = useState(false);
   const [explanation, setExplanation] = useState<string | null>(null);
 
+  // Fullscreen is a property of the *stage*, not the page: the D-pad, the badge and the pause
+  // explanations all live inside this element, so filling the screen with it keeps the whole
+  // framing workflow — nudge included — rather than trading the controls for the picture.
+  // State comes from the browser's own event, never from the click: the OS can eject fullscreen
+  // (notification shade, gesture navigation) without asking us, and a button that trusted its
+  // own last tap would then show "collapse" over a windowed stage.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    const sync = () => setFullscreen(document.fullscreenElement === stageRef.current);
+    document.addEventListener('fullscreenchange', sync);
+    return () => document.removeEventListener('fullscreenchange', sync);
+  }, []);
+
   // A ticking clock, because a countdown that only moved when an event arrived would sit still for
   // a second at a time. 250 ms reads as smooth and costs far less than a frame rate.
   const now = useNow(250);
@@ -205,6 +219,7 @@ export function ImageSurface(): ReactNode {
         never long-presses.
       */}
       <div
+        ref={stageRef}
         className="relative touch-none overflow-hidden rounded-lg border border-edge bg-raised select-none [-webkit-touch-callout:none]"
         onContextMenu={(event) => event.preventDefault()}
       >
@@ -238,6 +253,23 @@ export function ImageSurface(): ReactNode {
             frameId={showing.image.frameId}
           />
         )}
+
+        <button
+          type="button"
+          aria-label={fullscreen ? 'Shrink the image back into the app' : 'Fill the screen with the image'}
+          className="absolute top-2 right-2 z-10 flex size-touch items-center justify-center rounded-md border border-edge bg-overlay text-lg text-muted"
+          onClick={() => {
+            if (fullscreen) {
+              void document.exitFullscreen().catch(() => {});
+            } else {
+              // A refusal (unsupported, or the browser denies it) leaves the button in its
+              // truthful state — `fullscreen` only flips when the browser says it happened.
+              void stageRef.current?.requestFullscreen().catch(() => {});
+            }
+          }}
+        >
+          {fullscreen ? '⤡' : '⤢'}
+        </button>
 
         {/*
           The nudge affordance belongs to framing, not to the accumulated stack: pointing while
