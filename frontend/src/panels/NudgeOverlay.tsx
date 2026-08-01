@@ -210,6 +210,18 @@ const SPEED_LABEL: Record<SlewSpeed, string> = {
   5: '800×',
 };
 
+/**
+ * Rungs this mount was heard to stall on (`spikes/skywatcher-heq5/FINDINGS.md`, E11).
+ *
+ * Marked, not removed. The threshold belongs to a mount with a particular balance and a particular
+ * load — a counterweighted, payload-carrying rig may well take 64× — so hiding the rungs would
+ * bake one evening's bare-mount measurement into the product. What the operator needs is the
+ * warning they earned, carried forward so they do not have to remember which dot buzzed: the
+ * counter cannot tell them, because a Synta counter counts commanded steps and a stalled axis
+ * reports the motion it did not make.
+ */
+const SPEED_STALLED: ReadonlySet<SlewSpeed> = new Set<SlewSpeed>([3, 4, 5]);
+
 function SpeedSelector({
   speed,
   onChange,
@@ -224,18 +236,20 @@ function SpeedSelector({
         <button
           key={level}
           type="button"
-          aria-label={`Speed ${SPEED_LABEL[level]} sidereal`}
+          aria-label={`Speed ${SPEED_LABEL[level]} sidereal${SPEED_STALLED.has(level) ? ' — heard to skip on this mount' : ''}`}
           aria-pressed={level === speed}
           onClick={() => onChange(level)}
           className={`flex min-h-touch min-w-touch flex-col items-center justify-center px-1 ${
-            level === speed ? 'text-accent' : 'text-faint'
+            level === speed ? 'text-accent' : SPEED_STALLED.has(level) ? 'text-warn/70' : 'text-faint'
           }`}
+          title={SPEED_STALLED.has(level) ? 'this mount was heard to skip at this rate' : undefined}
         >
           <span aria-hidden="true" className="text-lg leading-none">
             {level <= speed ? '●' : '○'}
           </span>
           <span aria-hidden="true" className="font-mono text-[0.6rem] leading-tight">
             {SPEED_LABEL[level]}
+            {SPEED_STALLED.has(level) && '!'}
           </span>
         </button>
       ))}

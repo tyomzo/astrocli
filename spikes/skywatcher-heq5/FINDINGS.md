@@ -505,7 +505,19 @@ Two consequences beyond the ladder:
   that implies — so N and S swap after a stall. Fixing the stall should fix the direction; verify
   rather than assume.
 
-**Unmeasured:** where between 8× and 64× the threshold actually sits, whether it moves with balance
+**Bracketed the same evening, by ear, using the labelled control:** every rung up to and including
+**8× turns cleanly**; **64× skips**; **400× makes its own distinct noise** — fast enough that the
+rotor arguably never synchronises rather than losing sync partway. So the usable manual band on this
+mount, bare and unloaded, is **1×–8×**, with the true threshold somewhere in the untested gap
+between 8× and 64× (the EQMOD ladder offers no rung between them, which is itself the finding: the
+convention's steps are too coarse to bracket further without custom rates).
+
+That band is not a limitation in practice — it is the band framing actually wants. 8× sidereal is
+2 arcminutes per second, which crosses an R10 frame in about a minute; 64× would cross it in eight
+seconds and 800× in under one. The rungs above 8× exist for the *goto* path, which reached 835×
+cleanly tonight through a different firmware ramp.
+
+**Still unmeasured:** where between 8× and 64× the threshold actually sits, whether it moves with balance
 or payload (it will), and whether the goto path's own ramp — which reached 835× cleanly tonight —
 is a different profile in firmware or merely luckier. The PWA's speed control now labels every rung
 in sidereal multiples so the threshold can be bracketed by ear without a rebuild.
