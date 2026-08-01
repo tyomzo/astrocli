@@ -45,7 +45,15 @@ const DIRECTIONS: readonly {
 ];
 
 export function NudgeOverlay({ onDismiss }: { onDismiss: () => void }): ReactNode {
-  const [speed, setSpeed] = useState<SlewSpeed>(3);
+  // Level 2 (8x sidereal), not 3. Level 3 is 64x, and on this HEQ5 the motor stalls there
+  // unloaded: it ramps, the rotor loses sync, the axis buzzes and stops while the *counter keeps
+  // counting the steps that never happened* — open loop, so nothing in software can see it. The
+  // operator heard it. Levels 1 and 2 were measured turning cleanly (106 and 839 counts/s), so
+  // the default is the fastest rate proven to move metal, and the ladder above it is left
+  // reachable because the threshold is a property of this mount, its balance and its load — the
+  // operator finds it by ear, which is what the labels below are for. FINDINGS' E11 was never
+  // run; this is it, run by an operator's thumb.
+  const [speed, setSpeed] = useState<SlewSpeed>(2);
   const [failure, setFailure] = useState<RequestFailure | null>(null);
 
   return (
@@ -185,6 +193,23 @@ function NudgeButton({
  * and as one button per level rather than a slider because a slider is the hardest control to hit
  * with a gloved thumb in the dark.
  */
+/**
+ * What each level actually commands, in multiples of the sidereal rate.
+ *
+ * Unlabelled dots are a rate control that cannot be reasoned about: an operator who hears a stall
+ * needs to know whether the next rung down is a little slower or eight times slower. These are the
+ * EQMOD ladder's own values, and only the first two are measured turning this mount (106 and 839
+ * counts/s); the rest are reachable and unproven, which is exactly the information the labels
+ * carry.
+ */
+const SPEED_LABEL: Record<SlewSpeed, string> = {
+  1: '1×',
+  2: '8×',
+  3: '64×',
+  4: '400×',
+  5: '800×',
+};
+
 function SpeedSelector({
   speed,
   onChange,
@@ -199,14 +224,19 @@ function SpeedSelector({
         <button
           key={level}
           type="button"
-          aria-label={`Speed ${level} of ${SLEW_SPEEDS.length}`}
+          aria-label={`Speed ${SPEED_LABEL[level]} sidereal`}
           aria-pressed={level === speed}
           onClick={() => onChange(level)}
-          className={`flex size-touch items-center justify-center text-lg ${
-            level <= speed ? 'text-accent' : 'text-faint'
+          className={`flex min-h-touch min-w-touch flex-col items-center justify-center px-1 ${
+            level === speed ? 'text-accent' : 'text-faint'
           }`}
         >
-          <span aria-hidden="true">{level <= speed ? '●' : '○'}</span>
+          <span aria-hidden="true" className="text-lg leading-none">
+            {level <= speed ? '●' : '○'}
+          </span>
+          <span aria-hidden="true" className="font-mono text-[0.6rem] leading-tight">
+            {SPEED_LABEL[level]}
+          </span>
         </button>
       ))}
     </div>

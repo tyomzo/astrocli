@@ -475,3 +475,37 @@ anything M0–M2 depends on.
 Phases 1–5 complete apart from per-class slew speeds (E11) and guide pulses (E15), plus the
 optical backlash measurement noted above. Phase 6 (e-stop wire latency, needs the sniffer) and
 Phase 7 (endurance) not started.
+
+
+## E11 — the manual slew ladder, run 2026-08-01 by ear
+
+The one experiment the bench never ran, settled by an operator standing at the mount while the
+API drove it. Bare mount, clutches engaged, no payload, both axes.
+
+| level | commanded | counter says | rotor actually |
+|-------|-----------|--------------|----------------|
+| 1 | 1× sidereal | 106 counts/s | **turns** |
+| 2 | 8× | 839 counts/s | **turns** |
+| 3 | 64× | 6,993 counts/s steady (27,974 including the ramp) | **stalls** — ramps up, then jams and stops |
+
+**The stall is invisible to every instrument this project has.** A Synta mount's counter counts
+*commanded* steps, so a stalled rotor and a turning one produce identical position telemetry — the
+counter walked 1.67° during a slew that ended with the axis buzzing in place. Nothing in the driver,
+the API or the PWA can distinguish them. The operator's ears are the only rotor sensor in the
+system, which is the open-loop reality PRD §4.2 states and the first time it has bitten in practice.
+
+Two consequences beyond the ladder:
+
+* **The rate model is exonerated.** Level 3's steady rate measured 6,993 c/s against 6,702 predicted
+  (1.04×, and the excess is ramp still bleeding into the window) — so `program()`'s speed-class
+  crossover and the high-class ratio arithmetic are right. What fails is the *motor*, at an
+  acceleration this firmware applies in slew mode.
+* **The random-direction report is downstream of this.** A stall corrupts the counter, the corrupted
+  counter can cross the pole on paper, and the declination motor's sense is derived from the branch
+  that implies — so N and S swap after a stall. Fixing the stall should fix the direction; verify
+  rather than assume.
+
+**Unmeasured:** where between 8× and 64× the threshold actually sits, whether it moves with balance
+or payload (it will), and whether the goto path's own ramp — which reached 835× cleanly tonight —
+is a different profile in firmware or merely luckier. The PWA's speed control now labels every rung
+in sidereal multiples so the threshold can be bracketed by ear without a rebuild.
