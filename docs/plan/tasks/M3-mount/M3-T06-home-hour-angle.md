@@ -1,7 +1,7 @@
 # M3-T06 — The home hour angle is +6h: correct the mech↔sky map
 
 **Milestone:** M3 (post-bring-up correction) · **Depends on:** M3-T03, M3-T04 · **Crates:** astroctl-drivers
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** done (2026-08-02)
 **Spec:** SDD §5.2.3; `spikes/skywatcher-heq5/FINDINGS.md` ("The home hour angle is +6h")
 
 ## What is wrong
@@ -39,12 +39,46 @@ the acceptance criterion below being a *physical* one.
 
 ## Acceptance criteria
 
-- [ ] From the home pose on real hardware: a 90° DEC move reports the tube **west on the horizon**,
+- [x] From the home pose on real hardware: a 90° DEC move reports the tube **west on the horizon**,
       and a following 90° RA move reports the **zenith**. Both were measured 2026-08-01 and are the
       ground truth this task is judged against
+      — `math::mech::tests::the_two_swings_measured_from_the_home_pose` (axis angles, with the
+      alt/az the operator saw, from an independent spherical triangle) and
+      `tests/position_math.rs::t_pos_6_the_home_pose_swings_measured_on_the_mount` (the same two
+      poses as 24-bit counters, through the SDD §5.2.3 seam). The recorded measurement is the
+      evidence; the mount was parked and powered off for this work
 - [ ] A goto to a known bright star puts it in the frame (once M2's camera is on the mount) — the
       first end-to-end check that RA is honest
-- [ ] The altitude limit refuses and permits the correct targets: a target genuinely below the
+      — **still open, and needs the mount.** This is the criterion that would close the remaining
+      unknown below
+- [x] The altitude limit refuses and permits the correct targets: a target genuinely below the
       horizon is refused, one genuinely above it is not
-- [ ] Simulator and driver agree: the same commanded axis angles produce the same sky coordinates
+      — no code changed in `astroctl-safety`: it computes from a `RaDec` and was always right
+      about the arithmetic. It was being handed a right ascension six hours out on the three paths
+      that judge the *current* position (the manual-slew pre-flight, the 2 Hz limit watch, the
+      meridian watch) and on the operator's alt/az readout. The goto pre-flight check was never
+      wrong about the target, only about whether the mount would go there
+- [x] Simulator and driver agree: the same commanded axis angles produce the same sky coordinates
       in both, asserted by a shared fixture
+      — `the_driver_and_the_simulator_agree::the_same_axis_state_is_the_same_sky_in_both`. Note
+      what the fixture had to be: the simulator holds the hour angle and declination *directly*
+      and has no home counter, so agreement is asserted as the correspondence
+      `simulator hour-angle axis = s·(h + 90°)` rather than as a shared constant. The simulator
+      needed no arithmetic change and **could not have caught this defect** — see below
+
+## What this could not settle
+
+- **Nothing here was verified against the mount**, which was parked and powered off. The two
+  swings of 2026-08-01 are the evidence, and they are an eye at an eyepiece rather than an
+  instrument: "due west on the horizon" and "the zenith" are unmistakable to within a degree or
+  two, which is ample for a six-hour error and no use at all for a small one. A goto to a named
+  star, framed on the camera, is what turns this from "not six hours wrong" into a pointing
+  measurement.
+- **The southern-hemisphere sign is derived, not observed.** The mount is in Norway. The offset
+  carries the hemisphere sign — `HA = s·(h + 90°)`, not `HA = s·h + 90°` — and that follows from
+  the same `A = s·P` that already signs the hour-angle term and the declination. It is asserted
+  (`the_home_hour_angle_is_six_hours_and_carries_the_hemisphere_sign`) but only a mount below the
+  equator can confirm it.
+- **The pier-side label is still `derived` and unverified**, exactly as it was before this task.
+  M3-T06 did not touch it and does not close it; `math::mech`'s module docs still carry the one
+  experiment that would.

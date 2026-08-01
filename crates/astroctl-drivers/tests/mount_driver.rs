@@ -550,8 +550,17 @@ async fn connected(mount: &SyntaMount, settle_seconds: u32) -> Arc<SkywatcherMou
 ///
 /// Expressed as arithmetic rather than a decimal, so the expected counter below is exact rather
 /// than exact-to-within-rounding.
+///
+/// `RA = LST − HA` with `HA = s·(h + 90°)` (northern, so `s = +1`) and LST pinned at 12 h by
+/// [`connected`]. In hours: `RA = 12 − (h + 90°)/15 = 6 − h_hours`. **The `6` was a `12` before
+/// M3-T06** — home is six hours west of the meridian, not on it, so the right ascension that
+/// parks the axis at a given counter is six hours earlier than this suite used to believe.
+///
+/// Every counter expectation downstream is unchanged, and that is the point: the axis offsets
+/// these tests assert are mechanical facts about the moves, and only the sky coordinate that
+/// asks for them moved.
 fn ra_hours_for_axis_offset(offset: f64) -> f64 {
-    12.0 - offset / f64::from(CPR) * 24.0
+    (6.0 - offset / f64::from(CPR) * 24.0).rem_euclid(24.0)
 }
 
 /// The declination that leaves the DEC axis exactly where it is.

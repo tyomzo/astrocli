@@ -411,30 +411,49 @@ mod tests {
     #[test]
     fn from_home_the_nearer_pier_side_is_chosen() {
         // Home is the one state with a real choice — the tube is on the pole, so neither branch
-        // has been entered and neither is a flip. Two targets, worked out by hand at LST 12h
-        // (= 180°), both at declination +60° so the declination move is 30° on either branch:
+        // has been entered and neither is a flip.
         //
-        //   RA 11h  → HA = +15°.  Normal RA axis  15°; flipped 195° → −165°.  Normal wins.
-        //   RA 0.667h → HA = +170°. Normal RA axis 170°; flipped 350° →  −10°.  Flipped wins.
+        // **Which branch wins is now the sign of the hour angle, and that is the corrected home
+        // hour angle showing through** (M3-T06). At home the RA axis is at 0°, and
+        // `HA = s·(h + 90°)` puts the normal branch's tube at HA **+6h** and the flipped
+        // branch's at `+6h + 12h` = **−6h**. So the two branches straddle the meridian, six hours
+        // either side, and the nearer one is simply the one on the target's own side of it.
+        // Under the old `HA = s·h` both branches sat *on* the meridian and the rule came out as
+        // an arbitrary-looking threshold at ±90° of hour angle instead.
+        //
+        // Two targets, worked out by hand at LST 12h (= 180°), symmetric about the meridian and
+        // both at declination +60°, so the declination move is 30° on either branch and the
+        // choice is decided by the RA axis alone:
+        //
+        //   RA 11h → HA = +15° (west).  Normal RA axis −75°; flipped +105°.  Normal wins.
+        //   RA 13h → HA = −15° (east).  Normal RA axis −105°; flipped +75°.  Flipped wins.
         //
         // A rule that always answered "normal" would pass the first and fail the second, which
         // is the whole reason the second is here.
         let sidereal = lst(12.0);
-        let near_the_meridian = radec(11.0, 60.0);
-        let far_west = radec(2.0 / 3.0, 60.0);
+        let just_west_of_the_meridian = radec(11.0, 60.0);
+        let just_east_of_the_meridian = radec(13.0, 60.0);
 
         let normal = solve_from(
             AxisCounts::HOME,
-            near_the_meridian,
+            just_west_of_the_meridian,
             sidereal,
             Hemisphere::Northern,
         );
-        let flipped = solve_from(AxisCounts::HOME, far_west, sidereal, Hemisphere::Northern);
+        let flipped = solve_from(
+            AxisCounts::HOME,
+            just_east_of_the_meridian,
+            sidereal,
+            Hemisphere::Northern,
+        );
         assert_eq!(normal.branch(), Branch::Normal);
         assert_eq!(flipped.branch(), Branch::ThroughThePole);
 
         // ...and each is genuinely the shorter of the two, which is what "nearest" has to mean.
-        for (solution, target) in [(normal, near_the_meridian), (flipped, far_west)] {
+        for (solution, target) in [
+            (normal, just_west_of_the_meridian),
+            (flipped, just_east_of_the_meridian),
+        ] {
             let rejected = solve(
                 AxisCounts::HOME,
                 target,
@@ -460,13 +479,22 @@ mod tests {
         // on a side, a target that would be far nearer on the other side is *still* reached the
         // long way round. That is not a missed optimisation — the short way is a swing through
         // the pole, and deciding to take it is the meridian flip, which SDD §5.4 owns.
+        // LST 12h = 180°, so a target at hour angle −170° — well east of the meridian, which
+        // after M3-T06 is the far side from where the normal branch sits — is RA
+        // (180° + 170°) / 15 = 23.333 h. At declination +60° from a mount already at declination
+        // axis +30°:
+        //
+        //   Normal (forced):     RA axis −170 − 90 = −260° → +100°.  Travel 100°, no DEC move.
+        //   Through the pole:    RA axis −170 + 90 = −80°.           Travel 80°, but 60° of DEC.
+        //
+        // so the rejected branch really is the cheaper one, at 80° against 100°.
         let sidereal = lst(12.0);
-        let far_west = radec(2.0 / 3.0, 60.0); // flipped is 30°, normal is 170°
+        let far_east = radec(350.0 / 15.0, 60.0);
         let on_the_normal_side = AxisCounts {
             ra: Counts::HOME,
             dec: counts_at(30.0),
         };
-        let solution = solve_from(on_the_normal_side, far_west, sidereal, Hemisphere::Northern);
+        let solution = solve_from(on_the_normal_side, far_east, sidereal, Hemisphere::Northern);
         assert_eq!(
             solution.branch(),
             Branch::Normal,
@@ -475,7 +503,7 @@ mod tests {
 
         let cheaper = solve(
             on_the_normal_side,
-            far_west,
+            far_east,
             sidereal,
             Hemisphere::Northern,
             scale(),
@@ -495,9 +523,16 @@ mod tests {
         // arithmetic done outside the code to get through.
         //
         // Northern hemisphere, LST 6h. Target RA 6h, dec +40°. HA = 6h − 6h = 0 → the meridian.
-        // Normal branch: dec axis = 90 − 40 = 50°, RA axis = 0°.
+        // Normal branch: dec axis = 90 − 40 = 50°, RA axis = s·HA − 90 = **−90°**.
+        //
+        // A quarter turn is 9,024,000 / 4 = 2,256,000 counts exactly, so the RA counter is
+        // 8,388,608 − 2,256,000 = 6,132,608. **This is the M3-T06 correction in one number**: it
+        // used to read `Counts::HOME`, i.e. this suite asserted that a mount sitting at its
+        // power-on counters was looking at the meridian. It is looking six hours west of it.
+        //
         // 50° of 9,024,000 counts is 9,024,000 × 50/360 = 1,253,333.33 → 1,253,333 counts, so the
-        // declination counter is 0x800000 + 1,253,333 = 8,388,608 + 1,253,333 = 9,641,941.
+        // declination counter is 0x800000 + 1,253,333 = 8,388,608 + 1,253,333 = 9,641,941. The
+        // declination half never depended on the constant and is unchanged.
         let sidereal = lst(6.0);
         let from = AxisCounts {
             ra: Counts::HOME,
@@ -505,13 +540,18 @@ mod tests {
         };
         let solution = solve_from(from, radec(6.0, 40.0), sidereal, Hemisphere::Northern);
         assert_eq!(solution.branch(), Branch::Normal);
-        assert_eq!(solution.destination().ra, Counts::HOME, "on the meridian");
+        assert_eq!(
+            solution.destination().ra.get(),
+            6_132_608,
+            "a quarter turn below home is the meridian"
+        );
         assert_eq!(solution.destination().dec.get(), 9_641_941);
 
-        // The same target from the other branch: dec axis = 40 − 90 = −50°, RA axis = 180°.
-        // −50° is 8,388,608 − 1,253,333 = 7,135,275. ±180° name one direction and the canonical
-        // one is negative, so the RA axis lands half a revolution *below* home:
-        // 8,388,608 − 4,512,000 = 3,876,608.
+        // The same target from the other branch: dec axis = 40 − 90 = −50°, and
+        // RA axis = s·(HA − 180°) − 90° = −270° → +90° once folded.
+        // −50° is 8,388,608 − 1,253,333 = 7,135,275; +90° is 8,388,608 + 2,256,000 = 10,644,608.
+        // Note the two branches' RA counters, 6,132,608 and 10,644,608, are 4,512,000 apart —
+        // half a revolution, exactly as a meridian flip must be.
         let flipped_start = AxisCounts {
             ra: Counts::HOME,
             dec: counts_at(-30.0),
@@ -524,13 +564,24 @@ mod tests {
         );
         assert_eq!(flipped.branch(), Branch::ThroughThePole);
         assert_eq!(flipped.destination().dec.get(), 7_135_275);
-        assert_eq!(flipped.destination().ra.get(), 3_876_608);
+        assert_eq!(flipped.destination().ra.get(), 10_644_608);
+        assert_eq!(
+            flipped.destination().ra.get() - solution.destination().ra.get(),
+            9_024_000 / 2,
+            "the two branches are half a revolution apart on the RA axis"
+        );
 
         // Southern hemisphere, same instant and target: dec axis = 90 − (−1)(40) = 130°, which is
-        // 9,024,000 × 130/360 = 3,258,666.67 → 3,258,667 counts above home = 11,647,275. The hour
-        // angle is negated, so on the meridian the RA axis is still exactly home.
+        // 9,024,000 × 130/360 = 3,258,666.67 → 3,258,667 counts above home = 11,647,275.
+        //
+        // The RA axis is at −90° here **too**, and that is worth stating rather than stumbling
+        // over: `HA = s·(h + 90°)` is zero when `h = −90°` for *either* sign of `s`. The hemisphere
+        // negates the hour-angle term and the home offset together, so they cancel and the
+        // meridian sits a quarter turn below home in both hemispheres. Under the old model this
+        // line asserted `Counts::HOME` for the same reason with the same symmetry — the symmetry
+        // survived the correction, the position did not.
         let southern = solve_from(from, radec(6.0, 40.0), sidereal, Hemisphere::Southern);
-        assert_eq!(southern.destination().ra, Counts::HOME);
+        assert_eq!(southern.destination().ra.get(), 6_132_608);
         assert_eq!(southern.destination().dec.get(), 11_647_275);
     }
 

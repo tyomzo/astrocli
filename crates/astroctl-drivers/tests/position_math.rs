@@ -53,8 +53,8 @@ use astroctl_drivers::skywatcher::controller::{
     AxisParams, MotorController, RateModel, GOTO_TOLERANCE_COUNTS,
 };
 use astroctl_drivers::skywatcher::math::{
-    mech_to_sky, motor_direction, sky_to_mech, tracking_direction, AxisAngle, AxisCounts,
-    AxisScale, Branch, Hemisphere, Lst, MechPosition, MountGeometry,
+    mech_to_sky, motor_direction, sky_to_mech, tracking_direction, wrap_signed, AxisAngle,
+    AxisCounts, AxisScale, Branch, Hemisphere, Lst, MechPosition, MountGeometry,
 };
 
 // -----------------------------------------------------------------------------------------
@@ -295,9 +295,21 @@ fn t_pos_1_every_coordinate_round_trips_within_one_count() {
         "every case was exact, which means the grid is not reaching the arithmetic"
     );
     // The measured figure, pinned so that a change which stays inside the budget is still visible.
+    //
+    // **0.047872″, which is a third of a count and not the half count this comment used to
+    // claim.** Measured on the grid above immediately before and immediately after M3-T06's
+    // correction to the hour-angle constant, and identical to the last digit both times — which
+    // is the useful fact here. The correction shifts every right-ascension axis angle by exactly
+    // 90°, and 90° is exactly 2,256,000 counts at this counts-per-revolution, so it moves no
+    // rounding boundary at all. The residual is the declination grid's: 5° is 125,333.33 counts,
+    // and a third of a count is 0.0479″.
+    //
+    // The old figure was carried in the comment rather than measured; it is corrected here
+    // rather than in passing, because a stale number in a tolerance comment is how the next
+    // regression gets waved through.
     assert!(
-        worst_arcsec < 0.08,
-        "the round trip degraded to {worst_arcsec:.6}″; it has been 0.072″ (half a count)"
+        worst_arcsec < 0.05,
+        "the round trip degraded to {worst_arcsec:.6}″; it has been 0.047872″ (a third of a count)"
     );
 }
 
@@ -324,12 +336,22 @@ fn t_pos_1_the_round_trip_holds_at_the_astropy_anchored_sidereal_times() {
 }
 
 #[test]
-fn t_pos_1_a_transiting_target_puts_the_right_ascension_axis_exactly_on_home() {
+fn t_pos_1_a_transiting_target_puts_the_right_ascension_axis_a_quarter_turn_below_home() {
     // The strongest single statement this suite can make with an outside reference. astropy puts
     // this target at azimuth 180.000059° from Oslo — i.e. due south, on the meridian — so its
-    // hour angle is zero, so the mechanical right-ascension axis must be at the home counter
-    // `0x800000`. Nothing about that conclusion comes from this driver except the arithmetic
-    // being tested.
+    // hour angle is zero. Nothing about that conclusion comes from this driver except the
+    // arithmetic being tested.
+    //
+    // **This test used to be called `..._exactly_on_home`, and that name was the defect** (M3-T06,
+    // `spikes/skywatcher-heq5/FINDINGS.md`). An outside reference established the hour angle was
+    // zero; the suite then asserted that zero hour angle meant the power-on counters, which is
+    // the one step astropy had nothing to say about. `HA = s·(h + 90°)` puts a transiting target
+    // at `h = −90°`, a quarter turn below home: 9,024,000 / 4 = 2,256,000 counts, so
+    // 8,388,608 − 2,256,000 = 6,132,608.
+    //
+    // The fixture is unchanged. It was always right about the *sky*; what was wrong was which
+    // counter that sky corresponds to.
+    const QUARTER_TURN: i64 = (CPR / 4) as i64;
     let fixture = &ASTROPY[0];
     let lst = astropy_sidereal_time(fixture);
     let geometry = geometry(fixture.latitude);
@@ -340,26 +362,107 @@ fn t_pos_1_a_transiting_target_puts_the_right_ascension_axis_exactly_on_home() {
     // at azimuth 180.000059°, i.e. 0.21″ short of due south, which is 1.0 count of hour angle at
     // 25,066.7 counts per degree. An exact assertion here would be asserting that the reference
     // is rounder than it is.
-    let off_home = i64::from(counts.ra.get()) - i64::from(HOME);
+    let off_meridian = i64::from(counts.ra.get()) - (i64::from(HOME) - QUARTER_TURN);
     assert!(
-        off_home.abs() <= 1,
-        "a transiting target must sit the right-ascension axis on home, not {} counts away",
-        off_home
+        off_meridian.abs() <= 1,
+        "a transiting target must sit the right-ascension axis a quarter turn below home \
+         ({}), not {off_meridian} counts away from it",
+        i64::from(HOME) - QUARTER_TURN
     );
 
     // ...and its declination axis is 90° − 20° = 70° from home, which is
-    // 9,024,000 × 70/360 = 1,754,666.67 → 1,754,667 counts above 8,388,608.
+    // 9,024,000 × 70/360 = 1,754,666.67 → 1,754,667 counts above 8,388,608. Untouched by the
+    // correction, and left here as the control: if a future edit to the hour-angle constant also
+    // moved this number, the two halves have been confused.
     assert_eq!(counts.dec.get(), HOME + 1_754_667);
 
     // The flipped branch is the same sky reached from the other side: the declination counter is
-    // the mirror image and the right-ascension axis is half a revolution away.
+    // the mirror image and the right-ascension axis is half a revolution away, i.e. a quarter
+    // turn *above* home rather than below it.
     let flipped = geometry.counts_for(target, Branch::ThroughThePole, lst);
     assert_eq!(flipped.dec.get(), HOME - 1_754_667);
-    let off_anti_meridian = i64::from(flipped.ra.get()) - i64::from(HOME - CPR / 2);
+    let off_flipped = i64::from(flipped.ra.get()) - (i64::from(HOME) + QUARTER_TURN);
     assert!(
-        off_anti_meridian.abs() <= 1,
-        "the flipped right-ascension axis is {off_anti_meridian} counts from half a revolution \
-         below home"
+        off_flipped.abs() <= 1,
+        "the flipped right-ascension axis is {off_flipped} counts from a quarter turn above home"
+    );
+    // The half revolution between them, stated as the thing it is: one meridian flip.
+    assert_eq!(
+        i64::from(flipped.ra.get()) - i64::from(counts.ra.get()),
+        i64::from(CPR / 2)
+    );
+
+    // The home pose itself, said plainly: with both counters at `0x800000` the tube is six hours
+    // west of the meridian. This is the assertion whose absence let the defect live — the suite
+    // had no case that read the sky *out* of the power-on counters, only cases that read counters
+    // out of the sky.
+    let at_home_hour_angle = wrap_signed(
+        lst.degrees() - geometry.position(AxisCounts::HOME, lst).coords.ra.hours() * 15.0,
+    );
+    assert!(
+        (at_home_hour_angle - 90.0).abs() < 1e-9,
+        "the home pose looks at hour angle {at_home_hour_angle}°, not +6h"
+    );
+}
+
+#[test]
+fn t_pos_6_the_home_pose_swings_measured_on_the_mount() {
+    // **M3-T06's acceptance criterion, in the units the mount was actually commanded in.**
+    //
+    // `math::mech`'s own `the_two_swings_measured_from_the_home_pose` asserts these two
+    // observations in axis *angles*, and says where they came from. This one asserts them in
+    // 24-bit *counters*, through `MountGeometry::position` — the SDD §5.2.3 seam the driver's
+    // 1 Hz poll actually calls. That is the path the operator's readout came down, so it is the
+    // path the correction has to be true on; an error in `AxisScale` between the two layers would
+    // pass there and fail here.
+    //
+    // Both counters are exact, which is worth noting because nothing else in this suite is:
+    // 9,024,000 / 4 = 2,256,000 and 9,024,000 / 12 = 752,000 divide without remainder, so these
+    // two poses have no rounding in them at all and the assertions can be exact.
+    let oslo = geometry(OSLO_LATITUDE);
+    let lst = lst_hours(0.0);
+    let hour_angle_at =
+        |counts| wrap_signed(lst.degrees() - oslo.position(counts, lst).coords.ra.hours() * 15.0);
+
+    // Swing 1 — from home, the declination axis alone driven a quarter turn. The tube was seen
+    // due west on the horizon: declination 0, hour angle +6h.
+    let after_dec_swing = AxisCounts {
+        ra: Counts::HOME,
+        dec: Counts::new(HOME + CPR / 4).expect("fits"),
+    };
+    let sky = oslo.position(after_dec_swing, lst);
+    assert!(sky.coords.dec.degrees().abs() < 1e-9, "on the equator");
+    assert!(
+        (hour_angle_at(after_dec_swing) - 90.0).abs() < 1e-9,
+        "six hours west, where the tube was seen: got {}°",
+        hour_angle_at(after_dec_swing)
+    );
+
+    // Swing 2 — declination axis back to +30° (declination 60°) and the right-ascension axis a
+    // quarter turn below home. The tube was seen at the zenith: hour angle 0, declination within
+    // a tenth of a degree of Oslo's latitude.
+    let at_the_zenith = AxisCounts {
+        ra: Counts::new(HOME - CPR / 4).expect("fits"),
+        dec: Counts::new(HOME + CPR / 12).expect("fits"),
+    };
+    let sky = oslo.position(at_the_zenith, lst);
+    assert!((sky.coords.dec.degrees() - 60.0).abs() < 1e-9);
+    assert!(
+        hour_angle_at(at_the_zenith).abs() < 1e-9,
+        "on the meridian, which with declination 60° from latitude {OSLO_LATITUDE} is the zenith"
+    );
+    assert!(
+        (sky.coords.dec.degrees() - OSLO_LATITUDE).abs() < 0.1,
+        "a target on the meridian at the site latitude is straight up, and this is {}° from it",
+        (sky.coords.dec.degrees() - OSLO_LATITUDE).abs()
+    );
+
+    // And the pose the mount is left in overnight, said once in counters: both axes at
+    // `0x800000` is **not** the meridian. This is the assertion whose absence let the defect
+    // survive M3-T03's whole acceptance suite.
+    assert!(
+        (hour_angle_at(AxisCounts::HOME) - 90.0).abs() < 1e-9,
+        "the power-on counters look six hours west of the meridian"
     );
 }
 
@@ -416,9 +519,15 @@ struct MechCase {
     pier_side: PierSide,
     dec_degrees: f64,
     /// Hand-computed from `dec_axis = 90 − s·dec` (normal) or `s·dec − 90` (through the pole).
+    /// Unchanged by M3-T06 — the declination half never depended on the home hour angle.
     expected_dec_axis: f64,
-    /// Hand-computed from `ra_axis = s·HA` (normal) or `s·HA + 180°` (through the pole), at the
-    /// fixed hour angle of +30° every row below uses.
+    /// Hand-computed from `ra_axis = s·HA − 90°` (normal) or `s·(HA − 180°) − 90°` (through the
+    /// pole), at the fixed hour angle of +30° every row below uses.
+    ///
+    /// The `−90°` is M3-T06's correction: home is six hours from the meridian, so every row here
+    /// moved a quarter turn. Each is re-derived from the corrected model in the row's own
+    /// comment rather than shifted by 90° from what used to be written — a row nudged until it
+    /// passes is a row that certifies whatever the code does.
     expected_ra_axis: f64,
 }
 
@@ -431,6 +540,21 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
     //
     // One instant and one hour angle for all eight: LST 6 h (90°), target right ascension 4 h
     // (60°), so HA = +30° — west of the meridian, a setting target, in every row.
+    //
+    // The four right-ascension axis angles, derived from `HA = s·(h + 90°)` (+ 180° past the
+    // pole) at HA = +30°. Each is `h` solved for, not the old row shifted:
+    //
+    //   northern, normal:            h = s·HA − 90        =  30 − 90        =  −60°
+    //   northern, through the pole:  h = s·(HA − 180) − 90 = (30 − 180) − 90 = −240° → +120°
+    //   southern, normal:            h = s·HA − 90        = −30 − 90        = −120°
+    //   southern, through the pole:  h = s·(HA − 180) − 90 = 150 − 90       =   +60°
+    //
+    // Two cross-checks a reader can make without running anything. The two branches within a
+    // hemisphere differ by 180° (−60 vs +120; −120 vs +60), which is the meridian flip and is
+    // untouched by this correction. And the northern and southern normal rows are *not* mirror
+    // images the way they were under `HA = s·h` (they were +30 and −30): the home offset carries
+    // the same `s`, so the pair is −60 and −120, symmetric about −90° rather than about 0°.
+    // −90° is where the meridian now sits, in both hemispheres.
     const LST_HOURS: f64 = 6.0;
     const RA_HOURS: f64 = 4.0;
 
@@ -442,7 +566,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::West,
             dec_degrees: 40.0,
             expected_dec_axis: 50.0,
-            expected_ra_axis: 30.0,
+            expected_ra_axis: -60.0,
         },
         MechCase {
             latitude: OSLO_LATITUDE,
@@ -450,7 +574,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::West,
             dec_degrees: -40.0,
             expected_dec_axis: 130.0,
-            expected_ra_axis: 30.0,
+            expected_ra_axis: -60.0,
         },
         MechCase {
             latitude: OSLO_LATITUDE,
@@ -458,7 +582,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::East,
             dec_degrees: 40.0,
             expected_dec_axis: -50.0,
-            expected_ra_axis: -150.0,
+            expected_ra_axis: 120.0,
         },
         MechCase {
             latitude: OSLO_LATITUDE,
@@ -466,17 +590,17 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::East,
             dec_degrees: -40.0,
             expected_dec_axis: -130.0,
-            expected_ra_axis: -150.0,
+            expected_ra_axis: 120.0,
         },
-        // Southern hemisphere, s = −1: both the declination reference and the hour-angle sense
-        // invert, which is the whole of "hemisphere handling".
+        // Southern hemisphere, s = −1: the declination reference, the hour-angle sense *and* the
+        // home offset all invert, which is the whole of "hemisphere handling".
         MechCase {
             latitude: SANTIAGO_LATITUDE,
             branch: Branch::Normal,
             pier_side: PierSide::West,
             dec_degrees: 40.0,
             expected_dec_axis: 130.0,
-            expected_ra_axis: -30.0,
+            expected_ra_axis: -120.0,
         },
         MechCase {
             latitude: SANTIAGO_LATITUDE,
@@ -484,7 +608,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::West,
             dec_degrees: -40.0,
             expected_dec_axis: 50.0,
-            expected_ra_axis: -30.0,
+            expected_ra_axis: -120.0,
         },
         MechCase {
             latitude: SANTIAGO_LATITUDE,
@@ -492,7 +616,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::East,
             dec_degrees: 40.0,
             expected_dec_axis: -130.0,
-            expected_ra_axis: 150.0,
+            expected_ra_axis: 60.0,
         },
         MechCase {
             latitude: SANTIAGO_LATITUDE,
@@ -500,7 +624,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             pier_side: PierSide::East,
             dec_degrees: -40.0,
             expected_dec_axis: -50.0,
-            expected_ra_axis: 150.0,
+            expected_ra_axis: 60.0,
         },
     ];
 
@@ -562,9 +686,13 @@ fn t_pos_1_hand_computed_goto_targets() {
     // is 25,066.667 counts a degree.
     let oslo = geometry(OSLO_LATITUDE);
 
+    // A quarter of a revolution — 9,024,000 / 4 — is 2,256,000 counts, and after M3-T06 it is in
+    // every one of these because it is the home hour angle expressed as a counter.
+    //
     // (1) LST 6 h, target RA 6 h dec +40°, starting on the normal branch.
-    //     HA = 0, so the right-ascension axis goes to home. Declination axis = 90 − 40 = 50°
-    //     = 1,253,333.33 → 1,253,333 counts above home = 9,641,941.
+    //     HA = 0, so the right-ascension axis goes to s·HA − 90 = −90° = home − 2,256,000
+    //     = 6,132,608. Declination axis = 90 − 40 = 50° = 1,253,333.33 → 1,253,333 counts above
+    //     home = 9,641,941.
     let from = AxisCounts {
         ra: Counts::new(HOME + 200_000).expect("fits"),
         dec: Counts::new(HOME + 500_000).expect("fits"),
@@ -572,17 +700,21 @@ fn t_pos_1_hand_computed_goto_targets() {
     let solution = oslo
         .goto(from, radec(6.0, 40.0), lst_hours(6.0))
         .expect("in range");
-    assert_eq!(solution.destination().ra, Counts::HOME);
+    assert_eq!(solution.destination().ra.get(), 6_132_608);
     assert_eq!(solution.destination().dec.get(), 9_641_941);
     assert_eq!(solution.pier_side(), PierSide::West);
-    //     ...and the two moves are the differences, with their directions.
-    assert_eq!(solution.ra().delta(), -200_000);
+    //     ...and the two moves are the differences, with their directions. The right-ascension
+    //     move grew from 200,000 counts to 2,456,000 — the mount starts 200,000 counts above home
+    //     and has to reach 2,256,000 below it — and stayed backward.
+    assert_eq!(solution.ra().delta(), -(200_000 + 2_256_000));
     assert_eq!(solution.dec().delta(), 1_253_333 - 500_000);
     assert_eq!(solution.ra().direction(), MotionDirection::Backward);
     assert_eq!(solution.dec().direction(), MotionDirection::Forward);
 
     // (2) The same target from the far side of the pier. Declination axis = 40 − 90 = −50°,
-    //     right-ascension axis = 0 + 180 → the canonical −180°, i.e. home − 4,512,000 = 3,876,608.
+    //     right-ascension axis = s·(HA − 180) − 90 = −270° → the canonical +90°, i.e.
+    //     home + 2,256,000 = 10,644,608 — exactly half a revolution from case (1)'s 6,132,608,
+    //     because that is what a pier flip is.
     let flipped_start = AxisCounts {
         ra: Counts::HOME,
         dec: Counts::new(HOME - 500_000).expect("fits"),
@@ -591,25 +723,72 @@ fn t_pos_1_hand_computed_goto_targets() {
         .goto(flipped_start, radec(6.0, 40.0), lst_hours(6.0))
         .expect("in range");
     assert_eq!(flipped.destination().dec.get(), HOME - 1_253_333);
-    assert_eq!(flipped.destination().ra.get(), 3_876_608);
+    assert_eq!(flipped.destination().ra.get(), HOME + 2_256_000);
+    assert_eq!(
+        flipped.destination().ra.get() - solution.destination().ra.get(),
+        CPR / 2
+    );
     assert_eq!(flipped.pier_side(), PierSide::East);
 
-    // (3) A target 6 h east of the meridian: LST 12 h, RA 18 h → HA = −90°, so the
-    //     right-ascension axis goes to −90° = home − 2,256,000 = 6,132,608. Declination +10°
-    //     gives an axis angle of 80° = 2,005,333.33 → 2,005,333 counts above home.
+    // (3) A target 6 h east of the meridian: LST 12 h, RA 18 h → HA = −90°, so on the normal
+    //     branch the right-ascension axis goes to −90 − 90 = −180°, whose canonical spelling is
+    //     negative: home − 4,512,000 = 3,876,608. Declination +10° gives an axis angle of 80°
+    //     = 2,005,333.33 → 2,005,333 counts above home.
+    //
+    //     Started from a mount already on the normal branch, which this case did not need to do
+    //     before. From home *both* branches are candidates and the solver picks by travel, and
+    //     M3-T06 changed that choice for this target — see the assertion below. Forcing the
+    //     branch is what keeps this case a test of the −180° arithmetic rather than of the
+    //     tie-break.
+    let on_the_normal_branch = AxisCounts {
+        ra: Counts::HOME,
+        dec: Counts::new(HOME + 500_000).expect("fits"),
+    };
     let east = oslo
-        .goto(AxisCounts::HOME, radec(18.0, 10.0), lst_hours(12.0))
+        .goto(on_the_normal_branch, radec(18.0, 10.0), lst_hours(12.0))
         .expect("in range");
-    assert_eq!(east.destination().ra.get(), 6_132_608);
+    assert_eq!(east.branch(), Branch::Normal);
+    assert_eq!(east.destination().ra.get(), 3_876_608);
     assert_eq!(east.destination().dec.get(), HOME + 2_005_333);
 
-    // (4) Southern hemisphere, same sky: the hour angle sense inverts, so the right-ascension
-    //     axis goes to +90° instead, and the declination reference flips — 90 − (−1)(10) = 100°
+    // (3b) The same target from home, where the solver is free to choose — and now chooses the
+    //      other side of the pier. This is a real behavioural consequence of M3-T06 and is
+    //      asserted rather than left to be discovered: at home the tube is six hours *west* of
+    //      the meridian on the normal branch, so a target six hours *east* is a half-turn away
+    //      there (4,512,000 counts) and a standstill on the through-the-pole branch, which costs
+    //      only its 2,005,333 counts of declination. Under `HA = s·h` the two branches tied at
+    //      2,256,000 counts each and the tie broke toward normal.
+    //
+    //      Nothing unsafe follows: home is the one pose on neither side of the pier, so this is
+    //      a choice and not a flip — `no_computed_goto_path_crosses_the_pole` still holds
+    //      everywhere else, and this move is genuinely the shorter one.
+    let from_home = oslo
+        .goto(AxisCounts::HOME, radec(18.0, 10.0), lst_hours(12.0))
+        .expect("in range");
+    assert_eq!(from_home.branch(), Branch::ThroughThePole);
+    assert_eq!(
+        from_home.destination().ra,
+        Counts::HOME,
+        "no RA move at all"
+    );
+    assert_eq!(from_home.destination().dec.get(), HOME - 2_005_333);
+    assert!(from_home.travel_counts() < east.travel_counts());
+
+    // (4) Southern hemisphere, same sky. `h = s·HA − 90 = +90 − 90 = 0`: **the right-ascension
+    //     axis lands exactly on the home counter.** That is not a coincidence and it is the
+    //     cleanest golden case in the suite — it says in one number that a southern mount sitting
+    //     at its power-on counters is looking six hours *east* of the meridian, the mirror of the
+    //     northern +6h the operator measured. Under the old model this case read
+    //     home + 2,256,000 and the northern case (1) read home; the correction has swapped which
+    //     of the two is the round number, which is a good sign that it moved the map rather than
+    //     the fixtures.
+    //
+    //     The declination reference flips as it always did: 90 − (−1)(10) = 100°
     //     = 2,506,666.67 → 2,506,667 counts above home.
     let southern = geometry(SANTIAGO_LATITUDE)
         .goto(AxisCounts::HOME, radec(18.0, 10.0), lst_hours(12.0))
         .expect("in range");
-    assert_eq!(southern.destination().ra.get(), HOME + 2_256_000);
+    assert_eq!(southern.destination().ra, Counts::HOME);
     assert_eq!(southern.destination().dec.get(), HOME + 2_506_667);
 }
 
@@ -782,6 +961,92 @@ fn the_driver_and_the_simulator_agree() {
     the_tracking_rates_agree();
     the_slew_ladder_agrees();
     a_stopped_drive_climbs_and_a_tracking_one_holds();
+    the_same_axis_state_is_the_same_sky_in_both();
+}
+
+fn the_same_axis_state_is_the_same_sky_in_both() {
+    // **M3-T06 acceptance criterion 4**, and the honest version of it.
+    //
+    // The two implementations do not share a parameterisation, and that is deliberate rather
+    // than an oversight: the driver holds a 24-bit *counter* and converts it, while the
+    // simulator holds the hour angle and the declination themselves — `simulator::mount`'s
+    // `Axes.ra` **is** the hour angle in degrees, with no home and no counts. So "the same
+    // commanded axis angles" has to be spelled out as the correspondence between them, which is
+    // exactly `mech_to_sky`:
+    //
+    //     simulator hour-angle axis  =  s·(h + 90°)   (+180° past the pole)
+    //     simulator declination axis =  s·(90 − d)    (s·(90 + d) past the pole)
+    //
+    // Writing it here is the point of the test. It is the equation that would have to be
+    // satisfied if the simulator ever grew a mechanical-counter layer, and it is where a future
+    // edit that gave the simulator a home offset of its own — or the same one twice — fails.
+    //
+    // What this does *not* claim: that the simulator would have caught the home hour angle.
+    // It could not have, and no arrangement of it could. The simulator has no home pose to be
+    // wrong about; it anchors sidereal time at connect so the mount starts on its configured
+    // park coordinate, so its axis zero is a bookkeeping origin and not a counter on a mount.
+    // The defect lived in the one place the two implementations were never independent.
+    let hemisphere = Hemisphere::Northern;
+    let lst = lst_hours(3.25);
+
+    for branch in [Branch::Normal, Branch::ThroughThePole] {
+        for ra_axis_degrees in [-179.0, -90.0, -12.5, 0.0, 47.0, 120.0] {
+            for dec_axis_degrees in [-140.0_f64, -30.0, 30.0, 85.0] {
+                let dec_axis_degrees = match branch {
+                    Branch::Normal => dec_axis_degrees.abs(),
+                    Branch::ThroughThePole => -dec_axis_degrees.abs(),
+                };
+                let mech = MechPosition {
+                    ra_axis: axis_angle(ra_axis_degrees),
+                    dec_axis: axis_angle(dec_axis_degrees),
+                };
+
+                // The driver's answer: counters through the decomposition.
+                let driver = mech_to_sky(mech, lst, hemisphere);
+
+                // The simulator's answer: seed its two axes with the mechanical state expressed
+                // the way it holds it, hold them steady, and apply its own `RA = LST − HA`.
+                // `AxisPlan` is the simulator's, not a re-implementation — a stopped plan is how
+                // it represents an axis that is not being driven.
+                let hour_angle = wrap_signed(lst.degrees() - driver.coords.ra.hours() * 15.0);
+                let simulator_ra_axis = AxisPlan::steady(hour_angle, 0.0).position_at(0.0);
+                let simulator_dec_axis =
+                    AxisPlan::steady(driver.coords.dec.degrees(), 0.0).position_at(0.0);
+                let simulator_ra_hours =
+                    (lst.degrees() - simulator_ra_axis).rem_euclid(360.0) / 15.0;
+
+                let label = format!("{branch:?} h={ra_axis_degrees} d={dec_axis_degrees}");
+                let gap_ra = (simulator_ra_hours - driver.coords.ra.hours()).abs();
+                assert!(
+                    gap_ra.min(24.0 - gap_ra) * 15.0 * 3600.0 < 1e-6,
+                    "{label}: the simulator says RA {simulator_ra_hours} h, the driver {} h",
+                    driver.coords.ra.hours()
+                );
+                assert!(
+                    (simulator_dec_axis - driver.coords.dec.degrees()).abs() < 1e-9,
+                    "{label}: declination {simulator_dec_axis}° against {}°",
+                    driver.coords.dec.degrees()
+                );
+
+                // The correspondence itself, stated as the equation rather than inferred from
+                // the sky it produces: the simulator's hour-angle axis is the driver's
+                // `s·(h + 90°)`, plus the half-turn past the pole. This is the assertion that
+                // fails if the 90° is ever dropped from one side and not the other.
+                let expected = wrap_signed(
+                    hemisphere.sign() * (mech.ra_axis.degrees() + 90.0)
+                        + match branch {
+                            Branch::Normal => 0.0,
+                            Branch::ThroughThePole => 180.0,
+                        },
+                );
+                assert!(
+                    (wrap_signed(simulator_ra_axis - expected)).abs() < 1e-9,
+                    "{label}: the simulator's hour-angle axis is {simulator_ra_axis}°, and the \
+                     driver's mechanics make it {expected}°"
+                );
+            }
+        }
+    }
 }
 
 fn the_constants_agree() {

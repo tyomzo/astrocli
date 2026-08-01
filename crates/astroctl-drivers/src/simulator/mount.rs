@@ -887,12 +887,26 @@ impl MountDevice for SimulatorMount {
             .map(|after| now + after);
         state.link = Link::Up { drops_at };
         if state.axes.is_none() {
-            // A mount at power-on reads its counters at home (`0x800000` on both axes,
-            // measured). The simulator's equivalent is "wherever the park position is", with
-            // sidereal time anchored so that is true — see the module docs on why LST is
-            // relative here. It is *not* flagged parked: the Synta protocol has no park state,
-            // so demanding an unpark the hardware does not demand would be inventing a state
-            // machine that M3 then has to delete.
+            // The simulator starts "wherever the park position is", with sidereal time anchored
+            // so that is true — see the module docs on why LST is relative here. It is *not*
+            // flagged parked: the Synta protocol has no park state, so demanding an unpark the
+            // hardware does not demand would be inventing a state machine that M3 then has to
+            // delete.
+            //
+            // This used to be described as the simulator's equivalent of "a mount at power-on
+            // reads its counters at home (`0x800000` on both axes, measured)". **It is not, and
+            // M3-T06 is why the difference matters.** The real mount's home pose is a specific
+            // direction in the sky — declination ±90 at hour angle `s·6h`, the counterweight
+            // shaft hanging in the meridian plane — and the driver has to convert to it. This
+            // simulator has no counters and no home; `ra: 0.0` below is an hour angle of zero,
+            // which is a bookkeeping origin chosen so the anchor arithmetic is trivial, not a
+            // claim about where a parked HEQ5 points. Nothing observable depends on it, because
+            // only *differences* in the hour angle reach a caller.
+            //
+            // Left alone deliberately rather than given a 6 h offset to match: adding one would
+            // be a second, unmeasured copy of the driver's constant, and the invariant that
+            // actually needs holding — that the two implementations describe the same sky — is
+            // asserted in `tests/position_math.rs` instead.
             state.axes = Some(Axes {
                 epoch: now,
                 lst0_degrees: self.park.ra.hours() * 15.0,
