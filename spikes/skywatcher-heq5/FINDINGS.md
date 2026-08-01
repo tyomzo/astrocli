@@ -565,3 +565,31 @@ is only the *map* — the constant relating axis angle to hour angle. Consequenc
 The fix is a constant in `mech.rs`'s four-line model, but it propagates to `goto_solution`, the
 pier-side branch and the altitude limit, so it belongs in a task with fixtures reworked and this
 same swing test as its acceptance criterion — not a one-line patch at midnight.
+
+
+## A collision, and the rule it buys — 2026-08-02
+
+**The tube was driven into the tripod.** No sky-coordinate goto may be commanded while the
+mech↔sky map is known to be wrong. That sounds obvious written down; it was violated within an
+hour of the error being *documented*, by reasoning that felt sound at the time: "I am only zeroing
+the axes, so the offset cancels." It does not. The target was expressed in sky coordinates, it was
+computed from a position the broken map had reported, and every step of the derivation therefore
+inherited the fault. A 90° slew was then issued with no clearance check, into an arc that had been
+explicitly flagged as needing one.
+
+**The rules this buys, and they are not optional:**
+
+1. **While the map is untrusted, motion is axis-relative or it does not happen.** Park-to-home
+   counters (M3-T07) is the correct primitive precisely because it never consults the map. Until
+   M3-T06 lands and is re-verified against the physical swing test, no `goto` to a sky coordinate
+   should be issued on real hardware.
+2. **Every slew larger than a nudge gets a clearance check first**, stated as a question to the
+   operator and answered before the command is sent — not a warning issued alongside it.
+3. **The operator's eyes are the only position sensor.** An open-loop mount plus a model known to
+   be wrong means the software's belief about where the tube is has no evidentiary value at all.
+   The correct move when the pose is uncertain is to *ask*, or to have the operator set it by hand
+   with the clutches loose — never to slew toward a computed answer.
+
+The mount's own protections could not help: the altitude limit computes from the same broken map,
+and a tripod is not something any limit in this system models. Mechanical safety here rests
+entirely on the operator's judgement and the person issuing commands respecting it.

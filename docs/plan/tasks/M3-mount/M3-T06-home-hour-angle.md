@@ -1,7 +1,7 @@
 # M3-T06 — The home hour angle is +6h: correct the mech↔sky map
 
 **Milestone:** M3 (post-bring-up correction) · **Depends on:** M3-T03, M3-T04 · **Crates:** astroctl-drivers
-**Size:** M · **Status:** not started
+**Size:** M · **Status:** not started · **BLOCKING: no sky-coordinate goto on hardware until this lands and is re-verified**
 **Spec:** SDD §5.2.3; `spikes/skywatcher-heq5/FINDINGS.md` ("The home hour angle is +6h")
 
 ## What is wrong
@@ -48,3 +48,15 @@ the acceptance criterion below being a *physical* one.
       horizon is refused, one genuinely above it is not
 - [ ] Simulator and driver agree: the same commanded axis angles produce the same sky coordinates
       in both, asserted by a shared fixture
+
+
+## Why this is blocking
+
+On 2026-08-02, with the error already documented, a sky-coordinate goto was computed *through the
+broken map* to "zero the axes" and **drove the tube into the tripod**. The reasoning that the
+offset cancels for an axis-zeroing move is wrong: the target was a sky coordinate derived from a
+position the broken map reported, so the fault propagated into every term.
+
+Until this task lands and the physical swing test reproduces, motion on real hardware is
+axis-relative only — manual slews at rates the rotor follows, and M3-T07's park-to-home-counters,
+which consults no map at all.
