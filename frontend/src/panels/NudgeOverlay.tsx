@@ -33,15 +33,26 @@ import { FailureNote } from '../ui/FailureNote';
 
 const DIRECTIONS: readonly {
   axis: SlewAxis;
+/*
+ * The buttons name the **axis and its sign**, not compass directions.
+ *
+ * N/S/E/W are sky directions, and turning one into motor motion needs the pier side and the
+ * hemisphere — a translation the driver performs correctly and the operator cannot see. Near the
+ * pole, where this mount parks, the same compass word legitimately reverses which way declination
+ * moves: press "N" past dec 90° and the tube goes over the top, so declination starts falling
+ * again. The operator watched that happen and reasonably read it as a random direction bug. The
+ * axis-and-sign labels cannot lie that way — DEC+ makes the DEC readout climb, at the pole or
+ * anywhere else — and the sign matches the number on screen, which is the whole point.
+ */
   direction: SlewDirection;
   glyph: string;
   label: string;
   cell: string;
 }[] = [
-  { axis: 'dec', direction: 'positive', glyph: 'N', label: 'north', cell: 'col-start-2 row-start-1' },
-  { axis: 'ra', direction: 'negative', glyph: 'W', label: 'west', cell: 'col-start-1 row-start-2' },
-  { axis: 'ra', direction: 'positive', glyph: 'E', label: 'east', cell: 'col-start-3 row-start-2' },
-  { axis: 'dec', direction: 'negative', glyph: 'S', label: 'south', cell: 'col-start-2 row-start-3' },
+  { axis: 'dec', direction: 'positive', glyph: 'DEC+', label: 'declination up', cell: 'col-start-2 row-start-1' },
+  { axis: 'ra', direction: 'negative', glyph: 'RA−', label: 'right ascension down', cell: 'col-start-1 row-start-2' },
+  { axis: 'ra', direction: 'positive', glyph: 'RA+', label: 'right ascension up', cell: 'col-start-3 row-start-2' },
+  { axis: 'dec', direction: 'negative', glyph: 'DEC−', label: 'declination down', cell: 'col-start-2 row-start-3' },
 ];
 
 export function NudgeOverlay({ onDismiss }: { onDismiss: () => void }): ReactNode {
@@ -174,7 +185,7 @@ function NudgeButton({
       onPointerCancel={release}
       onLostPointerCapture={release}
       onContextMenu={(event) => event.preventDefault()}
-      className={`flex size-control touch-none items-center justify-center rounded-lg border-2 text-xl font-bold select-none ${className} ${
+      className={`flex size-control touch-none items-center justify-center rounded-lg border-2 font-mono text-sm font-bold tracking-tight select-none ${className} ${
         holding
           ? 'border-accent bg-accent text-on-accent'
           : 'border-edge-strong bg-overlay/90 text-fg'
