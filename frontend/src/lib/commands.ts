@@ -72,6 +72,24 @@ export function mountDisconnect(token: string | null): Promise<RequestResult<Mou
 }
 
 /**
+ * Send the mount home and hold it there — MNT-07's park.
+ *
+ * The operator's escape hatch, and the reason it is a first-class button: a mount can be driven
+ * somewhere unreasonable one nudge at a time (below the horizon, say, which the altitude limit
+ * then refuses to *leave* in the direction that got it there), and the recovery must not require
+ * knowing which way is out. Park is a goto to a configured position, so it is bounded, ramped and
+ * stoppable like any other — not an emergency, which is what the e-stop is for.
+ */
+export function mountPark(token: string | null): Promise<RequestResult<unknown | null>> {
+  return postJson('/api/mount/park', token);
+}
+
+/** Release the park interlock. Moves nothing; the mount simply becomes drivable again. */
+export function mountUnpark(token: string | null): Promise<RequestResult<unknown | null>> {
+  return postJson('/api/mount/unpark', token);
+}
+
+/**
  * Slew to a target. Answers `202` and a topic to watch; the mount moves on the event stream.
  *
  * Units are in the wire field names (`ra_hours`, `dec_degrees`) because SDD §2 and the core

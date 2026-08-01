@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 
 import type { RequestFailure } from '../lib/api';
-import { mountConnect, mountDisconnect } from '../lib/commands';
+import { mountConnect, mountDisconnect, mountPark, mountUnpark } from '../lib/commands';
 import { selectMountStatus, useTelemetryStore } from '../store/telemetry';
 import { useTokenStore } from '../store/token';
 import { Button } from '../ui/Button';
@@ -25,21 +25,36 @@ export function MountConnect(): ReactNode {
 
   const connected = status.state === 'observed' && status.value.state !== 'disconnected';
 
+  const parked = status.state === 'observed' && status.value.parked;
+
+  const run = (command: (token: string | null) => Promise<{ ok: boolean; failure?: RequestFailure }>) => {
+    setFailure(null);
+    void command(token).then((result) => {
+      if (!result.ok && result.failure) setFailure(result.failure);
+    });
+  };
+
   return (
     <div className="flex flex-col items-end gap-1">
-      <Button
-        onClick={() => {
-          setFailure(null);
-          const command = connected ? mountDisconnect : mountConnect;
-          void command(token).then((result) => {
+      <div className="flex items-center gap-2">
+        {connected && (
+          // Home, beside Connect rather than buried with the motion controls: it is what an
+          // operator reaches for when the mount is somewhere they did not intend, and that is
+          // precisely the moment for the shortest possible path to a known position.
+          <Button onClick={() => run(parked ? mountUnpark : mountPark)}>
+            {parked ? 'Unpark' : 'Home'}
+          </Button>
+        )}
+        <Button
+          onClick={() => {
             // Only the failure is kept. Success changes nothing here on purpose: the UI moves
             // when `mount.status` arrives, the only report that the mount itself agrees.
-            if (!result.ok) setFailure(result.failure);
-          });
-        }}
-      >
-        {connected ? 'Disconnect' : 'Connect'}
-      </Button>
+            run(connected ? mountDisconnect : mountConnect);
+          }}
+        >
+          {connected ? 'Disconnect' : 'Connect'}
+        </Button>
+      </div>
       {failure !== null && (
         <FailureNote failure={failure} action={connected ? 'disconnect' : 'connect'} />
       )}
