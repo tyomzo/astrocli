@@ -48,6 +48,10 @@ const BULB_KEY: &str = "eosremoterelease";
 /// it; too short and a RAW+JPEG session silently loses its JPEGs.
 const EVENT_POLL: Duration = Duration::from_millis(600);
 
+/// How long the body gets between lowering its viewfinder and being asked to fire — the beat an
+/// EOS needs to leave live view before `capture_image` stops answering "I/O in progress".
+const VIEWFINDER_SETTLE: Duration = Duration::from_millis(300);
+
 /// How long to let the binding finish previous traffic before opening the shutter.
 ///
 /// One poll window's worth. It is not a guess at how long the camera needs — it is one turn of
@@ -86,6 +90,7 @@ impl CamOpsFactory for LibGphoto2Factory {
         Ok(Box::new(LibGphoto2Ops {
             context,
             camera: None,
+            previewing: false,
         }))
     }
 }
@@ -98,12 +103,44 @@ impl CamOpsFactory for LibGphoto2Factory {
 pub(crate) struct LibGphoto2Ops {
     context: Context,
     camera: Option<Camera>,
+    /// Whether a preview has run since the last stop — i.e. whether the *body* is sitting in
+    /// live view with its sensor up. The shutter needs to know: see [`Self::leave_live_view`].
+    previewing: bool,
 }
 
 impl LibGphoto2Ops {
     /// The open camera, or `NotConnected`.
     fn camera(&self) -> Result<&Camera, DeviceError> {
         self.camera.as_ref().ok_or(DeviceError::NotConnected)
+    }
+
+    /// Drop the body out of live view so the shutter can fire.
+    ///
+    /// An R10 with its viewfinder raised answers `capture_image` with "I/O in progress" —
+    /// measured twice on 2026-08-02, an operator's 1/6 s exposure refused while live view ran.
+    /// The pacing loop is already paused by the capture claim; this tells the *body*, with the
+    /// same `viewfinder` toggle `stop_preview` uses, and gives it a beat to lower the sensor.
+    /// Nothing restores live view afterwards on purpose: `capture_preview` *is* the start call
+    /// on these bodies, so the loop's next tick re-raises it by itself — which is exactly the
+    /// stop-shoot-resume the operator asked for, with the resume owned by the machinery that was
+    /// already producing frames.
+    fn leave_live_view(&mut self) {
+        if !self.previewing {
+            return;
+        }
+        self.previewing = false;
+        let Ok(camera) = self.camera() else { return };
+        let Ok(widget) = camera.config_key::<ToggleWidget>("viewfinder").wait() else {
+            return;
+        };
+        widget.set_toggled(false);
+        if let Err(error) = camera.set_config(&widget).wait() {
+            tracing::warn!(%error, "the camera would not drop live view before the shutter");
+            return;
+        }
+        // The body needs a moment between lowering the viewfinder and accepting the shutter;
+        // without it the very refusal this function exists to prevent still fires.
+        std::thread::sleep(VIEWFINDER_SETTLE);
     }
 
     /// Reads a radio widget's current choice and its full choice list.
@@ -510,6 +547,7 @@ impl CamOps for LibGphoto2Ops {
     }
 
     fn capture(&mut self) -> Result<RawCapture, DeviceError> {
+        self.leave_live_view();
         let camera = self.camera()?;
 
         // Measured at 2.08 s on the R10 — and with `capturetarget=Internal RAM` that figure
@@ -550,6 +588,7 @@ impl CamOps for LibGphoto2Ops {
         since: u64,
         file_wait: Duration,
     ) -> Result<RawCapture, DeviceError> {
+        self.leave_live_view();
         // SDD §5.3.2's procedure, as M2-T01 proved it on the body: press, hold, release.
         let Some((widget, press, release)) = self.bulb_tokens() else {
             // No mechanism at all — not a failure of this camera, a body that cannot do it.
@@ -697,6 +736,9 @@ impl CamOps for LibGphoto2Ops {
         // (M2-T01 measured it, then 58.5 fps sustained afterwards). The pacing loop above is what
         // decides how often this happens; here it is one frame.
         let file = camera.capture_preview().wait().map_err(transport)?;
+        // The body is now holding its sensor up, which is a state the shutter has to undo —
+        // see `leave_live_view`.
+        self.previewing = true;
 
         // Handed to the caller exactly as the body produced it. No decode and no re-encode: the
         // bytes go on the wire to the PWA unmodified (SDD §5.7 source 1), and re-encoding 133 KB
@@ -707,6 +749,7 @@ impl CamOps for LibGphoto2Ops {
     }
 
     fn stop_preview(&mut self) -> Result<(), DeviceError> {
+        self.previewing = false;
         let Ok(camera) = self.camera() else {
             // No camera is the strongest possible guarantee that its sensor is not being held
             // awake.
