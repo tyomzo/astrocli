@@ -15,6 +15,7 @@ import { BUILD, useUpdateWaiting } from '../lib/pwa/updateReady';
 import { ConnectPanel } from './ConnectPanel';
 import { DeviceCard } from './DeviceCard';
 import { NodeCard } from './NodeCard';
+import { SiteCard } from './SiteCard';
 
 /**
  * The detour behind the header status strip: credential, node health, device capabilities, and
@@ -72,8 +73,10 @@ export function SystemScreen(): ReactNode {
 
       <PanelGrid>
         <DeviceCard />
-        <AlertHistory />
+        <SiteCard />
       </PanelGrid>
+
+      <AlertHistory />
 
       <BuildLine />
     </div>
