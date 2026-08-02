@@ -1,7 +1,7 @@
 # M3-T06 — The home hour angle is +6h: correct the mech↔sky map
 
 **Milestone:** M3 (post-bring-up correction) · **Depends on:** M3-T03, M3-T04 · **Crates:** astroctl-drivers
-**Size:** M · **Status:** code done (2026-08-02) — **still BLOCKING for hardware gotos until the physical swing test is re-run**
+**Size:** M · **Status:** **done and verified on hardware (2026-08-02)** — the block is lifted
 **Spec:** SDD §5.2.3; `spikes/skywatcher-heq5/FINDINGS.md` ("The home hour angle is +6h")
 
 ## What is wrong
@@ -95,3 +95,36 @@ position the broken map reported, so the fault propagated into every term.
 Until this task lands and the physical swing test reproduces, motion on real hardware is
 axis-relative only — manual slews at rates the rotor follows, and M3-T07's park-to-home-counters,
 which consults no map at all.
+
+
+## Verified on the mount, 2026-08-02
+
+An eight-step protocol proposed by the operator — each axis swung 30° both ways, returning home
+between — run one command at a time with the operator confirming by eye before the next. Every step
+matched the corrected model:
+
+| step | commanded | model predicted | observed |
+|------|-----------|-----------------|----------|
+| 1 | DEC axis 30° (west branch) | north-west, 49° | confirmed |
+| 2 | back to the pole | north, 60° | confirmed |
+| 3 | DEC axis 30° (through-the-pole branch) | north-east, 49° | confirmed, shaft never moved |
+| 4 | back to the pole | north, 60° | confirmed |
+| 5 | out to the reference pose | north-west, 49° | confirmed |
+| 6 | RA axis +30° (HA +2h) | north-north-west, 39°, shaft 30° off vertical | confirmed |
+| 7 | back to the reference | north-west, 49°, shaft vertical | confirmed |
+| 8 | RA axis −30° (HA −2h) | west-north-west, 61°, shaft 30° the other way | confirmed |
+
+The decisive one is step 1: the old map sent that same command *south*, and the tube went *west*.
+Step 3 additionally verifies the pier-side branch — the same declination reached on the opposite
+side of the pole by the declination axis alone, with the counterweight shaft never moving, so the
+driver chose the axis motion rather than a twelve-hour coordinate detour.
+
+**A 30° protocol was chosen over the 90° swings that found the bug, deliberately.** Thirty degrees
+discriminates the six-hour error exactly as well — the predicted azimuths differ by far more than
+eyesight's resolution — while sweeping a third of the arc, and the collision that preceded this fix
+happened during a 90° move. Smaller motions that answer the same question are the better
+instrument.
+
+Still unobserved: the southern-hemisphere sign (derived, no access to a southern mount), and the
+pier-side *label* — which branch is physically east and which west — which remains `derived` and
+needs a known star, not a bare mount.
