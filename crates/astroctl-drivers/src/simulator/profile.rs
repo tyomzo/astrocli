@@ -148,6 +148,24 @@ pub struct SimulatorProfile {
     /// The reason unguided subframes trail. Off by default; the guiding work (Phase 3) is what
     /// turns it on.
     pub polar_drift_arcsec_per_min: f64,
+
+    /// The pose this rig powers on at **and** parks to (M3-T07).
+    ///
+    /// One field for both because on the real mount they are one fact: power-on assigns
+    /// `0x800000` to both axis counters regardless of where the metal is, and park's whole job is
+    /// to return to the pose that assumption describes. A simulator with two separate settings
+    /// could be configured into the mismatch between belief and reality that M3-T07 exists to
+    /// remove, and would then be a worse model than the mount.
+    ///
+    /// It is here rather than in `mount.park_position` — which was deleted — because it is a
+    /// property of the simulated rig, like the cruise rate above, and not something an operator
+    /// chooses. Defaults to the north celestial pole, which is where the home pose looks.
+    ///
+    /// **The simulator cannot reproduce the defect M3-T07 fixed**, and that is worth knowing
+    /// rather than working around: it holds an `RaDec` and moves it, so there are no counters, no
+    /// `0x800000`, and nothing that can be "at the pole while an axis is 215° from home". A
+    /// simulator test could never have caught this. The mount's own counters had to.
+    pub home: RaDec,
 }
 
 impl Default for SimulatorProfile {
@@ -162,8 +180,18 @@ impl Default for SimulatorProfile {
             periodic_error_arcsec: 0.0,
             worm_period_degrees: 360.0 / 135.0,
             polar_drift_arcsec_per_min: 0.0,
+            home: north_celestial_pole(),
         }
     }
+}
+
+/// `0h +90°` — where a northern mount's home pose points.
+///
+/// Not a `const`, because [`RaDec`] is built through a validating constructor. The fallback is
+/// unreachable (`0h +90°` is a coordinate) and is written as one rather than an `expect` so that
+/// no panic exists on a path a driver constructor runs.
+fn north_celestial_pole() -> RaDec {
+    RaDec::from_parts(0.0, 90.0).unwrap_or_else(|_| unreachable!("0h +90° is a coordinate"))
 }
 
 impl SimulatorProfile {

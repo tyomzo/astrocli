@@ -39,7 +39,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use astroctl_core::config::{MountConfig, MountDriver, MountLimits, ParkPosition, SerialConfig};
+use astroctl_core::config::{MountConfig, MountDriver, MountLimits, SerialConfig};
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
     Axis, DeviceInfo, DeviceKind, Direction, GuideRate, MountCapabilities, MountState, MountStatus,
@@ -445,16 +445,15 @@ impl SimulatorMount {
     /// SDD §9 requires to be constructor parameters.
     ///
     /// # Errors
-    /// [`DriverInitError`] if `mount.park_position` is not a coordinate.
+    /// [`DriverInitError`] — none is produced today; the signature is [`MountFactory::create`]'s.
     pub fn new(
         config: &MountConfig,
         profile: SimulatorProfile,
         faults: &FaultPlan,
     ) -> Result<Self, DriverInitError> {
-        let park = RaDec::from_parts(
-            config.park_position.ra_hours,
-            config.park_position.dec_degrees,
-        )?;
+        // The rig's pose, not the operator's choice — `mount.park_position` was removed in M3-T07
+        // because no sky coordinate can state where park goes. See `SimulatorProfile::home`.
+        let park = profile.home;
         let request_timeout = Duration::from_millis(config.serial.request_timeout_ms);
         Ok(Self {
             profile,
@@ -1319,10 +1318,6 @@ fn default_config() -> MountConfig {
         driver: MountDriver::Simulator,
         port: "auto".to_owned(),
         baud: 9600,
-        park_position: ParkPosition {
-            ra_hours: 0.0,
-            dec_degrees: 90.0,
-        },
         settle_time_seconds: 3,
         serial: SerialConfig {
             request_timeout_ms: 500,
@@ -1355,29 +1350,33 @@ mod tests {
     /// bug. A test asserting "the goto took between 10 and 20 seconds" against a real clock is a
     /// test that fails on a loaded CI box; here it cannot.
     ///
-    /// Park is 12h/+45° rather than the pole so that both axes have room to move either way, and
-    /// so no test accidentally asserts against a declination clamp.
+    /// Home is 12h/+45° rather than the pole so that both axes have room to move either way, and
+    /// so no test accidentally asserts against a declination clamp. It is the pose the simulated
+    /// mount powers on at and the pose it parks to — one fact, as on the real mount (M3-T07).
     fn config() -> MountConfig {
         MountConfig {
-            park_position: ParkPosition {
-                ra_hours: 12.0,
-                dec_degrees: 45.0,
-            },
             settle_time_seconds: 3,
             ..default_config()
         }
     }
 
+    fn profile() -> SimulatorProfile {
+        SimulatorProfile {
+            home: RaDec::from_parts(12.0, 45.0).expect("a valid coordinate"),
+            ..SimulatorProfile::default()
+        }
+    }
+
     fn mount() -> Arc<SimulatorMount> {
         Arc::new(
-            SimulatorMount::new(&config(), SimulatorProfile::default(), &FaultPlan::none())
+            SimulatorMount::new(&config(), profile(), &FaultPlan::none())
                 .expect("the default configuration is valid"),
         )
     }
 
     fn mount_with(faults: FaultPlan) -> Arc<SimulatorMount> {
         Arc::new(
-            SimulatorMount::new(&config(), SimulatorProfile::default(), &faults)
+            SimulatorMount::new(&config(), profile(), &faults)
                 .expect("the default configuration is valid"),
         )
     }
@@ -2419,7 +2418,7 @@ mod tests {
         let profile = SimulatorProfile {
             periodic_error_arcsec: 15.0,
             polar_drift_arcsec_per_min: 2.0,
-            ..SimulatorProfile::default()
+            ..profile()
         };
         let mount = SimulatorMount::new(&config(), profile, &FaultPlan::none()).expect("builds");
         mount.connect().await.expect("connects");

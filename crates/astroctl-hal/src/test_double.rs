@@ -17,8 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use astroctl_core::config::{
-    CameraConfig, GuideCameraConfig, MountConfig, MountDriver, MountLimits, ParkPosition,
-    SerialConfig,
+    CameraConfig, GuideCameraConfig, MountConfig, MountDriver, MountLimits, SerialConfig,
 };
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
@@ -47,10 +46,6 @@ pub fn mount_config(driver: MountDriver) -> MountConfig {
         driver,
         port: "/dev/null".to_owned(),
         baud: 9600,
-        park_position: ParkPosition {
-            ra_hours: 0.0,
-            dec_degrees: 90.0,
-        },
         settle_time_seconds: 2,
         serial: SerialConfig {
             request_timeout_ms: 500,

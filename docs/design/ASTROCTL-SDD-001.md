@@ -885,8 +885,20 @@ slewing forever. The driver keeps its own record of what it commanded and uses `
 thing that record cannot know: a manual slew has no completion signal, so an axis stopped by a hard
 limit, a stall or somebody's hand controller is only visible in the status word.
 
-**Two smaller notes.** *Park has no protocol state*: `park` is a goto to `mount.park_position`
-followed by `K` on both axes, and `unpark` clears a host-side flag and **sends nothing** — the
+**6. Park targets the home *counters*, not a sky coordinate (M3-T07).** `park` computes a bounded
+per-axis move from the counters `j` reports to `0x800000` and runs it through the same
+`G`/`I`/`H`/`M`/readback/`J` sequence a goto uses — consulting no coordinate map, no sidereal
+clock and no site. The reason is that power-on assigns `0x800000` to both counters *regardless of
+where the metal is*, so the contract of parking is "return to the pose power-on will assume", and
+no sky coordinate can state that: at declination 90 every right ascension names the pole, so a
+target there is satisfied by the declination axis alone. Observed on 2026-08-02 — a park that
+reported success with the right-ascension axis 215.6° from home and nothing commanded on it. The
+move is the **raw** counter delta and not the shortest way round: from 215.6° past home the short
+way is a further 144° in the direction that caused the problem, arriving at a congruent angle with
+the cable one turn worse. `mount.park_position` was removed from §8.1 in the same change.
+
+**Two smaller notes.** *Park has no protocol state*: `park` is the bounded goto above followed by
+`K` on both axes, and `unpark` clears a host-side flag and **sends nothing** — the
 obvious alternative, re-issuing `F`, would write an action opcode whose effect on the axis counter
 is unmeasured to a mount whose counter is the night's pointing model. *`sync` is unimplemented*:
 `E` is `derived` and unverified in ENCODINGS.md, and a half-applied sync is a pointing model wrong

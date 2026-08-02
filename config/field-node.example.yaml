@@ -9,9 +9,8 @@ mount:
   driver: skywatcher        # "skywatcher", "indi", "ascom_alpaca", "simulator"
   port: auto                # "auto" for detection, or "/dev/ttyUSB0"
   baud: 9600
-  park_position:
-    ra_hours: 0.0
-    dec_degrees: 90.0
+  # No park_position: park drives both axis counters to the mechanical home (0x800000), the pose
+  # power-on assumes. It is a fact about the mount, not a setting (M3-T07).
   settle_time_seconds: 3    # pause after slew before capture
   serial:
     request_timeout_ms: 500   # per request/response exchange
