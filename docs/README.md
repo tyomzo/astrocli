@@ -83,6 +83,14 @@ to or vendors (libgphoto2, cfitsio, libudev, libsep, and the ERFA source vendore
 carry their own terms — libgphoto2 is LGPL and ERFA is BSD-3-Clause. This matters only if you
 distribute binaries, not for personal use.
 
+## Operations
+
+- [ops/running-locally.md](ops/running-locally.md) — running both nodes on one machine: the
+  container harness for the two-node topology, bare processes for real hardware, and the feature
+  flags that fail late if you forget them.
+- [ops/tls-setup.md](ops/tls-setup.md) — certificates, and why a phone needs them.
+- [ops/camera-usb-claim.md](ops/camera-usb-claim.md) — gvfs taking the camera.
+
 ## Handover notes
 
 - [HANDOVER-2026-08-02.md](HANDOVER-2026-08-02.md) — state at the end of the M3 hardware
