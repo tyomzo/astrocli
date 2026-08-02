@@ -300,6 +300,29 @@ impl AxisScale {
         AxisAngle(wrap_signed(offset as f64 * self.degrees_per_count()))
     }
 
+    /// Signed degrees of axis rotation the counter has accumulated away from home — **unfolded**.
+    ///
+    /// # Not [`angle_at`](Self::angle_at), and the difference is the whole of M3-T07's second half
+    ///
+    /// `angle_at` reduces modulo the counts per revolution, because its subject is *where the
+    /// tube points* and 215.6° past home points exactly where −144.4° does. This function's
+    /// subject is *how far the axis has turned*, which is what a power lead and a USB cable
+    /// experience, and those two numbers are not interchangeable: an operator on a D-pad reached
+    /// 215.6° on 2026-08-02 and a folded reading would have called it 144° in the other direction
+    /// while the cable kept winding the way it was already going.
+    ///
+    /// Positive is an increasing counter. The result is bounded by the *counter*, not the
+    /// mechanism: a 24-bit register spans `home ± 0x800000`, which at the operator's gearing is
+    /// ±334.7°, and past that the register wraps and this reading becomes wrong rather than large.
+    /// That is a real ceiling on what can be measured at all — `mount.limits`'s own bound of 180°
+    /// sits comfortably inside it, and no manual slew that respects the limit can approach it.
+    /// What the mount does at the counter boundary is unmeasured (see
+    /// [`Self::reachable_delta`]); nothing in the driver drives an axis there deliberately.
+    #[must_use]
+    pub fn travel_from_home(self, counts: Counts) -> f64 {
+        (i64::from(counts.get()) - HOME_COUNTS) as f64 * self.degrees_per_count()
+    }
+
     /// The counter nearest home that sits at `angle`.
     ///
     /// Always within half a revolution of `0x800000`, so for any counts-per-revolution the

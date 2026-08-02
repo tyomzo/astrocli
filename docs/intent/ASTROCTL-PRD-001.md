@@ -1126,6 +1126,9 @@ mount:
   limits:
     min_altitude_degrees: 15    # reject goto/slew targets below this altitude (MNT-15)
     meridian_limit_minutes: 15  # stop tracking this long past the meridian (MNT-16)
+    max_travel_from_home_degrees: 180  # refuse a manual slew winding an axis further than
+                                       #   this from the home pose (M3-T07). A property of
+                                       #   your cabling: lower it if your leads are short.
     slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
     slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
   # indi_device: "EQMod Mount"    # if driver=indi

@@ -768,6 +768,21 @@ pub struct MountLimits {
     pub min_altitude_degrees: f64,
     /// Stop tracking this long past the meridian (MNT-16).
     pub meridian_limit_minutes: f64,
+    /// Refuse a manual slew that would drive an axis further than this from the mechanical home
+    /// pose, in degrees of axis rotation (M3-T07).
+    ///
+    /// **A property of the rig's cabling, which is why it is configuration and not a constant.**
+    /// Synta motion has no soft limits and nothing else in the system tracked distance from home,
+    /// so before this existed an operator on a D-pad could wind an axis indefinitely: 215.6° was
+    /// reached on 2026-08-02, and with a telescope, a power lead and a USB cable attached that is
+    /// how a cable is torn out or a tube is driven into the pier.
+    ///
+    /// It bounds *manual* slew only. A goto is bounded by its own target and checked against the
+    /// altitude limit; the D-pad has no target at all, which is exactly why it needed a bound.
+    ///
+    /// One number for both axes rather than two: what it stands for is the shortest lead on the
+    /// mount, and no per-axis figure has been measured. If one ever is, this is where it splits.
+    pub max_travel_from_home_degrees: f64,
     /// Default authorization window for a manual slew (SDD §5.8.1).
     pub slew_ttl_default_ms: u64,
     /// Server-side clamp on a client-requested TTL (SDD §5.8.1).
@@ -783,6 +798,20 @@ impl MountLimits {
             "meridian_limit_minutes",
             self.meridian_limit_minutes,
             0.0,
+            180.0,
+        );
+        // The ceiling is 180° and it is a fact about the mechanism rather than a policy: an axis
+        // counter spans one revolution, so every mechanical pose is reachable within half a turn
+        // of home. Travel past 180° is by construction the long way round to somewhere the short
+        // way already reaches — wind, never necessity — so above 180 the setting could not refuse
+        // anything an operator needs, which makes it not a limit.
+        //
+        // The floor is a degree rather than zero: zero would refuse every manual slew from the
+        // home pose itself and leave the operator no way to move the mount at all.
+        c.range_f64(
+            "max_travel_from_home_degrees",
+            self.max_travel_from_home_degrees,
+            1.0,
             180.0,
         );
         // A TTL under 100 ms cannot survive one VPN round trip, so the D-pad would stutter; a

@@ -505,6 +505,7 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | `COMMAND_STALE` | 422 | no | staleness rejection (§5.8.1) |
 | `CHECKSUM_MISMATCH` | 422 | no | ingest (§5.11.2) |
 | `LIMIT_ALTITUDE`, `LIMIT_MERIDIAN` | 403 | no | safety monitor (§5.4, MNT-15/16) |
+| `LIMIT_TRAVEL` | 403 | no | safety monitor (§5.4, M3-T07) — a manual slew would wind an axis past `mount.limits.max_travel_from_home_degrees` |
 | `SLEW_TTL_EXPIRED` | 403 | no | dead-man's switch (§5.8.1) — also an `alert` code |
 | `AUTH` | 401 | no | bearer middleware (§4.5) |
 | `FRAME_ID_CONFLICT` | 409 | no | ingest (§5.11.2) |

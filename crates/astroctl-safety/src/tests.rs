@@ -32,6 +32,7 @@ const OSLO: Site = Site {
 const EXAMPLE_LIMITS: MountLimits = MountLimits {
     min_altitude_degrees: 15.0,
     meridian_limit_minutes: 15.0,
+    max_travel_from_home_degrees: 180.0,
     slew_ttl_default_ms: 500,
     slew_ttl_max_ms: 2000,
 };
@@ -460,6 +461,170 @@ async fn a_slew_that_drifts_below_the_limit_is_stopped_by_the_background_check()
     let alert = next_alert(&mut events).await.expect("an alert");
     assert_eq!(alert.0, ErrorCode::LimitAltitude.as_str());
     assert!(!device.is_slewing(Axis::Dec), "the axis should be stopped");
+}
+
+// -------------------------------------------------------------------------------------------
+// M3-T07 — travel from the home pose
+// -------------------------------------------------------------------------------------------
+
+/// A mount 200° from home on the right-ascension axis, unwound by slewing east.
+///
+/// Past the example config's 180° ceiling, and near the 215.6° an operator actually reached on
+/// 2026-08-02 by holding a D-pad with nothing in the system counting.
+fn wound_past_the_limit() -> Arc<RecordingMount> {
+    RecordingMount::at(above_the_limit())
+        .with_travel((200.0, Direction::East), (0.0, Direction::North))
+        .shared()
+}
+
+#[tokio::test]
+async fn a_manual_slew_that_would_wind_an_axis_further_is_refused_before_the_mount_is_commanded() {
+    // The gap the second observation of M3-T07 names: Synta motion has no soft limits and nothing
+    // tracked distance from home, so a thumb on a D-pad could wind an axis indefinitely. With a
+    // telescope, a power lead and a USB cable attached that is a torn cable or a tube in the pier.
+    let device = wound_past_the_limit();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    let error = safe
+        .slew_for(
+            Axis::Ra,
+            // West winds it further — east is what `with_travel` said unwinds.
+            Direction::West,
+            SlewSpeed::Medium,
+            Duration::from_millis(500),
+        )
+        .await
+        .expect_err("200 degrees from home is past the 180 degree limit");
+
+    assert!(
+        matches!(
+            error,
+            DeviceError::LimitViolation {
+                limit: Limit::Travel,
+                ..
+            }
+        ),
+        "got {error:?}"
+    );
+    assert_eq!(
+        ErrorCode::from_device_error(astroctl_core::types::DeviceKind::Mount, &error),
+        ErrorCode::LimitTravel,
+    );
+    assert_eq!(ErrorCode::LimitTravel.http_status(), 403);
+    assert!(
+        !device.was_commanded(),
+        "the mount was commanded despite the refusal: {:?}",
+        device.log()
+    );
+
+    // The message names the limit and the current travel, and says which way is out. An operator
+    // reading this is in the dark with a D-pad that has stopped answering one of its buttons.
+    let message = error.to_string();
+    assert!(message.contains("200.0"), "no current travel in: {message}");
+    assert!(message.contains("180.0"), "no limit in: {message}");
+    assert!(
+        message.contains("max_travel_from_home_degrees"),
+        "no config key in: {message}"
+    );
+    assert!(message.contains("east"), "no way out in: {message}");
+}
+
+#[tokio::test]
+async fn the_direction_that_unwinds_is_always_allowed_however_far_the_axis_has_gone() {
+    // The escape hatch, and the reason the check is directional rather than positional. A bound
+    // that refused both directions once exceeded would trap the mount at exactly the moment
+    // somebody needs to drive it back — which is how 2026-08-02 ended: power off, loosen the
+    // clutch, unwind by hand.
+    let device = wound_past_the_limit();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    safe.slew_for(
+        Axis::Ra,
+        Direction::East,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("the homeward direction is never refused");
+    assert!(device.is_slewing(Axis::Ra), "the unwind reached the mount");
+}
+
+#[tokio::test]
+async fn the_other_axis_is_untouched_by_one_axis_being_wound() {
+    // The limit is per axis because the travel is. A wound right-ascension axis must not stop the
+    // operator framing in declination.
+    let device = wound_past_the_limit();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    safe.slew_for(
+        Axis::Dec,
+        Direction::South,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("the declination axis is at home");
+    assert!(device.is_slewing(Axis::Dec));
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_axis_winding_past_the_limit_under_a_held_dpad_is_stopped_by_the_watch() {
+    // **The assertion the requirement actually needs.** Both slew paths short-circuit an identical
+    // renewal — the app renews at 2 Hz for as long as a thumb is down, and re-checking on every
+    // renewal would put four extra exchanges a second on a 9600-baud line — so the pre-flight
+    // check above runs *once*, at the press. A hold that starts inside the limit and winds past it
+    // is invisible to it. That is precisely the 215.6 degree case: the operator never let go.
+    //
+    // So the watch has to carry the check, and the lease here is long enough that the dead-man's
+    // switch is not what stops the axis.
+    let device = RecordingMount::at(above_the_limit())
+        .with_travel((170.0, Direction::East), (0.0, Direction::North))
+        .shared();
+    let bus = EventBus::new();
+    let mut events = bus.subscribe();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &bus);
+
+    safe.slew_for(
+        Axis::Ra,
+        Direction::West,
+        SlewSpeed::Medium,
+        Duration::from_millis(2_000),
+    )
+    .await
+    .expect("170 degrees is inside the limit at the moment of the press");
+    assert!(device.is_slewing(Axis::Ra), "the slew started");
+
+    // The axis keeps winding while nobody re-checks it — which is what a held D-pad is.
+    device.set_travel(181.0, 0.0);
+
+    let alert = next_alert(&mut events).await.expect("an alert");
+    assert_eq!(alert.0, ErrorCode::LimitTravel.as_str());
+    assert!(
+        alert.1.contains("181.0") && alert.1.contains("unwind"),
+        "the alert must say how far and which way out: {}",
+        alert.1
+    );
+    assert!(!device.is_slewing(Axis::Ra), "the axis should be stopped");
+}
+
+#[tokio::test]
+async fn a_mount_with_no_home_reference_is_not_gated_by_a_limit_it_cannot_measure() {
+    // `RecordingMount` reports `None` unless told otherwise, which is what an INDI or Alpaca
+    // device — or the simulator — reports: no counters, no `0x800000`, no travel. The limit then
+    // has nothing to act on, and inventing a number so that it could would be enforcing a cable
+    // bound against a quantity nobody measured.
+    let device = RecordingMount::at(above_the_limit()).shared();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    safe.slew_for(
+        Axis::Ra,
+        Direction::West,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("a mount with no home reference is not gated");
+    assert!(device.is_slewing(Axis::Ra));
 }
 
 // -------------------------------------------------------------------------------------------

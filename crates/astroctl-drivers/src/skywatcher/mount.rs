@@ -45,8 +45,8 @@ use std::time::Duration;
 use astroctl_core::config::{MountConfig, SiteConfig};
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus, PierSide,
-    RaDec, SlewSpeed, TrackingMode,
+    Axis, AxisTravel, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus,
+    MountTravel, PierSide, RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use astroctl_hal::registry::{DetectedDevice, DriverInitError, MountFactory};
@@ -260,6 +260,19 @@ struct State {
     /// physically moves the tube past the pole, and caching it is what keeps a 2 Hz manual-slew
     /// renewal from costing a counter read.
     branch: Option<Branch>,
+    /// The counters as of the last read, for [`MountDevice::axis_travel`] (M3-T07).
+    ///
+    /// Cached rather than fetched on demand so that reporting travel costs no exchange: the
+    /// safety watch reads a position at 2 Hz and asks for travel immediately afterwards, so the
+    /// value is fresh by construction and a second pair of `:j` frames would learn nothing.
+    ///
+    /// **Updated by `read_counts`, unlike `branch`, and the asymmetry is deliberate.** A stalled
+    /// axis keeps counting steps the metal never made (E11), which corrupts a *branch* into
+    /// inverting the declination motor's sense — a wrong answer. It cannot corrupt travel in the
+    /// dangerous direction: a phantom count over-reports how far the axis has gone, so a limit
+    /// built on it refuses earlier than the metal requires. Erring toward "stop winding" is the
+    /// error to have.
+    counts: Option<AxisCounts>,
     /// Bumped by everything that takes the axes away from someone. A goto that wakes to find this
     /// changed knows it was overridden — and, unlike a cancellation token, this survives the
     /// caller's future being dropped.
@@ -450,6 +463,7 @@ impl SkywatcherMount {
                     ra: Activity::Free,
                     dec: Activity::Free,
                     branch: None,
+                    counts: None,
                     generation: 0,
                     overridden_by: "nothing",
                 }),
@@ -566,6 +580,10 @@ impl Shared {
         // and the side is a property of which half of the meridian the mount is working. Only the
         // deliberate acts change it — a goto that chose a side, or a fresh connect — so those are
         // the only places that write it (`refresh_branch`).
+        //
+        // The *counters* are cached here, though, because `axis_travel` needs them and a stall
+        // cannot make that answer unsafe — see `State::counts`.
+        self.locked().counts = Some(counts);
         Ok(counts)
     }
 
@@ -1497,6 +1515,37 @@ impl MountDevice for SkywatcherMount {
         self.shared.capabilities()
     }
 
+    /// Travel from `0x800000` on both axes, as of the last counter read (M3-T07).
+    ///
+    /// `None` before the handshake or before the first read — there is no home reference until
+    /// the counts per revolution are known, and inventing one would hand the safety wrapper a
+    /// number it would then enforce a limit against.
+    fn axis_travel(&self) -> Option<MountTravel> {
+        let state = self.shared.locked();
+        let session = state.session?;
+        let counts = state.counts?;
+        // Cold cache is `Normal`, matching `sense`: the branch only decides which sky direction
+        // *names* the homeward motion on the declination axis. Getting it wrong swaps two labels
+        // and never changes how far the axis has travelled, which is the number the limit
+        // compares. It also cannot be wrong for long — one `sense` call on a declination slew
+        // fills the cache from the mount.
+        let branch = state.branch.unwrap_or(Branch::Normal);
+        drop(state);
+
+        let hemisphere = session.geometry.hemisphere();
+        let of = |axis: Axis, scale: super::math::AxisScale, at: Counts| {
+            let travel = scale.travel_from_home(at);
+            AxisTravel {
+                degrees: travel.abs(),
+                homeward: homeward(axis, travel, branch, hemisphere),
+            }
+        };
+        Some(MountTravel {
+            ra: of(Axis::Ra, session.geometry.ra_scale(), counts.ra),
+            dec: of(Axis::Dec, session.geometry.dec_scale(), counts.dec),
+        })
+    }
+
     fn device_info(&self) -> DeviceInfo {
         let session = self.shared.locked().session;
         DeviceInfo {
@@ -1546,6 +1595,36 @@ fn firmware_string(firmware: FirmwareVersion) -> String {
         "{}.{:02}.{:02}",
         firmware.major, firmware.minor, firmware.model_code
     )
+}
+
+/// The sky direction that drives an axis back toward home (M3-T07).
+///
+/// `travel` is signed in counter terms — positive means an increasing counter — so the motor has
+/// to run the other way, and which *sky* direction that is depends on the hemisphere and, for the
+/// declination axis, on the mechanical branch. This is the one place that mapping is inverted, and
+/// it is inverted by asking [`motor_direction`] rather than by restating its table: a second copy
+/// of the sign rules is a second chance to get a limit's escape hatch backwards, which would refuse
+/// the direction that unwinds and permit the one that winds.
+fn homeward(
+    axis: Axis,
+    travel: f64,
+    branch: Branch,
+    hemisphere: super::math::Hemisphere,
+) -> Direction {
+    let wanted = if travel > 0.0 {
+        MotionDirection::Backward
+    } else {
+        MotionDirection::Forward
+    };
+    let (first, second) = match axis {
+        Axis::Ra => (Direction::East, Direction::West),
+        Axis::Dec => (Direction::North, Direction::South),
+    };
+    if motor_direction(first, branch, hemisphere) == wanted {
+        first
+    } else {
+        second
+    }
 }
 
 /// Which axis a sky direction belongs to.
@@ -1764,6 +1843,7 @@ mod tests {
             limits: MountLimits {
                 min_altitude_degrees: 15.0,
                 meridian_limit_minutes: 15.0,
+                max_travel_from_home_degrees: 180.0,
                 slew_ttl_default_ms: 500,
                 slew_ttl_max_ms: 2000,
             },

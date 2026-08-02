@@ -1204,6 +1204,17 @@ impl MountDevice for SimulatorMount {
         Ok(())
     }
 
+    /// `None`: this simulator has no axis counters and therefore no home to measure from.
+    ///
+    /// It holds an `RaDec` and moves it, so there is no `0x800000` and nothing that could be "at
+    /// the pole while an axis is 215° from home". Reporting a travel derived from the sky
+    /// coordinate would be inventing a mechanical fact the model does not have — and the safety
+    /// wrapper would then enforce a cable limit against it. `None` says what is true: the travel
+    /// limit has nothing to act on here, because there is no cable.
+    fn axis_travel(&self) -> Option<astroctl_core::types::MountTravel> {
+        None
+    }
+
     fn capabilities(&self) -> MountCapabilities {
         MountCapabilities {
             // The mount can *exhibit* periodic error (see `SimulatorProfile`); it cannot correct
@@ -1328,6 +1339,7 @@ fn default_config() -> MountConfig {
         limits: MountLimits {
             min_altitude_degrees: 15.0,
             meridian_limit_minutes: 5.0,
+            max_travel_from_home_degrees: 180.0,
             slew_ttl_default_ms: 500,
             slew_ttl_max_ms: 2000,
         },

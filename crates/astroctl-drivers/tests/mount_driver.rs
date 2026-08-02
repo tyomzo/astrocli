@@ -510,6 +510,7 @@ fn config(settle_seconds: u32) -> MountConfig {
         limits: MountLimits {
             min_altitude_degrees: 15.0,
             meridian_limit_minutes: 15.0,
+            max_travel_from_home_degrees: 180.0,
             slew_ttl_default_ms: 500,
             slew_ttl_max_ms: 2000,
         },
@@ -1212,6 +1213,55 @@ async fn a_park_from_the_home_pose_commands_nothing_and_is_still_a_park() {
     let status = driver.status().await.expect("status");
     assert_eq!(status.state, MountState::Parked);
     assert!(status.parked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn travel_from_home_is_accumulated_rotation_and_is_never_folded_to_the_short_way() {
+    // M3-T07's second half, at the layer that measures it. `AxisScale::angle_at` folds into
+    // [-180, 180) because its subject is where the tube points; travel must not, because its
+    // subject is how much rotation a power lead and a USB cable have absorbed. An axis wound
+    // 215.4° past home reads 215.4 and not 144.6 the other way — the folded number would tell the
+    // safety wrapper the cable was better off than it is, and would name the winding direction as
+    // the way out.
+    const WOUND: u32 = 5_400_000; // 215.4255° at the operator's gearing
+
+    let mount = SyntaMount::new();
+    mount.park_counter(Axis::Ra, HOME + WOUND);
+    mount.park_counter(Axis::Dec, HOME - 1_128_000); // 45° the other way
+    let driver = connected(&mount, 0).await;
+
+    assert!(
+        driver.axis_travel().is_none(),
+        "nothing has read a counter yet, so there is no travel to report"
+    );
+    driver.position().await.expect("a position");
+
+    let travel = driver.axis_travel().expect("the counters have been read");
+    let expected = f64::from(WOUND) / f64::from(CPR) * 360.0;
+    assert!(
+        (travel.ra.degrees - expected).abs() < 1e-6,
+        "expected {expected}° of travel, got {}",
+        travel.ra.degrees
+    );
+    assert!(
+        travel.ra.degrees > 180.0,
+        "a folded reading would be {}° — the whole defect",
+        360.0 - travel.ra.degrees
+    );
+    // Unsigned on both axes: the declination axis is wound the *other* way and has still gone 45°.
+    assert!((travel.dec.degrees - 45.0).abs() < 1e-6, "{:?}", travel.dec);
+
+    // Homeward is the direction that shrinks the counter's distance from `0x800000`. In the north
+    // east is a decreasing right-ascension counter, so an over-wound axis unwinds east — and the
+    // declination axis, wound the other way, unwinds the other way.
+    assert_eq!(travel.ra.homeward, astroctl_core::types::Direction::East);
+    assert_eq!(travel.dec.homeward, astroctl_core::types::Direction::South);
+
+    // And park is what makes it zero, which is the point of the two halves being one task.
+    driver.park().await.expect("parks");
+    let travel = driver.axis_travel().expect("still connected");
+    assert!(travel.ra.degrees.abs() < 1e-9, "{:?}", travel.ra);
+    assert!(travel.dec.degrees.abs() < 1e-9, "{:?}", travel.dec);
 }
 
 #[tokio::test(start_paused = true)]
