@@ -1,0 +1,5 @@
+Name: libudev
+Description: stub for cargo check only (no linking)
+Version: 255
+Libs: -ludev
+Cflags:

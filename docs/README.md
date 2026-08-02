@@ -82,3 +82,10 @@ MIT — see [`../LICENSE`](../LICENSE). Every crate inherits it via `license.wor
 to or vendors (libgphoto2, cfitsio, libudev, libsep, and the ERFA source vendored by `erfars`)
 carry their own terms — libgphoto2 is LGPL and ERFA is BSD-3-Clause. This matters only if you
 distribute binaries, not for personal use.
+
+## Handover notes
+
+- [HANDOVER-2026-08-02.md](HANDOVER-2026-08-02.md) — state at the end of the M3 hardware
+  bring-up: what is running and how, the unresolved Layer 2 collision-geometry thread, the hardware
+  facts that outrank the design documents (home hour angle, the slew-class stall, unverified polar
+  alignment), and the build trap that silently produces a binary with no camera and no mount.
