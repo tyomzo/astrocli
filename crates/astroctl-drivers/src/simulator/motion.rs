@@ -63,9 +63,9 @@ pub fn slew_rate(speed: SlewSpeed) -> f64 {
     let times_sidereal = match speed {
         SlewSpeed::Guide => 1.0,
         SlewSpeed::Slow => 8.0,
-        SlewSpeed::Medium => 64.0,
-        SlewSpeed::Fast => 400.0,
-        SlewSpeed::Max => 800.0,
+        SlewSpeed::Medium => 16.0,
+        SlewSpeed::Fast => 24.0,
+        SlewSpeed::Max => 32.0,
     };
     times_sidereal * SIDEREAL_DEG_PER_SEC
 }
@@ -695,7 +695,7 @@ mod tests {
         }
         // PRD §4.2's 800x, which is also `MountCapabilities::max_slew_speed_x_sidereal`.
         let ratio = slew_rate(SlewSpeed::Max) / SIDEREAL_DEG_PER_SEC;
-        assert!((ratio - 800.0).abs() < 1e-9, "max is {ratio}x sidereal");
+        assert!((ratio - 32.0).abs() < 1e-9, "max is {ratio}x sidereal");
     }
 
     #[test]

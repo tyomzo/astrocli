@@ -488,6 +488,23 @@ API drove it. Bare mount, clutches engaged, no payload, both axes.
 | 2 | 8× | 839 counts/s | **turns** |
 | 3 | 64× | 6,993 counts/s steady (27,974 including the ramp) | **stalls** — ramps up, then jams and stops |
 
+### The ladder was corrected on 2026-08-02, and the stall may not be about rate at all
+
+The driver's ladder was EQMOD's — 1×, 8×, 64×, 400×, 800× — and its own doc comment said E11 "was
+never run". It had been. Three of five rungs promised motion this mount does not make, and the top
+two by a factor of fifty. The ladder is now **1, 8, 16, 24, 32**.
+
+The stopping point is not an interpolation. On this mount the speed-class crossover sits at
+`f/r = 16`, i.e. 4,058 counts/s or **38.8× sidereal**: below it a rate programs in the low class,
+one counter step at a time; above it in the high class, sixteen counts per step. Every rate heard
+to turn is below that line. The one that jammed is above it. So E11 may have found not a rate
+ceiling but that this mount will not *start an unbounded slew in the high class* — and a goto,
+which is bounded and ramped, was measured cruising at 835× in that same high class.
+
+Two experiments would settle it, both ten minutes by ear: drive 32× then 39°× — either side of the
+crossover, a 20% rate change across a class change — and hear whether the jam follows the class
+rather than the rate; then, if it does, start a high-class rate from a ramped profile.
+
 **The stall is invisible to every instrument this project has.** A Synta mount's counter counts
 *commanded* steps, so a stalled rotor and a turning one produce identical position telemetry — the
 counter walked 1.67° during a slew that ended with the axis buzzing in place. Nothing in the driver,

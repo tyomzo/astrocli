@@ -1864,8 +1864,13 @@ mod tests {
 
         let ramped = travel_after_stop(false).await;
         let instant = travel_after_stop(true).await;
+        // A *ratio*, not an absolute margin. The coast distance scales with the slew rate, and the
+        // E11 correction cut that rate by four — the original `+ 1.0 degree` was a threshold that
+        // only held at 64×, so it encoded the ladder into a test about ramping. The property under
+        // test is that a ramped stop coasts substantially further than an instant one, which is
+        // true at any rate.
         assert!(
-            ramped > instant + 1.0,
+            ramped > instant * 2.0,
             "a ramped stop travelled {ramped} deg and an instant one {instant} deg"
         );
         // Both stop: neither is still running half a minute later.
@@ -2080,10 +2085,12 @@ mod tests {
         );
         assert!(mount.status().await.expect("status").slewing);
 
-        // 64x sidereal is 0.267 deg/s, so ten seconds is ~2.67 degrees, less the ramp-up.
+        // 16× sidereal is 0.0668 deg/s after the E11 correction, so ten seconds is ~0.67 degrees,
+        // less the ramp-up. It was 64× and ~2.67 degrees until the ladder was anchored to what the
+        // mount was heard to actually do.
         let travelled = moving.dec.degrees() - start.dec.degrees();
         assert!(
-            (2.5..2.8).contains(&travelled),
+            (0.62..0.70).contains(&travelled),
             "medium speed moved {travelled} deg in 10 s"
         );
 

@@ -216,11 +216,43 @@ impl RateModel {
 
     /// The rate a manual-slew speed class asks of this axis.
     ///
-    /// **The ladder is EQMOD's, not this mount's.** `FINDINGS.md`'s experiment E11 — the
-    /// per-class slew table — was never run, so only the top of this is anchored: `Max` is
-    /// PRD §4.2's stated 800× maximum, against a *goto* cruise measured at 835×. The same ladder
-    /// as `simulator::motion::slew_rate`, deliberately, so the simulator and the real mount move
-    /// at the same speed for the same request; `tests/position_math.rs` asserts it.
+    /// **Anchored to E11, run by ear on 2026-08-01 and corrected here on 2026-08-02.** The
+    /// previous ladder was EQMOD's — 1×, 8×, 64×, 400×, 800× — and this mount does not do it.
+    /// Standing at a bare HEQ5 Pro with the clutches engaged, the operator heard 1× and 8× turn
+    /// the rotor and **64× ramp up, jam and stop**. The counter reported 6,993 counts/s throughout
+    /// the stall, because a Synta counter counts *commanded* steps, so nothing in this system
+    /// could see it. Three of the five classes were therefore promising motion the mount does not
+    /// produce, and the top two by a factor of fifty.
+    ///
+    /// The new ladder stops below the **speed-class crossover**, and that is not a coincidence —
+    /// it is the best available hypothesis for what E11 actually heard. On this mount the crossover
+    /// sits at `f/r = 16`, i.e. 4,058 counts/s or **38.8× sidereal**. Every rate that was heard to
+    /// turn is below it and programs in the low class; the one that stalled is above it and
+    /// programs in the high class, where the axis advances in sixteen-count jumps instead of single
+    /// counts. So E11 may not have found a rate ceiling at all: it may have found that this mount
+    /// will not start an unbounded slew in the high class. The corrected ladder keeps all five
+    /// classes in the low one.
+    ///
+    /// # What this is not, and the experiment that would settle it
+    ///
+    /// It is **not** a claim that the mount cannot slew fast: a *goto* was measured cruising at
+    /// 835× sidereal on the same hardware, and a goto uses the high class. So the high class works
+    /// for a bounded, ramped move and failed for an unbounded one, which is why the hypothesis
+    /// above is about the *start* rather than about the rate.
+    ///
+    /// `SlewSpeed::Max` therefore no longer means "the mount's maximum rate" — PRD §4.2's 800× and
+    /// `MountCapabilities::max_slew_speed_x_sidereal` still report the mount's capability, which
+    /// goto reaches. It means the fastest rate this driver will start an unbounded slew at. The
+    /// two were the same number while the ladder was EQMOD's and nobody had listened to the mount.
+    ///
+    /// Two experiments would replace the hypothesis with a measurement, both ten minutes by ear:
+    /// drive 32× and then 39× (either side of the crossover) and hear whether the stall follows
+    /// the *class* rather than the rate; and if it does, try a high-class rate started from a
+    /// ramped rather than unbounded profile.
+    ///
+    /// The same ladder as `simulator::motion::slew_rate`, deliberately, so the simulator and the
+    /// real mount move at the same speed for the same request; `tests/position_math.rs` asserts
+    /// it.
     ///
     /// # Errors
     /// As [`Self::tracking`].
@@ -228,9 +260,9 @@ impl RateModel {
         let times_sidereal = match speed {
             SlewSpeed::Guide => 1.0,
             SlewSpeed::Slow => 8.0,
-            SlewSpeed::Medium => 64.0,
-            SlewSpeed::Fast => 400.0,
-            SlewSpeed::Max => 800.0,
+            SlewSpeed::Medium => 16.0,
+            SlewSpeed::Fast => 24.0,
+            SlewSpeed::Max => 32.0,
         };
         CountsPerSecond::from_arcsec_per_sec(times_sidereal * SIDEREAL_ARCSEC_PER_SEC, self.scale)
     }
@@ -406,9 +438,11 @@ mod tests {
         for (speed, class, period) in [
             (SlewSpeed::Guide, SpeedClass::Low, 620_u32), //   104.730 c/s → 620.02
             (SlewSpeed::Slow, SpeedClass::Low, 78),       //   837.844 c/s →  77.50
-            (SlewSpeed::Medium, SpeedClass::High, 155),   // 6,702.75  c/s →   9.69 → ×16
-            (SlewSpeed::Fast, SpeedClass::High, 25),      // 41,892.2  c/s →   1.55 → ×16
-            (SlewSpeed::Max, SpeedClass::High, 12),       // 83,784.3  c/s →   0.78 → ×16
+            // All five are in the low class after the E11 correction, deliberately: the crossover
+            // at 38.8× is the suspected stall boundary, so the ladder stops below it.
+            (SlewSpeed::Medium, SpeedClass::Low, 39), // 1,675.68  c/s →  38.75
+            (SlewSpeed::Fast, SpeedClass::Low, 26),   // 2,513.52  c/s →  25.83
+            (SlewSpeed::Max, SpeedClass::Low, 19),    // 3,351.36  c/s →  19.38
         ] {
             let programmed = model
                 .program(model.slew(speed).expect("valid"))
@@ -466,12 +500,31 @@ mod tests {
             let faster = model.slew(pair[1]).expect("valid").get();
             assert!(slower < faster, "{pair:?}");
         }
-        // PRD §4.2's 800×, which is also `MountCapabilities::max_slew_speed_x_sidereal`.
+        // 32×, and deliberately *not* PRD §4.2's 800×: that figure is the mount's capability and
+        // a goto reaches it, while this ladder is what the driver will start an unbounded slew at.
+        // E11 heard 64× stall. `MountCapabilities::max_slew_speed_x_sidereal` still reports 800.
         let ratio = model
             .slew(SlewSpeed::Max)
             .expect("valid")
             .times_sidereal(model.scale());
-        assert!((ratio - 800.0).abs() < 1e-9, "max is {ratio}× sidereal");
+        assert!((ratio - 32.0).abs() < 1e-9, "max is {ratio}× sidereal");
+        // And every class stays below the crossover, which is the point of the correction.
+        for speed in [
+            SlewSpeed::Guide,
+            SlewSpeed::Slow,
+            SlewSpeed::Medium,
+            SlewSpeed::Fast,
+            SlewSpeed::Max,
+        ] {
+            let programmed = model
+                .program(model.slew(speed).expect("valid"))
+                .expect("in range");
+            assert_eq!(
+                programmed.speed(),
+                SpeedClass::Low,
+                "{speed:?} crossed into the high class, which is what E11 heard stall"
+            );
+        }
     }
 
     #[test]

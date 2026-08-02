@@ -274,22 +274,26 @@ function NudgeButton({
 const SPEED_LABEL: Record<SlewSpeed, string> = {
   1: '1×',
   2: '8×',
-  3: '64×',
-  4: '400×',
-  5: '800×',
+  3: '16×',
+  4: '24×',
+  5: '32×',
 };
 
 /**
  * Rungs this mount was heard to stall on (`spikes/skywatcher-heq5/FINDINGS.md`, E11).
  *
- * Marked, not removed. The threshold belongs to a mount with a particular balance and a particular
- * load — a counterweighted, payload-carrying rig may well take 64× — so hiding the rungs would
- * bake one evening's bare-mount measurement into the product. What the operator needs is the
- * warning they earned, carried forward so they do not have to remember which dot buzzed: the
- * counter cannot tell them, because a Synta counter counts commanded steps and a stalled axis
- * reports the motion it did not make.
+ * **Empty since 2026-08-02**, because the ladder moved rather than the warning. E11 heard 1× and 8×
+ * turn and 64× jam; the driver's ladder was EQMOD's — 1, 8, 64, 400, 800 — so three of the five
+ * rungs promised motion this mount does not make. They now read 1, 8, 16, 24, 32, all of which sit
+ * below the speed-class crossover at 38.8× that is the suspected cause of the jam. No rung is known
+ * to stall, so none is marked.
+ *
+ * Kept as a mechanism rather than deleted: the marking is how an operator carries forward a warning
+ * the instruments cannot give them. A Synta counter counts *commanded* steps, so a stalled axis
+ * reports the motion it did not make, and their ears remain the only rotor sensor in the system.
+ * If a rung is ever heard to buzz, it goes back in here.
  */
-const SPEED_STALLED: ReadonlySet<SlewSpeed> = new Set<SlewSpeed>([3, 4, 5]);
+const SPEED_STALLED: ReadonlySet<SlewSpeed> = new Set<SlewSpeed>([]);
 
 function SpeedSelector({
   speed,
