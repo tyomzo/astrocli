@@ -580,7 +580,7 @@ pub struct SiteConfig {
     pub longitude: f64,
     /// Metres above sea level.
     pub elevation: f64,
-    /// IANA timezone name, e.g. `Europe/Oslo`.
+    /// IANA timezone name, e.g. `Europe/Vilnius`.
     pub timezone: String,
 }
 
@@ -598,7 +598,7 @@ impl SiteConfig {
                 "timezone",
                 format!(
                     "`{}` is not an IANA timezone name; expected `UTC` or `Area/Location` \
-                     (e.g. Europe/Oslo)",
+                     (e.g. Europe/Vilnius)",
                     self.timezone
                 ),
             );

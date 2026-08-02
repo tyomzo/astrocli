@@ -1900,13 +1900,13 @@ mod tests {
     use astroctl_core::config::{MountDriver, MountLimits, SerialConfig};
     use astroctl_hal::registry::DriverRegistry;
 
-    /// Oslo, the site the shipped example configures.
+    /// Vilnius, the site the shipped example configures.
     fn site() -> SiteConfig {
         SiteConfig {
-            latitude: 59.9139,
-            longitude: 10.7522,
-            elevation: 25.0,
-            timezone: "Europe/Oslo".to_owned(),
+            latitude: 54.6872,
+            longitude: 25.2797,
+            elevation: 112.0,
+            timezone: "Europe/Vilnius".to_owned(),
         }
     }
 

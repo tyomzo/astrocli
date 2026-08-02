@@ -267,7 +267,7 @@ mod tests {
             latitude,
             longitude: 10.7522,
             elevation: 100.0,
-            timezone: "Europe/Oslo".to_owned(),
+            timezone: "Europe/Vilnius".to_owned(),
         }
     }
 

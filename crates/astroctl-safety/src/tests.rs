@@ -22,10 +22,10 @@ use crate::horizontal::{horizontal, Site};
 use crate::test_double::{LookaheadModel, RecordingMount};
 use crate::SafeMount;
 
-/// The example config's site (`config/field-node.example.yaml`): Oslo.
-const OSLO: Site = Site {
-    latitude_degrees: 59.9139,
-    longitude_degrees: 10.7522,
+/// The example config's site (`config/field-node.example.yaml`): Vilnius.
+const VILNIUS: Site = Site {
+    latitude_degrees: 54.6872,
+    longitude_degrees: 25.2797,
 };
 
 /// The example config's limits, field for field.
@@ -69,18 +69,18 @@ fn target_at_altitude(site: Site, altitude_degrees: f64, at: DateTime<Utc>) -> R
 }
 
 fn above_the_limit() -> RaDec {
-    target_at_altitude(OSLO, 45.0, Utc::now())
+    target_at_altitude(VILNIUS, 45.0, Utc::now())
 }
 
 fn below_the_limit() -> RaDec {
-    target_at_altitude(OSLO, -20.0, Utc::now())
+    target_at_altitude(VILNIUS, -20.0, Utc::now())
 }
 
 fn wrap(device: &Arc<RecordingMount>, limits: MountLimits, bus: &EventBus) -> SafeMount {
     SafeMount::new(
         Arc::clone(device) as Arc<dyn MountDevice>,
         limits,
-        OSLO,
+        VILNIUS,
         bus.clone(),
     )
 }
@@ -186,7 +186,7 @@ async fn the_altitude_limit_is_the_configured_number_and_nothing_else() {
     // "All limit behaviour driven purely by config values (no constants in code)". Two wrappers
     // over the same device at the same instant, differing only in the configured minimum, must
     // disagree about the same target — which they cannot do if the threshold is a constant.
-    let target = target_at_altitude(OSLO, 20.0, Utc::now());
+    let target = target_at_altitude(VILNIUS, 20.0, Utc::now());
     let device = RecordingMount::at(above_the_limit()).shared();
 
     let permissive = wrap(
@@ -215,7 +215,7 @@ async fn the_altitude_limit_is_the_configured_number_and_nothing_else() {
 async fn a_manual_slew_that_would_descend_below_the_limit_is_refused_before_the_motors() {
     // MNT-15 covers slew as well as goto. A manual slew has no target, so the check is on the
     // direction: from a target near the southern horizon, driving further south descends.
-    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now())).shared();
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, 15.5, Utc::now())).shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
 
     let error = safe
@@ -245,8 +245,8 @@ async fn a_manual_slew_that_would_descend_below_the_limit_is_refused_before_the_
 async fn a_mount_below_the_limit_can_still_be_driven_back_up() {
     // The trap a positional check would set: refuse every slew while below the limit and the
     // operator cannot recover the mount without power-cycling it. From below the horizon,
-    // northward (up, from Oslo's latitude, for a southern target) must be allowed.
-    let device = RecordingMount::at(target_at_altitude(OSLO, -20.0, Utc::now())).shared();
+    // northward (up, from the site latitude, for a southern target) must be allowed.
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, -20.0, Utc::now())).shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
 
     safe.slew_for(
@@ -441,7 +441,7 @@ async fn a_slew_that_drifts_below_the_limit_is_stopped_by_the_background_check()
     // moving. SDD §5.4's "background limit check at 2 Hz while manual slew active" is what
     // catches the rest of the motion, and the lease is long enough here that the dead-man's
     // switch is not what stops it.
-    let device = RecordingMount::at(target_at_altitude(OSLO, 25.0, Utc::now())).shared();
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, 25.0, Utc::now())).shared();
     let bus = EventBus::new();
     let mut events = bus.subscribe();
     let safe = wrap(&device, EXAMPLE_LIMITS, &bus);
@@ -456,7 +456,7 @@ async fn a_slew_that_drifts_below_the_limit_is_stopped_by_the_background_check()
     .expect("25° is above the 15° limit");
 
     // The mount moved while nobody was looking — which is what a slew is.
-    device.place(target_at_altitude(OSLO, 14.0, Utc::now()));
+    device.place(target_at_altitude(VILNIUS, 14.0, Utc::now()));
 
     let alert = next_alert(&mut events).await.expect("an alert");
     assert_eq!(alert.0, ErrorCode::LimitAltitude.as_str());
@@ -639,7 +639,7 @@ async fn tracking_stops_when_the_mount_crosses_the_meridian_limit() {
     let mut events = bus.subscribe();
     let now = Utc::now();
     // Just short of the limit: 14 minutes past the meridian, against a configured 15.
-    let device = RecordingMount::at(target_at_hour_angle(OSLO, 14.0, now)).shared();
+    let device = RecordingMount::at(target_at_hour_angle(VILNIUS, 14.0, now)).shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &bus);
 
     safe.start_tracking(TrackingMode::Sidereal)
@@ -647,7 +647,7 @@ async fn tracking_stops_when_the_mount_crosses_the_meridian_limit() {
         .expect("tracking starts");
     // One tick to establish where the mount was, then the sky carries it past the limit.
     tokio::time::sleep(Duration::from_millis(600)).await;
-    device.place(target_at_hour_angle(OSLO, 15.5, Utc::now()));
+    device.place(target_at_hour_angle(VILNIUS, 15.5, Utc::now()));
 
     let alert = next_alert(&mut events).await.expect("an alert");
     assert_eq!(alert.0, ErrorCode::LimitMeridian.as_str());
@@ -667,7 +667,7 @@ async fn a_target_acquired_west_of_the_limit_is_left_alone() {
     // the western sky — targets that are perfectly safe, because the mount flipped to reach them.
     let bus = EventBus::new();
     let mut events = bus.subscribe();
-    let device = RecordingMount::at(target_at_hour_angle(OSLO, 90.0, Utc::now())).shared();
+    let device = RecordingMount::at(target_at_hour_angle(VILNIUS, 90.0, Utc::now())).shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &bus);
 
     safe.start_tracking(TrackingMode::Sidereal)
@@ -675,7 +675,7 @@ async fn a_target_acquired_west_of_the_limit_is_left_alone() {
         .expect("tracking starts");
     for minutes in [90.5_f64, 91.0, 91.5] {
         tokio::time::sleep(Duration::from_millis(600)).await;
-        device.place(target_at_hour_angle(OSLO, minutes, Utc::now()));
+        device.place(target_at_hour_angle(VILNIUS, minutes, Utc::now()));
     }
 
     assert!(
@@ -972,7 +972,7 @@ async fn the_alt_az_the_operator_reads_is_the_one_the_limit_used() {
 /// `motion_lookahead`, i.e. it is willing to say which way its metal turns.
 #[tokio::test]
 async fn a_declination_slew_that_descends_past_the_pole_is_refused() {
-    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, 15.5, Utc::now()))
         .with_lookahead(LookaheadModel::flipped_branch(1.0))
         .shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
@@ -1007,7 +1007,7 @@ async fn a_declination_slew_that_descends_past_the_pole_is_refused() {
 /// stopped moving the declination axis at all.
 #[tokio::test]
 async fn the_climbing_declination_direction_is_still_permitted_past_the_pole() {
-    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, 15.5, Utc::now()))
         .with_lookahead(LookaheadModel::flipped_branch(1.0))
         .shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
@@ -1030,7 +1030,7 @@ async fn the_climbing_declination_direction_is_still_permitted_past_the_pole() {
 /// past the pole, where the direction that recovers is the opposite of the one that does there.
 #[tokio::test]
 async fn a_mount_below_the_limit_past_the_pole_can_still_be_driven_back_up() {
-    let device = RecordingMount::at(target_at_altitude(OSLO, -20.0, Utc::now()))
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, -20.0, Utc::now()))
         .with_lookahead(LookaheadModel::flipped_branch(1.0))
         .shared();
     let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
@@ -1060,7 +1060,7 @@ async fn the_right_ascension_axis_is_unaffected_by_the_branch() {
         LookaheadModel::normal_branch(1.0),
         LookaheadModel::flipped_branch(1.0),
     ] {
-        let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, at))
+        let device = RecordingMount::at(target_at_altitude(VILNIUS, 15.5, at))
             .with_lookahead(model)
             .shared();
         let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
@@ -1089,7 +1089,7 @@ async fn the_right_ascension_axis_is_unaffected_by_the_branch() {
 /// sees it.
 #[tokio::test]
 async fn a_held_declination_slew_is_stopped_when_crossing_the_pole_turns_it_downward() {
-    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+    let device = RecordingMount::at(target_at_altitude(VILNIUS, 15.5, Utc::now()))
         .with_lookahead(LookaheadModel::normal_branch(1.0))
         .shared();
     let bus = EventBus::new();

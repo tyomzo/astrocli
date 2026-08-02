@@ -1291,12 +1291,12 @@ mod tests {
 
     /// A target that is above the example config's altitude limit at **every** hour of the day.
     ///
-    /// Circumpolar from the example site (Oslo, latitude 59.9°): at declination +70° the lowest
-    /// the target ever gets is 39.9°, well clear of the configured 15°. Every test below that
-    /// needs a goto to actually *start* uses it.
+    /// Circumpolar from the example site (Vilnius, latitude 54.7°): at declination +70° the
+    /// lowest the target ever gets is 34.7°, well clear of the configured 15°. Every test below
+    /// that needs a goto to actually *start* uses it.
     ///
     /// This is not fussiness. Two of M1-T03's goto fixtures were chosen before there was an
-    /// altitude limit and are latitude-blind — `dec −30°` never rises above 0.1° from Oslo, and
+    /// altitude limit and are latitude-blind — `dec −30°` never rises above 5.3° from Vilnius, and
     /// `dec +22°` is above the limit for part of the day and below it for the rest. The first
     /// failed the moment this task landed; the second would have passed in the afternoon and
     /// failed at two in the morning, which is the worst way for a test to be wrong.
@@ -1582,7 +1582,7 @@ mod tests {
         let lst_hours = astroctl_safety::local_sidereal_degrees(site, now) / 15.0;
         // Twelve hours from the local sidereal time puts the target on the far side of the
         // meridian, and a declination as far south as the site's latitude allows puts it well
-        // under the horizon from Oslo.
+        // under the horizon from the configured site.
         let target = RaDec::from_parts((lst_hours + 12.0).rem_euclid(24.0), -45.0)
             .expect("a valid coordinate");
         let altitude = astroctl_safety::horizontal(target, site, now).alt.degrees();
@@ -2379,7 +2379,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = slewing
                 .device
-                .goto(RaDec::from_parts(12.0, 70.0).expect("circumpolar from Oslo"))
+                .goto(RaDec::from_parts(12.0, 70.0).expect("circumpolar from the example site"))
                 .await;
         });
 

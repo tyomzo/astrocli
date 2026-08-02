@@ -72,8 +72,15 @@ const HOME: u32 = 0x0080_0000;
 /// `:e1` → `020401`, read big-endian: firmware 2.4, mount model code 1 (HEQ5).
 const FIRMWARE_RAW: u32 = 0x0002_0401;
 
-/// Oslo, the site in the example configuration.
-const OSLO_LATITUDE: f64 = 59.9139;
+/// The latitude these fixtures were **recorded and computed at**, 59.9139° N.
+///
+/// Deliberately *not* the shipped example's site, which moved to Vilnius on 2026-08-02. This
+/// number is an anchor in two independent senses and neither survives being edited: the astropy
+/// alt/az fixtures below were generated at it, and `t_pos_6`'s counters are a real motion sequence
+/// performed on the operator's HEQ5 whose zenith observation is only meaningful against the
+/// latitude in force when it was made. A fixture that tracked the default config would silently
+/// re-baseline both the day somebody moved house.
+const ANCHOR_LATITUDE: f64 = 59.9139;
 /// Santiago, the southern-hemisphere site `astroctl-safety`'s fixtures also use.
 const SANTIAGO_LATITUDE: f64 = -33.4489;
 
@@ -156,24 +163,24 @@ struct AstropyFixture {
 /// is a disagreement about the *mount*, not about the sky.
 const ASTROPY: &[AstropyFixture] = &[
     AstropyFixture {
-        label: "oslo, transiting the meridian",
-        latitude: OSLO_LATITUDE,
+        label: "anchor site, transiting the meridian",
+        latitude: ANCHOR_LATITUDE,
         ra_hours: 20.490_284_278_437_74,
         dec_degrees: 20.0,
         alt_degrees: 50.086_060,
         az_degrees: 180.000_059,
     },
     AstropyFixture {
-        label: "oslo, a target high in the north-east",
-        latitude: OSLO_LATITUDE,
+        label: "anchor site, a target high in the north-east",
+        latitude: ANCHOR_LATITUDE,
         ra_hours: 18.615_649,
         dec_degrees: 38.783_689,
         alt_degrees: 20.624_563,
         az_degrees: 46.728_446,
     },
     AstropyFixture {
-        label: "oslo, grazing the horizon",
-        latitude: OSLO_LATITUDE,
+        label: "anchor site, grazing the horizon",
+        latitude: ANCHOR_LATITUDE,
         ra_hours: 6.752_481,
         dec_degrees: -16.716_116,
         alt_degrees: -0.049_509,
@@ -240,7 +247,7 @@ fn t_pos_1_every_coordinate_round_trips_within_one_count() {
     let mut worst_arcsec: f64 = 0.0;
     let mut worst_label = String::new();
 
-    for latitude in [OSLO_LATITUDE, SANTIAGO_LATITUDE] {
+    for latitude in [ANCHOR_LATITUDE, SANTIAGO_LATITUDE] {
         let geometry = geometry(latitude);
         for lst_h in [0.0, 5.75, 12.5, 21.25] {
             let lst = lst_hours(lst_h);
@@ -338,7 +345,7 @@ fn t_pos_1_the_round_trip_holds_at_the_astropy_anchored_sidereal_times() {
 #[test]
 fn t_pos_1_a_transiting_target_puts_the_right_ascension_axis_a_quarter_turn_below_home() {
     // The strongest single statement this suite can make with an outside reference. astropy puts
-    // this target at azimuth 180.000059° from Oslo — i.e. due south, on the meridian — so its
+    // this target at azimuth 180.000059° from the anchor site — i.e. due south, on the meridian — so its
     // hour angle is zero. Nothing about that conclusion comes from this driver except the
     // arithmetic being tested.
     //
@@ -419,10 +426,10 @@ fn t_pos_6_the_home_pose_swings_measured_on_the_mount() {
     // Both counters are exact, which is worth noting because nothing else in this suite is:
     // 9,024,000 / 4 = 2,256,000 and 9,024,000 / 12 = 752,000 divide without remainder, so these
     // two poses have no rounding in them at all and the assertions can be exact.
-    let oslo = geometry(OSLO_LATITUDE);
+    let anchor = geometry(ANCHOR_LATITUDE);
     let lst = lst_hours(0.0);
     let hour_angle_at =
-        |counts| wrap_signed(lst.degrees() - oslo.position(counts, lst).coords.ra.hours() * 15.0);
+        |counts| wrap_signed(lst.degrees() - anchor.position(counts, lst).coords.ra.hours() * 15.0);
 
     // Swing 1 — from home, the declination axis alone driven a quarter turn. The tube was seen
     // due west on the horizon: declination 0, hour angle +6h.
@@ -430,7 +437,7 @@ fn t_pos_6_the_home_pose_swings_measured_on_the_mount() {
         ra: Counts::HOME,
         dec: Counts::new(HOME + CPR / 4).expect("fits"),
     };
-    let sky = oslo.position(after_dec_swing, lst);
+    let sky = anchor.position(after_dec_swing, lst);
     assert!(sky.coords.dec.degrees().abs() < 1e-9, "on the equator");
     assert!(
         (hour_angle_at(after_dec_swing) - 90.0).abs() < 1e-9,
@@ -440,21 +447,21 @@ fn t_pos_6_the_home_pose_swings_measured_on_the_mount() {
 
     // Swing 2 — declination axis back to +30° (declination 60°) and the right-ascension axis a
     // quarter turn below home. The tube was seen at the zenith: hour angle 0, declination within
-    // a tenth of a degree of Oslo's latitude.
+    // a tenth of a degree of the anchor latitude.
     let at_the_zenith = AxisCounts {
         ra: Counts::new(HOME - CPR / 4).expect("fits"),
         dec: Counts::new(HOME + CPR / 12).expect("fits"),
     };
-    let sky = oslo.position(at_the_zenith, lst);
+    let sky = anchor.position(at_the_zenith, lst);
     assert!((sky.coords.dec.degrees() - 60.0).abs() < 1e-9);
     assert!(
         hour_angle_at(at_the_zenith).abs() < 1e-9,
-        "on the meridian, which with declination 60° from latitude {OSLO_LATITUDE} is the zenith"
+        "on the meridian, which with declination 60° from latitude {ANCHOR_LATITUDE} is the zenith"
     );
     assert!(
-        (sky.coords.dec.degrees() - OSLO_LATITUDE).abs() < 0.1,
+        (sky.coords.dec.degrees() - ANCHOR_LATITUDE).abs() < 0.1,
         "a target on the meridian at the site latitude is straight up, and this is {}° from it",
-        (sky.coords.dec.degrees() - OSLO_LATITUDE).abs()
+        (sky.coords.dec.degrees() - ANCHOR_LATITUDE).abs()
     );
 
     // And the pose the mount is left in overnight, said once in counters: both axes at
@@ -474,7 +481,7 @@ fn the_pier_side_is_undefined_at_a_pole_and_the_model_says_so_consistently() {
     // are the same direction. The fold to `[-180, 180)` picks one representative, and which one
     // it picks is arbitrary but must be *stable*: a mount that reported a flapping pier side
     // while parked at the pole would make the meridian limit flap with it.
-    let geometry = geometry(OSLO_LATITUDE);
+    let geometry = geometry(ANCHOR_LATITUDE);
     let lst = lst_hours(4.0);
 
     // Home: the tube on the pole the mount is aligned to. Declination axis exactly 0.
@@ -561,7 +568,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
     let table = [
         // Northern hemisphere, s = +1.
         MechCase {
-            latitude: OSLO_LATITUDE,
+            latitude: ANCHOR_LATITUDE,
             branch: Branch::Normal,
             pier_side: PierSide::West,
             dec_degrees: 40.0,
@@ -569,7 +576,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             expected_ra_axis: -60.0,
         },
         MechCase {
-            latitude: OSLO_LATITUDE,
+            latitude: ANCHOR_LATITUDE,
             branch: Branch::Normal,
             pier_side: PierSide::West,
             dec_degrees: -40.0,
@@ -577,7 +584,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             expected_ra_axis: -60.0,
         },
         MechCase {
-            latitude: OSLO_LATITUDE,
+            latitude: ANCHOR_LATITUDE,
             branch: Branch::ThroughThePole,
             pier_side: PierSide::East,
             dec_degrees: 40.0,
@@ -585,7 +592,7 @@ fn t_pos_1_the_eight_hemisphere_pier_declination_cases() {
             expected_ra_axis: 120.0,
         },
         MechCase {
-            latitude: OSLO_LATITUDE,
+            latitude: ANCHOR_LATITUDE,
             branch: Branch::ThroughThePole,
             pier_side: PierSide::East,
             dec_degrees: -40.0,
@@ -684,7 +691,7 @@ fn t_pos_1_hand_computed_goto_targets() {
     // Golden cases: a starting counter, a target, and the counters the goto must end on, each
     // one worked out with a calculator in the comment beside it. 9,024,000 counts a revolution
     // is 25,066.667 counts a degree.
-    let oslo = geometry(OSLO_LATITUDE);
+    let anchor = geometry(ANCHOR_LATITUDE);
 
     // A quarter of a revolution — 9,024,000 / 4 — is 2,256,000 counts, and after M3-T06 it is in
     // every one of these because it is the home hour angle expressed as a counter.
@@ -697,7 +704,7 @@ fn t_pos_1_hand_computed_goto_targets() {
         ra: Counts::new(HOME + 200_000).expect("fits"),
         dec: Counts::new(HOME + 500_000).expect("fits"),
     };
-    let solution = oslo
+    let solution = anchor
         .goto(from, radec(6.0, 40.0), lst_hours(6.0))
         .expect("in range");
     assert_eq!(solution.destination().ra.get(), 6_132_608);
@@ -719,7 +726,7 @@ fn t_pos_1_hand_computed_goto_targets() {
         ra: Counts::HOME,
         dec: Counts::new(HOME - 500_000).expect("fits"),
     };
-    let flipped = oslo
+    let flipped = anchor
         .goto(flipped_start, radec(6.0, 40.0), lst_hours(6.0))
         .expect("in range");
     assert_eq!(flipped.destination().dec.get(), HOME - 1_253_333);
@@ -744,7 +751,7 @@ fn t_pos_1_hand_computed_goto_targets() {
         ra: Counts::HOME,
         dec: Counts::new(HOME + 500_000).expect("fits"),
     };
-    let east = oslo
+    let east = anchor
         .goto(on_the_normal_branch, radec(18.0, 10.0), lst_hours(12.0))
         .expect("in range");
     assert_eq!(east.branch(), Branch::Normal);
@@ -762,7 +769,7 @@ fn t_pos_1_hand_computed_goto_targets() {
     //      Nothing unsafe follows: home is the one pose on neither side of the pier, so this is
     //      a choice and not a flip — `no_computed_goto_path_crosses_the_pole` still holds
     //      everywhere else, and this move is genuinely the shorter one.
-    let from_home = oslo
+    let from_home = anchor
         .goto(AxisCounts::HOME, radec(18.0, 10.0), lst_hours(12.0))
         .expect("in range");
     assert_eq!(from_home.branch(), Branch::ThroughThePole);
@@ -849,7 +856,7 @@ fn t_pos_1_no_bare_f64_coordinate_crosses_the_module_boundary() {
     // ...and the seam's own output is those types rather than numbers: a declination that the
     // decomposition could produce past a pole would have to survive `DecDegrees`, and it does not
     // exist — every mechanical angle in the domain maps inside `[-90, 90]`.
-    let geometry = geometry(OSLO_LATITUDE);
+    let geometry = geometry(ANCHOR_LATITUDE);
     for dec_axis in -180..180 {
         let position = geometry.position(
             AxisCounts {
@@ -884,7 +891,7 @@ fn no_computed_goto_path_crosses_the_pole() {
         (state >> 11) as f64 / (1_u64 << 53) as f64
     };
 
-    for latitude in [OSLO_LATITUDE, SANTIAGO_LATITUDE] {
+    for latitude in [ANCHOR_LATITUDE, SANTIAGO_LATITUDE] {
         let geometry = geometry(latitude);
         for _ in 0..5_000 {
             let start_dec_axis = next().mul_add(359.0, -179.5);
@@ -1188,7 +1195,7 @@ fn a_goto_computed_by_the_math_is_programmable_by_the_controller() {
     // The join M3-T04 will make: the geometry produces two `Move`s, and each axis's controller
     // turns its own into a verified goto program. The point of asserting it here is that the two
     // halves were written against the same `Move` type and nothing else.
-    let geometry = geometry(OSLO_LATITUDE);
+    let geometry = geometry(ANCHOR_LATITUDE);
     let from = AxisCounts {
         ra: Counts::new(HOME + 120_000).expect("fits"),
         dec: Counts::new(HOME + 900_000).expect("fits"),
@@ -1237,7 +1244,7 @@ fn a_guide_pulse_moves_the_sky_the_way_the_direction_says() {
     let rate = GuideRate::new(1.0).expect("in range");
     let duration = Duration::from_secs(4);
 
-    for latitude in [OSLO_LATITUDE, SANTIAGO_LATITUDE] {
+    for latitude in [ANCHOR_LATITUDE, SANTIAGO_LATITUDE] {
         let hemisphere = Hemisphere::of_latitude(latitude);
         let geometry = geometry(latitude);
         for branch in [Branch::Normal, Branch::ThroughThePole] {

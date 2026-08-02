@@ -963,7 +963,7 @@ mod tests {
         assert!(safety.position().await.is_ok());
 
         // MNT-15 still holds, and still holds *before* the driver is asked: declination −80° is
-        // never above 15° from Oslo, whatever the hour. `LimitViolation` is the wrapper's own
+        // never above 15° from the example site, whatever the hour. `LimitViolation` is the wrapper's own
         // variant and no driver may produce it, so seeing it here is the proof that the wrapper is
         // still in the path.
         let below = astroctl_core::types::RaDec::from_parts(6.0, -80.0).expect("valid");

@@ -1106,10 +1106,10 @@ wheel availability lags new CPython releases, and that bites at Phase 2b, not no
 ```yaml
 # field-node.yaml
 site:
-  latitude: 59.9139      # Oslo, Norway
-  longitude: 10.7522
-  elevation: 25
-  timezone: Europe/Oslo
+  latitude: 54.6872      # Vilnius, Lithuania — the deployment site
+  longitude: 25.2797
+  elevation: 112
+  timezone: Europe/Vilnius
 
 mount:
   driver: skywatcher        # "skywatcher", "indi", "ascom_alpaca", "simulator"

@@ -485,13 +485,13 @@ impl Wire for SyntaWire {
 // Fixtures
 // -----------------------------------------------------------------------------------------
 
-/// Oslo — the site `config/field-node.example.yaml` ships.
+/// Vilnius — the site `config/field-node.example.yaml` ships.
 fn site() -> SiteConfig {
     SiteConfig {
-        latitude: 59.9139,
-        longitude: 10.7522,
-        elevation: 25.0,
-        timezone: "Europe/Oslo".to_owned(),
+        latitude: 54.6872,
+        longitude: 25.2797,
+        elevation: 112.0,
+        timezone: "Europe/Vilnius".to_owned(),
     }
 }
 

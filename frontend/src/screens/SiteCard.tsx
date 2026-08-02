@@ -11,9 +11,9 @@ import { Card, Field } from '../ui/Card';
  *
  * Every horizontal coordinate the system computes — the altitude limit that refuses a slew, the
  * alt/az on the pointing readout, the sidereal time behind every hour angle — is derived from
- * `site` in the config. Nothing measures it. So a node shipped with the example's Oslo defaults
- * will happily judge a mount in Lithuania against a horizon 700 km away, and *nothing in the
- * system can notice*: the arithmetic is correct, its input is fiction.
+ * `site` in the config. Nothing measures it. So a node still carrying the example's defaults will
+ * happily judge a mount hundreds of kilometres away against the wrong horizon, and *nothing in
+ * the system can notice*: the arithmetic is correct, its input is fiction.
  *
  * The operator's phone knows. This card is the one place those two numbers can be seen together,
  * which is all it takes for the mismatch to become obvious rather than mysterious — the real case
@@ -161,7 +161,7 @@ function yamlFor(fix: Fix): string {
  * Great-circle distance, in kilometres.
  *
  * Haversine rather than a flat approximation: the interesting case is a node still carrying the
- * example config's Oslo defaults, which is hundreds of kilometres from anywhere it is deployed,
+ * example config's defaults, which may be hundreds of kilometres from where it is deployed,
  * and a flat-earth formula is worst exactly there.
  */
 export function separationKm(a: { latitude: number; longitude: number }, b: { latitude: number; longitude: number }): number {

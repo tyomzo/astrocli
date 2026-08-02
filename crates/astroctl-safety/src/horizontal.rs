@@ -59,7 +59,8 @@ pub struct Site {
     pub latitude_degrees: f64,
     /// Degrees **east**, `[-180, 180]`. The sign is the classic trap: a site west of Greenwich
     /// has a negative longitude here, and getting it backwards moves the whole sky by twice the
-    /// site's longitude — for Oslo, 21.5° of hour angle, which is an hour and a half of the
+    /// site's longitude — for Vilnius, 25.3° of hour angle, which is close to an hour and forty
+    /// minutes of the
     /// wrong sky and looks exactly like a mount that is not tracking.
     pub longitude_degrees: f64,
 }

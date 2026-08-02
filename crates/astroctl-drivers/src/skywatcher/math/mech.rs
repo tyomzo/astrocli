@@ -545,12 +545,19 @@ mod tests {
         // ("The home hour angle is +6h"). Every other fixture in the tree derives its expectation
         // from this arithmetic, so only these two numbers can fail when the arithmetic is wrong.
         //
-        // The site is Oslo, 59.9139° N. It is not stated in the finding, but it is recoverable
+        // The site *as configured during that session* was 59.9139° N — Oslo, the example
+        // config's default at the time. It is not stated in the finding but it is recoverable
         // from it and worth recovering, because it is what pins the second swing's axis angle:
         // the finding records what the *old* model displayed, and only one reading of the
         // commanded moves reproduces those numbers. See below.
+        //
+        // **It must not be updated to follow the shipped default**, which moved to Vilnius on
+        // 2026-08-02. This is a record of an observation, and an observation is tied to the
+        // conditions it was made under; re-baselining it to a latitude the mount was never
+        // operated at would quietly destroy the only fixture that can fail when the arithmetic
+        // is wrong.
         let hemisphere = Hemisphere::Northern;
-        const OSLO_LATITUDE: f64 = 59.9139;
+        const SESSION_LATITUDE: f64 = 59.9139;
 
         // Swing 1 — "DEC axis +90° (dec 90 → 0), RA axis untouched".
         //
@@ -579,7 +586,8 @@ mod tests {
         // the latitude: hour angle +6h at declination 0 is the west point of the horizon at every
         // site on Earth, which is what makes this observation such good evidence — there is no
         // site error, no clock error and no polar-alignment error hiding in it.
-        let (altitude, azimuth) = horizontal(hour_angle, sky.coords.dec.degrees(), OSLO_LATITUDE);
+        let (altitude, azimuth) =
+            horizontal(hour_angle, sky.coords.dec.degrees(), SESSION_LATITUDE);
         assert!(
             altitude.abs() < 1e-9,
             "the tube was on the horizon; the model puts it at altitude {altitude}°"
@@ -605,7 +613,7 @@ mod tests {
             ra_axis: axis(-90.0),
             dec_axis: axis(30.0),
         };
-        let (old_model_altitude, old_model_azimuth) = horizontal(-90.0, 60.0, OSLO_LATITUDE);
+        let (old_model_altitude, old_model_azimuth) = horizontal(-90.0, 60.0, SESSION_LATITUDE);
         assert!(
             (old_model_altitude - 48.5).abs() < 0.05 && (old_model_azimuth - 49.0).abs() < 0.5,
             "this is the reading of the commanded moves that reproduces the display the finding \
@@ -629,7 +637,7 @@ mod tests {
         // it is unmistakable. Declination 60° on the meridian at latitude 59.9139° is 0.086° from
         // straight up — the corrected model lands there, and *no* value of the missing constant
         // other than +6h does.
-        let (altitude, _) = horizontal(hour_angle, sky.coords.dec.degrees(), OSLO_LATITUDE);
+        let (altitude, _) = horizontal(hour_angle, sky.coords.dec.degrees(), SESSION_LATITUDE);
         assert!(
             altitude > 89.9,
             "the tube was pointing straight up; the model puts it at altitude {altitude}°"
