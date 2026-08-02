@@ -1,7 +1,7 @@
 # M3-T07 — Park must target the home counters, not a sky coordinate
 
 **Milestone:** M3 (post-bring-up correction) · **Depends on:** M3-T04 · **Crates:** astroctl-drivers, astroctl-core (config)
-**Size:** S · **Status:** not started
+**Size:** S · **Status:** not started · **raised to urgent 2026-08-02** — see the second observation
 **Spec:** PRD MNT-07, REL-04; SDD §5.2.3; observed 2026-08-02
 
 ## What is wrong
@@ -47,3 +47,30 @@ under-constrains RA by construction, and any target with `dec ≠ 90` is not the
       shaft to vertical and the tube to the polar axis — the pose an operator would set by hand
 - [ ] A configuration whose park position cannot be expressed is rejected at load rather than
       silently under-constraining an axis
+
+
+## Second observation, 2026-08-02: 215° of wind, and a park that reported success
+
+Manual slewing wound the RA axis **215.6° from home** — more than half a turn. The operator pressed
+Home. The app then reported `parked: true`, `dec 90`, tube at the pole, and the axis stayed where it
+was. Every one of those statements was true; together they were useless.
+
+This is the same degeneracy as the first observation, in its worst form: park's sky target was
+already satisfied, so nothing moved, and the interlock latched over a mount wound half a turn from
+its home pose. Recovery was by hand — power off, loosen the clutch, unwind, power on.
+
+**A second gap, and the more dangerous one: manual slew has no travel limit.** Nothing bounds how
+far an axis can be driven from home. On a bare mount that is untidy; with a telescope, a power lead
+and a USB cable attached it is how a cable is torn out or a tube is driven into the pier. The mount
+itself will not stop you — Synta motion has no soft limits — and the operator holding a D-pad has no
+indication of accumulated travel at all.
+
+**So this task grows a sibling requirement**, and both belong to the same fix because they share a
+cause (nothing in the system tracks distance from home as a quantity worth bounding):
+
+- Park drives both axes to the home counter (the original scope).
+- Manual slew is bounded: refuse — or at minimum warn, redundantly encoded per §5.9 — beyond a
+  configured travel from home. The number is a property of the rig's cabling, so it belongs in
+  config, and its default should be conservative enough to protect a cabled mount.
+- The PWA shows accumulated travel from home while a hold is in progress. An operator cannot
+  otherwise know, and the counter is the only thing that does.
