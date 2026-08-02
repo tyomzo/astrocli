@@ -24,6 +24,46 @@ const status = (data: Record<string, unknown>): unknown => ({
   data: { state: 'idle', tracking: false, slewing: false, parked: false, ...data },
 });
 
+const position = (data: Record<string, unknown>): unknown => ({
+  v: 1,
+  ts,
+  topic: 'mount.position',
+  data: { ra: 5.5, dec: -5.4, alt: 47.2, az: 128.4, pier_side: 'west', ...data },
+});
+
+describe('mount.position travel from home', () => {
+  it('reads both axes when the node sends them', () => {
+    const parsed = parseEvent(position({ ra_travel: 215.6, dec_travel: -0 }));
+    if (parsed?.topic !== 'mount.position') throw new Error('expected mount.position');
+    expect(parsed.data.ra_travel).toBe(215.6);
+    expect(parsed.data.dec_travel).toBe(-0);
+  });
+
+  it('still parses a frame from a node that does not send the fields at all', () => {
+    // The additive half of the M3-T07 schema change, pinned the way `tracking_mode` is: refusing
+    // the frame would blank the pointing panel against a node that is working perfectly.
+    const parsed = parseEvent(position({}));
+    if (parsed?.topic !== 'mount.position') throw new Error('expected mount.position');
+    expect(parsed.data.ra_travel).toBeNull();
+    expect(parsed.data.dec_travel).toBeNull();
+  });
+
+  it('reads an explicit null as "this mount has no home reference"', () => {
+    const parsed = parseEvent(position({ ra_travel: null, dec_travel: null }));
+    if (parsed?.topic !== 'mount.position') throw new Error('expected mount.position');
+    expect(parsed.data.ra_travel).toBeNull();
+  });
+
+  it('refuses a non-finite travel rather than passing it through to a readout', () => {
+    // JSON has no NaN, but a node with a defect could send a string, and `Number('x')` in a
+    // careless parser is NaN — which formats as "NaN°" beside a D-pad that is winding a cable.
+    const parsed = parseEvent(position({ ra_travel: '215.6', dec_travel: 12 }));
+    if (parsed?.topic !== 'mount.position') throw new Error('expected mount.position');
+    expect(parsed.data.ra_travel).toBeNull();
+    expect(parsed.data.dec_travel).toBe(12);
+  });
+});
+
 describe('mount.status tracking_mode', () => {
   it('reads each of the three rates', () => {
     for (const rate of ['sidereal', 'lunar', 'solar'] as const) {
@@ -121,12 +161,15 @@ describe('the closed error vocabulary', () => {
     // specified with no producer while the proxy answered `DEVICE_TRANSPORT`; 26 → 27 is
     // `MOUNT_LINK_LOST` (M1-T17), REL-02's watchdog verdict, which is the mirror image of T14's
     // gap — there the code had no producer, here the config key `mount.serial.heartbeat_misses`
-    // had no *consumer*. The number is here for the same reason it is in `ErrorCode::ALL`'s test:
-    // a frozen contract should not grow without someone noticing.
-    expect(ERROR_CODES).toHaveLength(27);
+    // had no *consumer*. 27 → 28 is `LIMIT_TRAVEL` (M3-T07): manual slew had no bound on how far
+    // it could wind an axis from the home pose, and an operator reached 215.6° holding the D-pad.
+    // The number is here for the same reason it is in `ErrorCode::ALL`'s test: a frozen contract
+    // should not grow without someone noticing.
+    expect(ERROR_CODES).toHaveLength(28);
     expect(ERROR_CODES).toContain('ABORTED');
     expect(ERROR_CODES).toContain('NODE_UNREACHABLE');
     expect(ERROR_CODES).toContain('MOUNT_LINK_LOST');
+    expect(ERROR_CODES).toContain('LIMIT_TRAVEL');
     expect(new Set(ERROR_CODES).size).toBe(ERROR_CODES.length);
   });
 

@@ -26,7 +26,15 @@ const POSITION: Slot<MountPosition> = {
   state: 'observed',
   at: T0,
   ts: new Date(T0).toISOString(),
-  value: { ra: 5.588_25, dec: -5.391, alt: 47.2, az: 128.4, pier_side: 'west' },
+  value: {
+    ra: 5.588_25,
+    dec: -5.391,
+    alt: 47.2,
+    az: 128.4,
+    pier_side: 'west',
+    ra_travel: null,
+    dec_travel: null,
+  },
 };
 
 function mount(over: Partial<MountStatus> = {}): Slot<MountStatus> {

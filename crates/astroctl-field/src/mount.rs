@@ -266,13 +266,20 @@ const UNKNOWN_PIER: PierSide = PierSide::Unknown;
 /// "it says 20° but it will not slew" cannot happen.
 fn to_wire_position(safety: &SafeMount, pos: RaDec) -> event::MountPosition {
     let horizontal = safety.horizontal(pos);
-    event::MountPosition::new(
+    let wire = event::MountPosition::new(
         pos.ra.hours(),
         pos.dec.degrees(),
         Some(horizontal.alt.degrees()),
         Some(horizontal.az.degrees()),
         UNKNOWN_PIER,
-    )
+    );
+    // Travel from the mechanical home pose (M3-T07), when the driver has a home to measure from.
+    // Read *after* `position()`, which is what refreshed the driver's counters — the same
+    // ordering the safety wrapper's own travel check relies on. A mount with no home reference
+    // reports `null` and the PWA renders an explicit unknown rather than a plausible zero.
+    safety.axis_travel().map_or(wire, |travel| {
+        wire.with_travel(travel.ra.degrees, travel.dec.degrees)
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1544,6 +1551,15 @@ mod tests {
         // driver*, and no Phase 1 driver reports it. Guessing "east" would be worse than saying
         // so, because the meridian limit is documented as consuming this value.
         assert_eq!(body["pier_side"], "unknown");
+
+        // Travel from home is on the wire and is explicitly `null` here, for the same kind of
+        // reason (M3-T07): this node runs the simulator, which holds an `RaDec` and has no axis
+        // counters, so it has no home to measure from. The keys have to be *present* and null —
+        // an absent key and a null one are the same thing to the client's parser, but a `0.0`
+        // would tell the operator the axes are at home when nothing knows where they are.
+        assert!(body.get("ra_travel").is_some(), "no ra_travel key: {body}");
+        assert!(body["ra_travel"].is_null(), "{body}");
+        assert!(body["dec_travel"].is_null(), "{body}");
 
         // The number on the wire is the number the safety layer computed, not a second opinion.
         let position = state.mount.device.position().await.expect("a position");

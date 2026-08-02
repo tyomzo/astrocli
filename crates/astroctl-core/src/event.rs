@@ -468,6 +468,27 @@ pub struct MountPosition {
     #[serde(rename = "az")]
     az_degrees: Option<f64>,
     pier_side: PierSide,
+    /// Degrees the right-ascension **axis** has been driven from the mechanical home pose, or
+    /// `null` from a mount with no home reference (M3-T07).
+    ///
+    /// # Not a coordinate, and not folded
+    ///
+    /// A mechanical quantity in a payload that is otherwise about the sky — the same company
+    /// `pier_side` keeps, and for the same reason: it is not recoverable from `ra`/`dec`. It is
+    /// *accumulated rotation*, so an axis wound 215.6° past home reports 215.6 rather than the
+    /// congruent −144.4, because what it exists to tell the operator is how much winding the
+    /// cables have taken and not where the tube ended up.
+    ///
+    /// It is here rather than on `mount.status` because it is a measurement that changes
+    /// continuously, and `mount.status` is published on change while this is published every
+    /// second — an operator holding a D-pad needs a number that moves while they hold it.
+    #[serde(rename = "ra_travel")]
+    ra_travel_degrees: Option<f64>,
+    /// The declination axis's travel. Nullable together with
+    /// [`ra_travel_degrees`](Self::ra_travel_degrees) — they come from one read, so one being
+    /// known and the other not is a state that cannot arise.
+    #[serde(rename = "dec_travel")]
+    dec_travel_degrees: Option<f64>,
 }
 
 impl MountPosition {
@@ -486,7 +507,33 @@ impl MountPosition {
             alt_degrees,
             az_degrees,
             pier_side,
+            ra_travel_degrees: None,
+            dec_travel_degrees: None,
         }
+    }
+
+    /// Attach the axes' travel from home (M3-T07).
+    ///
+    /// A separate builder rather than two more positional parameters: `new` already takes four
+    /// bare `f64`s in two different units, and a sixth and seventh would be two more chances to
+    /// transpose a pair that the compiler cannot tell apart.
+    #[must_use]
+    pub const fn with_travel(mut self, ra_degrees: f64, dec_degrees: f64) -> Self {
+        self.ra_travel_degrees = Some(ra_degrees);
+        self.dec_travel_degrees = Some(dec_degrees);
+        self
+    }
+
+    /// The right-ascension axis's travel from home in degrees, or `None` if unknown.
+    #[must_use]
+    pub const fn ra_travel_degrees(&self) -> Option<f64> {
+        self.ra_travel_degrees
+    }
+
+    /// The declination axis's travel from home in degrees, or `None` if unknown.
+    #[must_use]
+    pub const fn dec_travel_degrees(&self) -> Option<f64> {
+        self.dec_travel_degrees
     }
 
     /// Right ascension, hours.
@@ -1132,19 +1179,38 @@ mod tests {
     #[test]
     fn golden_mount_position_event() {
         let event = MountPosition::new(5.5675, -5.3897, Some(41.25), Some(132.75), PierSide::West)
+            .with_travel(215.6, 12.0)
             .into_event_at(fixed_ts());
 
         assert_eq!(
             serde_json::to_string(&event).expect("event serializes"),
-            r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":41.25,"az":132.75,"dec":-5.3897,"pier_side":"west","ra":5.5675}}"#
+            r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":41.25,"az":132.75,"dec":-5.3897,"dec_travel":12.0,"pier_side":"west","ra":5.5675,"ra_travel":215.6}}"#
         );
+    }
+
+    /// Travel is **not** folded on the wire, pinned as a golden because a serializer or a later
+    /// refactor that normalised it would be silently wrong (M3-T07).
+    ///
+    /// 215.6° and −144.4° are the same mechanical angle and very different amounts of cable. The
+    /// number exists to tell an operator how much winding the axis has taken, so a value past
+    /// half a turn has to survive the trip to the browser as a value past half a turn.
+    #[test]
+    fn mount_position_travel_past_half_a_turn_reaches_the_wire_unfolded() {
+        let event = MountPosition::new(0.0, 90.0, None, None, PierSide::Unknown)
+            .with_travel(215.6, 0.0)
+            .into_event_at(fixed_ts());
+        let json = serde_json::to_string(&event).expect("event serializes");
+        assert!(json.contains(r#""ra_travel":215.6"#), "{json}");
+        assert!(!json.contains("144.4"), "{json}");
     }
 
     /// The shape the mount facade emits until M1-T05's topocentric transform wraps it.
     ///
     /// Pinned as a golden because `null` here is a contract, not an accident: the PWA renders
     /// "—" for an unknown altitude, and a serializer that skipped the key instead would make the
-    /// field indistinguishable from a node too old to have it.
+    /// field indistinguishable from a node too old to have it. The same holds for
+    /// `ra_travel`/`dec_travel`, which are `null` from a mount with no home reference — the
+    /// simulator, or any INDI or Alpaca device (M3-T07).
     #[test]
     fn golden_mount_position_with_no_horizontal_transform() {
         let event = MountPosition::new(5.5675, -5.3897, None, None, PierSide::Unknown)
@@ -1152,7 +1218,7 @@ mod tests {
 
         assert_eq!(
             serde_json::to_string(&event).expect("event serializes"),
-            r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":null,"az":null,"dec":-5.3897,"pier_side":"unknown","ra":5.5675}}"#
+            r#"{"v":1,"ts":"2026-07-29T21:04:05.123Z","topic":"mount.position","data":{"alt":null,"az":null,"dec":-5.3897,"dec_travel":null,"pier_side":"unknown","ra":5.5675,"ra_travel":null}}"#
         );
     }
 
