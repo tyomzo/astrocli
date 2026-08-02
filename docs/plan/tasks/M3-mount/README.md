@@ -20,3 +20,15 @@ verified against the EQMOD source before first powered command (PRD §4.2 note).
 | M3-T03 | Motor controller + position math | T01 | yes |
 | M3-T04 | SkywatcherMount driver assembly | T02, T03 | yes (mock) |
 | M3-T05 | HIL bring-up (hardware, operator present) | T04 + M2 complete | no |
+
+Three addenda, each raised by what the hardware did rather than by the plan:
+
+| Task | Title | Depends on | CI-able |
+|------|-------|-----------|---------|
+| M3-T06 | Home hour angle is +6h, not 0 | T05 | yes |
+| M3-T07 | Park to home counters; travel from home bounded | T05 | yes |
+| M3-T08 | Body frame Layer 1: the mount knows its branch | T06, T07 | yes |
+
+T06 and T08 are both failures of the same kind — the mechanical↔celestial map being wrong or being
+consulted in the wrong direction — and both were found by the mount moving somewhere the software
+did not expect. ADD ADR-14 and SDD §5.4.1 exist to stop a third.

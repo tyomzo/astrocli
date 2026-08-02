@@ -1,9 +1,9 @@
 # AstroCtl — Architecture Design Document
 
 **Document ID:** ASTROCTL-ADD-001
-**Version:** 1.5.1
+**Version:** 1.6.0
 **Author:** Artiom
-**Date:** 2026-07-29
+**Date:** 2026-08-02
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Architecture Definition process, §6.4.4); architecture description per ISO/IEC/IEEE 42010:2022
 **Governing requirements:** ASTROCTL-PRD-001 v1.18.0
@@ -31,6 +31,8 @@
 **Change note (1.5.0):** §4's context diagram already showed `HTTPS/WSS` on the operator link but never said where TLS terminates or why it was not optional. Both are now recorded: termination is **in `astroctl-field`**, because a cloud proxy would put a WAN round trip in front of every live-view frame on the cellular link the two-node split exists to work around (and contradicts ARC-06), while a sidecar adds a second process to supervise on a Pi already running the mount and camera. The reason it is mandatory is browser secure-context gating of wake lock, service workers and installability — not confidentiality, which the VPN already provides. Aligns with PRD 1.16.0's SEC-05/06/07/08.
 
 **Change note (1.5.1):** §5.5 said the container topology exercises "two independent tokens". It does not, and neither does any deployment: PRD §8.1 and §8.2 both name `ASTROCTL_TOKEN`, SDD §4.5 calls it the shared token, and ADR-07 has the field node forward the operator's credential when it proxies — there is no key anywhere for a second one. Corrected during M0-T08, which is the task that had to build against it.
+**Change note (1.6.0):** **ADR-14 added** — the celestial and body frames are separated, and motion limits are evaluated in the body frame. The architecture had no position on this, so the safety layer inferred mechanical direction from celestial coordinates; that inference is unsound across the pier branch and was measured failing on hardware (2026-08-02, DEC+ unprotected for 180°). It also records why collision protection is not reachable from the celestial frame at all, which is the architectural half of SDD §5.4.3.
+
 
 ---
 
@@ -457,6 +459,7 @@ Per 12207 §6.4.4.3(d) — decisions, with alternatives considered and the reaso
 | ADR-11 | E-stop and safety limits live in the mount facade below the API | Enforcement in API layer or UI | Every caller passes through, including future scripting (MNT-15); e-stop path has a dedicated priority lane to the serial task (PRF-12) |
 | ADR-12 | React PWA served by the field node; WS-first state, REST for commands. **Android/Chrome is the supported target**; iOS untested, so EXT-06 is advisory and Android-only APIs (Screen Wake Lock, `beforeinstallprompt`) are permitted. Stack detailed in SDD §5.9 | Native app; iOS-compatible-subset discipline | ARC-02/ARC-14 mandates. The iOS-subset discipline was rejected because EXT-06's motivation was iOS PWA limitations and there is no iOS device in the deployment — paying its cost would buy an option nobody holds, while giving up Wake Lock, which matters when the operator watches a live view for minutes at a time |
 | ADR-13 | Worker IPC: versioned JSON over stdio, frames passed by filesystem path, workers supervised (spawn, health-ping, auto-restart) by the stack backbone. This IPC exists only inside the stacking server, between the Rust backbone and its Python child processes — it never crosses the network; field→stack frame delivery is HTTP per ADR-05, and the frame is on the stack's local disk before any worker sees it | gRPC/ZeroMQ (extra infrastructure for two co-located processes); PyO3 embedding (brings the GIL and Python crash domain into the backbone process — defeats the purpose) | Same-host processes need no network transport; stdio+paths is the rifflab-proven minimum; crash isolation preserved; protocol versioning catches drift at startup |
+| ADR-14 | **Two coordinate frames, with the body frame authoritative for motion.** The *celestial* frame (RA/Dec/AltAz — the mount is a dimensionless point) and the *body* frame (axis angles and branch — the mount is an object with extent and history) are both first-class. Every motion limit is evaluated by advancing **body** state and projecting into the celestial frame, never by inverting a celestial position back into a motion. Drivers that hold body state report it through an optional HAL surface; the celestial frame remains the HAL's lingua franca. SDD §5.4.1–§5.4.3 | (a) Celestial-only, deriving mechanical direction from RA/Dec — the design as built through M3-T06; (b) body-only, exposing axis counts as the primary HAL position and converting at the edges; (c) full kinematic model in the HAL for every driver | (a) is **not merely buggy but structurally incapable**: body→celestial is many-to-one (each sky position has two mechanical poses; at the pole, infinitely many), so the projection discards exactly the information a directional limit needs, and the layer is then forced to guess which way an axis moves. Demonstrated on hardware 2026-08-02 — DEC+ from home had no altitude protection for a full 180°, ending with the tube aimed 60° below the horizon. It is also blind by construction to a whole hazard class: 180° of RA at the home pose is *zero* celestial change and a half-turn of the counterweight. (b) breaks ADR-02 — INDI and ASCOM Alpaca mounts expose no counters, so a body-primary HAL cannot express them. (c) prices every future adapter at a kinematic model it has no data for. The selected split keeps the HAL portable while making body state available exactly where it exists, and gives collision protection (SDD §5.4.3) a foundation it cannot otherwise have |
 
 ## 8. Candidate Architectures Evaluated
 

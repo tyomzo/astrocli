@@ -1,12 +1,12 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.30.0
+**Version:** 1.31.0
 **Author:** Artiom
 **Date:** 2026-08-02
 **Status:** Draft
 **Conformance:** ISO/IEC/IEEE 12207:2017 (Design Definition process, §6.4.5); description conventions informed by IEEE 1016
-**Governing documents:** ASTROCTL-PRD-001 v1.19.0 (requirements), ASTROCTL-ADD-001 v1.5.0 (architecture)
+**Governing documents:** ASTROCTL-PRD-001 v1.19.0 (requirements), ASTROCTL-ADD-001 v1.6.0 (architecture)
 **Change note (1.1.1):** Governing pins advanced. §5.7 no longer names libraw as the RAW decoder — selection moved to the M2-T01 spike (PRD §7).
 **Change note (1.1.2):** Pins advanced to PRD v1.8.0 / ADD v1.2.2. The §5.7 decoder is now `rawler`, selected on build evidence; M2-T01 validates its timing and memory rather than choosing.
 **Change note (1.0.1):** Manual slew redesigned as a TTL-based dead-man's switch (§5.8.1, §5.4, T-SLW-1) — a lost link or stuck touch can no longer sustain motion.
@@ -287,6 +287,8 @@ contact was lost" is the sentence that changes what the operator does next, and 
 only from the last status the node could read, since by definition it cannot read another.
 
 **Change note (1.30.0):** §5.2.3's mech↔sky map is corrected by six hours (M3-T06). The section
+**Change note (1.31.0):** **§5.4.1–§5.4.3 added — the celestial and body frames, and which frame each limit belongs to (ADR-14).** §5.4 specified *what* is enforced and was silent on *in which frame*, so `SafeMount::lookahead` predicted motion celestially and assumed `north ⇒ declination increases` — true on the normal branch only. The home pose is the pole, so a declination move crosses branches on its first step and the check then permits unconditionally; measured on hardware 2026-08-02 with the tube ending 60° below the horizon. §5.4.1 states the rule (advance body state, project; never invert), §5.4.2 specifies Layer 1 (axis angles and branch, making the long-unimplemented `pier_side` of §5.2.3 truthful) and shows the fix is one sign on one axis, and §5.4.3 defers Layer 2 (rig geometry, collision) while fixing the four interface points that stop the two layers from growing contradictory answers. Records that 180° of RA at the home pose is zero celestial change and a half-turn of counterweight — a hazard class no celestial predicate can express.
+
 gave `HA = s·h`, making both counters at `0x800000` the meridian; the home pose is six hours west
 of it, because the counterweight shaft *is* the declination axis and hangs in the meridian plane,
 so swinging the tube about it sweeps east–west and can never reach the meridian from home.
@@ -1129,6 +1131,146 @@ Watchdogs (one task, 1 Hz tick): serial heartbeat freshness; camera thread liven
 5. **A manual slew has no target, so MNT-15's check is directional.** "Goto/slew targets below the limit are rejected" has an obvious positional reading for slew — refuse while below the limit — and that reading traps the mount underneath its own horizon limit with no way to drive it back up, which an operator meets at 2 a.m. after stopping a goto halfway. The check is on where the axis is *heading*, one degree along: descending below the limit is refused, climbing out of it is not.
 
 6. **The wrapper's background watch holds an `EventBus` handle**, so it falls under the shutdown invariant of §7 step 5 that the M1-T03 follow-up made a hard rule — no sender may outlive shutdown, or the session log cannot flush. The watch is therefore stopped in `Drop` rather than by a `shutdown()` the binary must remember to call, which is how the first two such handles were missed.
+
+#### 5.4.1 Two frames, and which one each limit belongs to
+
+The system reasons about the mount in two frames, and until 2026-08-02 only one of them was named.
+
+**Celestial.** RA/Dec, hour angle, AltAz. The mount is a dimensionless point at the origin and the
+only fact that exists is the direction the tube looks. Horizon and meridian limits, targets, and
+everything the operator calls "pointing" are written here.
+
+**Body.** The pair of mechanical axis angles `(h, d)` of §5.2.3 plus the branch they sit on. The
+mount is an object with extent and with a history — a counterweight that sweeps, a tube that can
+reach the tripod, cables that wind, axes that have been somewhere before. Travel limits, park, and
+every hazard involving the metal touching something are written here.
+
+**The two are not interchangeable, and the asymmetry is the whole point.** §5.2.3's
+`mech_to_sky` is a *function*: every body state has exactly one celestial position. Its inverse is
+not. Each celestial position is reachable in two body poses — the pier branch — and at `dec = ±90°`
+in a one-parameter family, because every `h` names the pole. Projecting into the celestial frame
+therefore **discards the branch**, which is exactly the fact a directional limit needs in order to
+know which way an axis is about to move. A safety layer that holds only a celestial position has
+not merely lost precision; it has lost the ability to answer the question it exists to ask.
+
+The rule that follows, and the one this section exists to state:
+
+> A limit is evaluated by advancing **body** state under the commanded motion and projecting the
+> result into whichever frame the limit is written in. No limit may infer a mechanical direction
+> from a celestial position. body → celestial is a function and may be composed freely; the
+> inverse is not a function and may not be taken.
+
+| Limit | Predicate written in | What it needs from the body frame |
+|---|---|---|
+| Altitude (MNT-15) | celestial | the direction `dec` moves for the commanded direction — i.e. the branch |
+| Meridian (MNT-16) | celestial | pier side (§5.4, obligation 3) |
+| Travel from home (M3-T07) | body | unfolded per-axis travel and the homeward direction |
+| Collision (§5.4.3) | body | rig geometry — **not modelled; no protection exists** |
+
+**The defect that produced this section.** `SafeMount::lookahead` predicted one degree of motion by
+adding a delta to the *celestial* position and hardcoding `Direction::North ⇒ declination
+increases`. That holds on the normal branch only. The home pose **is** the pole, so a declination
+move in the north sense crosses to the flipped branch on its first step, where the same command
+decreases declination — and the predictor went on reporting a tube climbing back toward the pole
+while the real one descended. The descent guard of obligation 5 (`ahead_altitude <= here_altitude`,
+which exists so an axis below the limit can still be driven back up) is then never satisfied, so
+the check does not merely mis-estimate: it **permits unconditionally**. Measured on the operator's
+HEQ5: DEC in the north sense ran the full 180° travel limit, ending with the tube aimed 60° below
+the horizon, while the south sense stopped correctly at 72.6° where the 15° floor sits. The travel
+limit — added the same day for cable reasons — was the only thing that stopped it. Nothing here was
+a coding slip; the layer was asked a question its frame cannot answer.
+
+**And a second observation, which is why the fix cannot stop at the altitude check.** From the home
+pose the tube lies *along* the polar axis, so rotating the right-ascension axis turns the tube about
+its own pointing direction: 180° of RA is **zero** celestial change and a half-turn of the
+counterweight. Every celestial predicate that could ever be written is blind to it. This is not a
+gap in the limits chosen; it is a hazard class the celestial frame cannot express, and it is the
+argument for §5.4.3 existing at all.
+
+Two pieces of the design had already reached this conclusion locally without generalising it:
+§5.2.3's correction 6 makes `park` a body-frame operation because no sky coordinate can name the
+home pose, and M3-T07's travel check takes its homeward direction **from the driver** rather than
+deriving it, because only the driver knows the branch. Both are instances of the rule above.
+
+#### 5.4.2 Layer 1 — body state
+
+Scope: the mount knows its two axis angles and which branch it is on, and says so. No geometry, no
+dimensions, no notion that a tube has length. This is the whole of Layer 1.
+
+**HAL surface.** `MountDevice::axis_travel() -> Option<MountTravel>` (M3-T07) is the precedent and
+the pattern: synchronous, cached, and `Option` because ADR-02 keeps INDI and ASCOM Alpaca adapters
+possible and neither exposes axis counters. Layer 1 adds the branch on the same terms. The celestial
+frame remains the HAL's lingua franca — `position()` still returns `RaDec` — and body state stays an
+optional capability alongside it, per ADR-14.
+
+**What the safety wrapper does with it, and how little that is.** Differentiating §5.2.3's map:
+
+```
+∂dec/∂d  =  −s  (normal branch)      +s  (flipped branch)     ← sign inverts
+∂HA/∂h   =   s  (both branches)                               ← the flip adds 180°, not a sign
+```
+
+So the **right-ascension axis needs nothing from Layer 1** — its direction mapping is
+branch-invariant, and the RA arms of `lookahead` are correct as written. Only the **declination
+axis** needs the branch, and it needs one bit of it. That bounds the change to a sign, applied in
+one place, rather than a rewrite of the prediction path — and it is a falsifiable claim, not a
+convenience: if the RA arms ever need the branch, this derivation is wrong.
+
+**`pier_side` is the live defect.** §5.2.3 already specifies the derivation (`d < 0` implies the
+flipped state) and §5.4 obligation 3 already records that no Phase 1 driver performs it, so
+`mount.position` reports `unknown` — as it does on hardware today. Layer 1 is that derivation being
+done and reported. No new event topic and no new field: `mount.position.pier_side` exists and
+becomes truthful.
+
+**Degradation, stated rather than papered over.** A driver that reports no body state cannot be
+given a directional declination guarantee — that is a property of the frame, not of the
+implementation. The wrapper falls back to the positional reading of MNT-15 (refuse while below the
+limit), which is safe but can trap an axis beneath its own horizon limit: precisely the failure
+obligation 5 introduced the directional check to avoid. The limitation is accepted in the manner of
+obligation 3's meridian fallback, and it is a contract for future adapters rather than a live
+degradation, because Phase 1's only real mount driver derives the branch from a counter it already
+reads.
+
+*Alternative considered — observing the sense instead of deriving it.* The 2 Hz watch holds
+consecutive positions and could measure which way declination is actually moving, needing no branch
+at all. Rejected as the primary mechanism because it protects nothing until two polls of motion have
+elapsed (up to 1 s of unchecked slew) and the pre-flight check has no motion history whatsoever. It
+remains the natural way to back the fallback above for a bodiless driver, and is recorded here so
+that it is chosen deliberately if it ever is.
+
+#### 5.4.3 Layer 2 — body geometry (deferred; its interface fixed here)
+
+What it would model: the optical tube's length and its offset from the declination axis, the
+counterweight shaft, the tripod or pier envelope, and cable anchor points. What it would protect:
+tube against tripod, counterweight against leg, and cable wrap on evidence rather than on the
+proxy Phase 1 ships.
+
+**Why it is deferred, honestly.** It needs measurements of one specific rig that nobody has taken,
+and **no requirement calls for it** — MNT-15 and MNT-16 are celestial, and M3-T07's
+`max_travel_from_home_degrees` is a cable-wind proxy whose shipped 180° is a principled ceiling
+rather than a measurement. Calling it collision protection would be the same error as a validated
+config key that nothing reads. Phase 1's actual position is the one `spikes/skywatcher-heq5/FINDINGS.md`
+records after the 2026-08-01 tripod strike: the operator's eyes are the only position sensor.
+
+**The contract that keeps Layer 1 from contradicting Layer 2** — the reason both are specified in
+one change rather than one now and one later:
+
+1. **One producer of body state.** Layer 2 *consumes* the state Layer 1 publishes; it never
+   re-derives axis angles or branch from anything. There is one representation and one owner.
+2. **A limit is a predicate over a predicted body state, and Layer 2 adds predicates only.** It
+   introduces no second prediction mechanism, because a second predictor is a second answer, and
+   two answers about whether a motion is safe is worse than one. M3-T07's travel check is the first
+   such predicate and its shape is the template: read state, evaluate, state the direction out.
+3. **Layer 2 changes no HAL signature.** Rig geometry is configuration about the installation, not a
+   device capability — a mount cannot know the length of the tube bolted to it. It enters through
+   config, alongside `mount.limits`, never through `MountDevice`.
+4. Therefore Layer 1 is a strict prerequisite of Layer 2 and cannot be invalidated by it. Anything
+   Layer 2 needs from the mount, Layer 1 already provides; anything Layer 2 adds, it adds above the
+   HAL.
+
+A design that satisfies those four points can be built whenever the rig is measured, without
+revisiting Layer 1 or the HAL. A design that violates point 2 is the failure mode this section was
+written to prevent.
 
 ### 5.5 Frame store & session layout (`astroctl-session`)
 
