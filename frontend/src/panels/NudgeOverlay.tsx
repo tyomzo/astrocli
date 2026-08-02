@@ -108,14 +108,11 @@ export function TravelReadout({ position }: { position: Slot<MountPosition> }): 
 }
 
 export function NudgeOverlay({ onDismiss }: { onDismiss: () => void }): ReactNode {
-  // Level 2 (8x sidereal), not 3. Level 3 is 64x, and on this HEQ5 the motor stalls there
-  // unloaded: it ramps, the rotor loses sync, the axis buzzes and stops while the *counter keeps
-  // counting the steps that never happened* — open loop, so nothing in software can see it. The
-  // operator heard it. Levels 1 and 2 were measured turning cleanly (106 and 839 counts/s), so
-  // the default is the fastest rate proven to move metal, and the ladder above it is left
-  // reachable because the threshold is a property of this mount, its balance and its load — the
-  // operator finds it by ear, which is what the labels below are for. FINDINGS' E11 was never
-  // run; this is it, run by an operator's thumb.
+  // Level 2 (8x sidereal) as the default: a nudge is a centering motion, and 8x is the fastest
+  // rate measured turning cleanly (839 counts/s) with margin below the mount's standing-start
+  // limit (E16: 32x turns, 39x jams). The ladder above stays reachable because the stall
+  // threshold is a property of this mount, its balance and its load — the operator's ears remain
+  // the only rotor sensor in the system.
   const [speed, setSpeed] = useState<SlewSpeed>(2);
   const [failure, setFailure] = useState<RequestFailure | null>(null);
   // Subscribed here rather than passed down from `ImageSurface`: `mount.position` ticks at 1 Hz
@@ -266,10 +263,12 @@ function NudgeButton({
  * What each level actually commands, in multiples of the sidereal rate.
  *
  * Unlabelled dots are a rate control that cannot be reasoned about: an operator who hears a stall
- * needs to know whether the next rung down is a little slower or eight times slower. These are the
- * EQMOD ladder's own values, and only the first two are measured turning this mount (106 and 839
- * counts/s); the rest are reachable and unproven, which is exactly the information the labels
- * carry.
+ * needs to know whether the next rung down is a little slower or eight times slower. This is the
+ * ladder of rates this mount was *heard to start*: E16 (2026-08-02) measured that it will not
+ * begin an unbounded slew above the rotor's standing-start limit — 32× turns, 39× jams, and a
+ * driver-side ramp of the running axis is refused by the motor controller — under any speed
+ * class. Faster manual motion is coming back as firmware-ramped bounded moves (the goto
+ * mechanism, measured cruising at 835×), not as bigger numbers on this ladder.
  */
 const SPEED_LABEL: Record<SlewSpeed, string> = {
   1: '1×',
@@ -280,13 +279,10 @@ const SPEED_LABEL: Record<SlewSpeed, string> = {
 };
 
 /**
- * Rungs this mount was heard to stall on (`spikes/skywatcher-heq5/FINDINGS.md`, E11).
+ * Rungs this mount was heard to stall on (`spikes/skywatcher-heq5/FINDINGS.md`, E11, E16).
  *
- * **Empty since 2026-08-02**, because the ladder moved rather than the warning. E11 heard 1× and 8×
- * turn and 64× jam; the driver's ladder was EQMOD's — 1, 8, 64, 400, 800 — so three of the five
- * rungs promised motion this mount does not make. They now read 1, 8, 16, 24, 32, all of which sit
- * below the speed-class crossover at 38.8× that is the suspected cause of the jam. No rung is known
- * to stall, so none is marked.
+ * **Empty since 2026-08-02**: every rung on the ladder is at or below the 32× the mount was heard
+ * to start cleanly, so none promises motion it refuses.
  *
  * Kept as a mechanism rather than deleted: the marking is how an operator carries forward a warning
  * the instruments cannot give them. A Synta counter counts *commanded* steps, so a stalled axis
@@ -320,7 +316,7 @@ function SpeedSelector({
           <span aria-hidden="true" className="text-lg leading-none">
             {level <= speed ? '●' : '○'}
           </span>
-          <span aria-hidden="true" className="font-mono text-[0.6rem] leading-tight">
+          <span aria-hidden="true" className="font-mono text-xs leading-tight">
             {SPEED_LABEL[level]}
             {SPEED_STALLED.has(level) && '!'}
           </span>

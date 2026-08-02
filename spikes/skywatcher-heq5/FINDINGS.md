@@ -413,6 +413,47 @@ override directory is user-writable) while end-to-end hotplug suppression remain
 
 # PHASE 5 — characterisation (E12, E13, E14)
 
+## E16 — the standing start is the wall, and software cannot ramp past it — 2026-08-02
+
+E11's discriminating pair, run by ear, plus a ramp attempt and its telemetry. Three results, one
+dead end, and the design that follows from them.
+
+**Measured:**
+
+| what was commanded | class | result |
+|---|---|---|
+| 32× sidereal, unbounded slew | low | **turns** |
+| 39× sidereal, unbounded slew | high | **jams** — 21% faster than the rung that turns |
+| high-class start at a 16×-equivalent period, then software-ramped `I` frames toward 64/400/800× | high | **buzzes without movement, all three rungs** |
+
+During the buzzing, the counter — which counts *commanded* steps — ran at 140–630× sidereal
+within seconds, far past the software ramp's intended schedule (16× at start, ×1.6 per 150 ms).
+Whatever the motor controller does with `I` frames while running a high-speed slew, it is not
+"apply the requested rate": the commanded rate ran away from the schedule that requested it.
+
+**From the reference implementations** (indi-eqmod `skywatcher.cpp`, indi `skywatcherAPI.cpp`):
+
+* EQMOD's high-speed threshold is **128×**, not this driver's crossover-derived 38.8× — so the
+  "previously workable" EQMOD ladder ran its 64× rung in the **low** class. E11's 64× jam was in
+  the high class; the two are consistent.
+* EQMOD's own comment: *"Can not change speed while motor is running and in goto or highspeed
+  slew."* The software-ramp-by-`I`-frames design is illegal by the protocol's de-facto spec.
+* Both drivers start high-speed slews cold at the target rate, stop-first, no ramp. That works on
+  the mounts they support; on this one, 39× from standstill jams.
+
+**What remains genuinely unknown (E17, ten minutes by ear + counter):** whether a *single fixed*
+gentle high-class period starts this mount — tonight's gentle starts always had ramp frames in
+flight 150 ms later, so the clean data point was never taken. And what rate the counter reports
+for a fixed high-class period, which would pin the high-mode period semantics this driver has
+never actually verified (E10 verified the low class only; a goto ignores the register entirely).
+Also worth one rung: 64× pinned to the **low** class, which is what EQMOD actually ran for years.
+
+**The design decision this buys:** on firmware 2.04.01 the only primitive with a working
+acceleration profile is the bounded goto — measured cruising at 835× — so fast manual motion
+should be *bounded, firmware-ramped moves issued while the button is held and stopped with `K` on
+release*, not bigger numbers on the unbounded ladder. The ladder stays 1/8/16/24/32: every rung a
+rate this mount was heard to start.
+
 ## E14 · `h`, `i`, `m` are readback registers — a pre-motion check the design lacks
 
 Wrote `:H`=12,345 and `:M`=6,172 at position 8,654,669, **without sending `J`**, then re-read the
