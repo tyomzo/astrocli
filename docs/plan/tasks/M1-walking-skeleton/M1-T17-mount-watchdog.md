@@ -51,3 +51,34 @@ task needs has existed since M1-T03.
       `heartbeat_misses` poll periods + one, naming the slew; recovery alerts `info` once.
 - [ ] Deliberate `POST /api/mount/disconnect` produces **no** link-loss alert.
 - [ ] `heartbeat_misses` is honoured from config — set it to 5 in a test and count the polls.
+
+
+## Verified in the field, 2026-08-02 — and a correction to a doubt I raised
+
+When the serial link dropped during a live session, I grepped the *tracing log* for
+`MOUNT_LINK_LOST`, found nothing, and recorded a doubt that the watchdog had stayed silent in the
+one scenario it was built for.
+
+It had not. It fired correctly, six times across the session — `critical` on loss, `info` on
+recovery:
+
+```
+{"topic":"alert","data":{"code":"MOUNT_LINK_LOST","severity":"critical",
+ "message":"the mount has not answered 3 consecutive polls — check the cable at the mount
+            and its power (REL-02)"}}
+{"topic":"alert","data":{"code":"MOUNT_LINK_LOST","severity":"info",
+ "message":"the mount is answering again"}}
+```
+
+Alerts are published on the event bus and land in `events.jsonl`; the tracing log carries
+diagnostics. That separation is deliberate — an alert is operator-facing telemetry that must reach
+a reconnecting client through the snapshot, not a line in a file nobody is reading at 3am. So the
+evidence I checked could not have shown the alert either way, and the doubt was an artefact of the
+test, not of the code.
+
+Worth keeping as a note on method: **a null result from an instrument that cannot observe the thing
+is not a null result.** The same shape has now cost this project twice — once concluding an SSH key
+was not on the account, when the test had disabled the agent that held it.
+
+The behaviour recorded here is therefore now verified on real hardware, in the unplanned way: an
+actual link loss, mid-session, with the alert reaching the operator's phone.
