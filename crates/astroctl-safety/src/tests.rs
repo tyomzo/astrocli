@@ -1136,3 +1136,64 @@ async fn the_pier_side_a_driver_reports_reaches_the_wrapper() {
     let safe = wrap(&bodiless, EXAMPLE_LIMITS, &EventBus::new());
     assert_eq!(safe.pier_side(), None);
 }
+
+/// The altitude limit depends on **both** axes, not on declination alone.
+///
+/// Raised by the operator on 2026-08-02, looking at the "73° of declination travel" figure from
+/// the M3-T08 investigation and asking whether it could really be a property of the declination
+/// axis by itself. It cannot, and the figure was a special case: that measurement was taken with
+/// the right-ascension axis at home, where the hour angle is 6h, `cos(HA)` is zero, and the
+/// altitude reduces to `asin(sin φ · sin δ)` — declination alone. Move the right-ascension axis
+/// and the term comes back. At this site the same declination travel that is safe near the
+/// meridian (≈110°) runs out at ≈40° near the anti-meridian.
+///
+/// Both positions below have the **same declination**, so a limit that looked only at declination
+/// would have to give them the same verdict. They must differ.
+#[tokio::test]
+async fn the_altitude_limit_depends_on_the_hour_angle_not_only_the_declination() {
+    let at = Utc::now();
+    let lst_hours = crate::local_sidereal_degrees(VILNIUS, at) / 15.0;
+    const DEC: f64 = 20.0;
+
+    // On the meridian, declination 20° is ~55° up at this latitude: plenty of room to descend.
+    let on_the_meridian = RaDec::from_parts(lst_hours.rem_euclid(24.0), DEC).expect("valid");
+    // Twelve hours away, the *same* declination is below the horizon entirely.
+    let anti_meridian = RaDec::from_parts((lst_hours + 12.0).rem_euclid(24.0), DEC).expect("valid");
+
+    assert!(
+        horizontal(on_the_meridian, VILNIUS, at).alt.degrees()
+            > horizontal(anti_meridian, VILNIUS, at).alt.degrees() + 40.0,
+        "the fixture is not exercising the hour-angle term"
+    );
+
+    let permitted = {
+        let device = RecordingMount::at(on_the_meridian).shared();
+        let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+        safe.slew_for(
+            Axis::Dec,
+            Direction::South,
+            SlewSpeed::Medium,
+            Duration::from_millis(500),
+        )
+        .await
+        .is_ok()
+    };
+    let refused = {
+        let device = RecordingMount::at(anti_meridian).shared();
+        let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+        safe.slew_for(
+            Axis::Dec,
+            Direction::South,
+            SlewSpeed::Medium,
+            Duration::from_millis(500),
+        )
+        .await
+        .is_err()
+    };
+
+    assert!(
+        permitted && refused,
+        "same declination, opposite verdicts expected — permitted on the meridian: {permitted}, \
+         refused at the anti-meridian: {refused}"
+    );
+}

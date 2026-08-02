@@ -17,14 +17,20 @@ climbing toward the pole while the real one descends — and because obligation 
 (`ahead_altitude <= here_altitude`) is then never satisfied, the check does not mis-estimate, it
 **permits unconditionally**.
 
-Measured on the operator's HEQ5, 2026-08-02, from the home pose:
+Measured on the operator's HEQ5, 2026-08-02, from the home pose — **right-ascension axis at home
+throughout**, which is what makes these two numbers comparable to each other and to nothing else:
 
 | commanded | stopped at | by | tube ended |
 |---|---|---|---|
 | DEC south sense | 73.35° travel, alt 14.35° | `LIMIT_ALTITUDE` — correct | just under the 15° floor |
 | DEC north sense | 180.0° travel | `LIMIT_TRAVEL` — the *cable* limit | **60° below the horizon** |
 
-The two arcs are mirror images and should stop at the same 72.6°. Only M3-T07's travel limit, added
+The two arcs are mirror images and should stop at the same 72.6°. That figure is *not* a property
+of the declination axis: altitude is `asin(sin φ sin δ + cos φ cos δ cos HA)`, and it collapses to
+declination alone only because the right-ascension axis sat at home, where the hour angle is 6h and
+`cos HA` is zero. With the right-ascension axis elsewhere the same limit falls anywhere between
+≈40° and ≈110° of declination travel. Raised by the operator, and now pinned by
+`the_altitude_limit_depends_on_the_hour_angle_not_only_the_declination`. Only M3-T07's travel limit, added
 that morning for unrelated reasons, ended the second one. With an OTA fitted this is the 2026-08-01
 tripod strike again, from a different direction.
 
@@ -93,8 +99,13 @@ not in this task.
 ## Hardware verification (operator, mount bare)
 
 Repeat the measurement that produced this task: from home, drive DEC in the north sense at 8× and
-confirm it now refuses at ≈73° with `LIMIT_ALTITUDE` rather than running to 180°. Then the south
-sense, which must be unchanged. Then confirm both senses still unwind from below the floor.
+confirm it now refuses with `LIMIT_ALTITUDE` rather than running to 180°. Then the south sense,
+which must be unchanged. Then confirm both senses still unwind from below the floor.
+
+**Leave the right-ascension axis at home for this**, or the numbers are not comparable: the floor
+sits at ≈71.5° of declination travel only when the hour angle is 6h. Move the right-ascension axis
+and the same limit falls between ≈40° and ≈110°, which is correct behaviour and looks like a
+regression if you are expecting one number.
 
 Do it with the mount bare, as it was when the defect was found. **Note that the altitude floor is
 computed from the configured site**, which is still the example's Oslo — so the angle it stops at is
