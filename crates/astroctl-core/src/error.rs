@@ -145,6 +145,14 @@ pub enum Limit {
     /// that borrowed one of the other codes would send the operator to the wrong remedy while an
     /// axis is a quarter-turn from where they think it is.
     Travel,
+    /// The rig would reach the tripod or the ground (SDD §5.4.3, Layer 2).
+    ///
+    /// A fourth variant for the reason the first three are separate: the remedy is different
+    /// again, and it is the most urgent of the four. Altitude says "point higher", meridian says
+    /// "flip or park", travel says "drive back toward home" — this one says "stop, the metal is
+    /// about to touch something", and the operator needs to look at the rig rather than at the
+    /// screen.
+    Collision,
 }
 
 impl Limit {
@@ -155,6 +163,7 @@ impl Limit {
             Self::Altitude => ErrorCode::LimitAltitude,
             Self::Meridian => ErrorCode::LimitMeridian,
             Self::Travel => ErrorCode::LimitTravel,
+            Self::Collision => ErrorCode::LimitCollision,
         }
     }
 }
@@ -165,6 +174,7 @@ impl fmt::Display for Limit {
             Self::Altitude => "altitude",
             Self::Meridian => "meridian",
             Self::Travel => "travel-from-home",
+            Self::Collision => "collision",
         })
     }
 }
@@ -252,6 +262,8 @@ pub enum ErrorCode {
     LimitMeridian,
     /// A manual slew would drive an axis past the configured travel from home (M3-T07).
     LimitTravel,
+    /// The rig would reach the tripod or the ground (SDD §5.4.3, Layer 2).
+    LimitCollision,
     /// A manual slew's dead-man's-switch TTL expired (SDD §5.8.1).
     SlewTtlExpired,
     // --- auth (401) ---
@@ -304,6 +316,7 @@ impl ErrorCode {
         ErrorCode::LimitAltitude,
         ErrorCode::LimitMeridian,
         ErrorCode::LimitTravel,
+        ErrorCode::LimitCollision,
         ErrorCode::SlewTtlExpired,
         ErrorCode::Auth,
         ErrorCode::FrameIdConflict,
@@ -338,6 +351,7 @@ impl ErrorCode {
             Self::LimitAltitude => "LIMIT_ALTITUDE",
             Self::LimitMeridian => "LIMIT_MERIDIAN",
             Self::LimitTravel => "LIMIT_TRAVEL",
+            Self::LimitCollision => "LIMIT_COLLISION",
             Self::SlewTtlExpired => "SLEW_TTL_EXPIRED",
             Self::Auth => "AUTH",
             Self::FrameIdConflict => "FRAME_ID_CONFLICT",
@@ -383,6 +397,7 @@ impl ErrorCode {
             Self::LimitAltitude
             | Self::LimitMeridian
             | Self::LimitTravel
+            | Self::LimitCollision
             | Self::SlewTtlExpired => 403,
             // Auth failure → 401.
             Self::Auth => 401,
@@ -444,6 +459,7 @@ impl ErrorCode {
             | Self::LimitAltitude
             | Self::LimitMeridian
             | Self::LimitTravel
+            | Self::LimitCollision
             | Self::SlewTtlExpired
             | Self::Auth
             | Self::FrameIdConflict
@@ -722,7 +738,13 @@ mod tests {
         // than a reuse of the two existing ones because the remedy is different — not "point
         // higher" and not "flip or park" but "drive back toward home" — and a refusal that
         // borrowed one of their codes would send the operator to the wrong action.
-        assert_eq!(before, 28);
+        //
+        // 28 → 29 is `LIMIT_COLLISION` (SDD §5.4.3, Layer 2), and a fourth limit for the same
+        // reason there was a third: the remedy is different again, and it is the only one of the
+        // four that is not about where the telescope is pointing. "The metal is about to touch the
+        // tripod" sends the operator to the rig with their hands, not to the screen — and unlike
+        // the other three it cannot be recovered from by driving the other way.
+        assert_eq!(before, 29);
     }
 
     #[test]

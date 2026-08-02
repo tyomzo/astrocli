@@ -1197,3 +1197,73 @@ async fn the_altitude_limit_depends_on_the_hour_angle_not_only_the_declination()
          refused at the anti-meridian: {refused}"
     );
 }
+
+/// The collision limit refuses a manual slew, and only when geometry is configured (SDD §5.4.3).
+///
+/// Two assertions in one because the pair is the point: the same mount, the same command, and the
+/// only difference is whether the operator has measured their rig. A node that has not is not
+/// protected and must not pretend to be.
+#[tokio::test]
+async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
+    use astroctl_core::config::RigGeometry;
+
+    // A rig whose tube is long enough that pointing anywhere low puts it in the legs.
+    let geometry = RigGeometry {
+        dec_axis_offset_mm: 180.0,
+        tube_half_length_mm: 1_400.0,
+        tube_radius_mm: 120.0,
+        saddle_offset_mm: 180.0,
+        head_height_mm: 1_250.0,
+        mount_body_height_mm: 250.0,
+        top_radius_mm: 80.0,
+        base_radius_mm: 650.0,
+    };
+    let at = Utc::now();
+    let low = target_at_altitude(VILNIUS, 20.0, at);
+
+    let unmeasured = RecordingMount::at(low).shared();
+    SafeMount::with_geometry(
+        Arc::clone(&unmeasured) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        None,
+        EventBus::new(),
+    )
+    .slew_for(
+        Axis::Dec,
+        Direction::South,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("with no geometry there is no collision limit");
+
+    let measured = RecordingMount::at(low).shared();
+    let error = SafeMount::with_geometry(
+        Arc::clone(&measured) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    )
+    .slew_for(
+        Axis::Dec,
+        Direction::South,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect_err("the rig is in the legs and the slew must be refused");
+    assert!(matches!(
+        error,
+        DeviceError::LimitViolation {
+            limit: Limit::Collision,
+            ..
+        }
+    ));
+    assert!(
+        !measured.log().contains(&"slew".to_owned()),
+        "the axis was commanded despite the refusal: {:?}",
+        measured.log()
+    );
+}

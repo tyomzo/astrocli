@@ -65,6 +65,7 @@ ERROR_CODES = frozenset(
         "LIMIT_ALTITUDE",
         "LIMIT_MERIDIAN",
         "LIMIT_TRAVEL",
+        "LIMIT_COLLISION",
         "SLEW_TTL_EXPIRED",
         "AUTH",
         "FRAME_ID_CONFLICT",

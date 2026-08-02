@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::horizontal::{self, Site, DEGREES_PER_MINUTE_OF_TIME};
+use crate::rig::{Collision, Horizontal, Obstacle, RigModel};
 
 /// How often the background check looks at a mount that is moving (SDD §5.4: "background limit
 /// check at 2 Hz while manual slew active").
@@ -119,6 +120,11 @@ struct Shared {
     inner: Arc<dyn MountDevice>,
     limits: MountLimits,
     site: Site,
+    /// The Layer 2 collision model, when the operator has measured their rig (SDD §5.4.3).
+    ///
+    /// `None` is the shipped state and means the collision limit does not exist — not that it
+    /// passes. An unmeasured rig gets no geometric limit rather than one built on guesses.
+    rig: Option<RigModel>,
     bus: EventBus,
     motion: Mutex<Motion>,
 }
@@ -312,6 +318,30 @@ impl Shared {
             .then_some(travel.degrees)
     }
 
+    /// Whether the rig would be touching the tripod or the ground at `target` (SDD §5.4.3).
+    ///
+    /// `None` whenever the operator has configured no geometry, which is the shipped state: the
+    /// limit does not exist rather than silently passing.
+    ///
+    /// Unlike the altitude check this is **positional, not directional**, and deliberately so. A
+    /// tube already inside the legs must not be driven *further* in, but the reason the altitude
+    /// check is directional — that an axis below the horizon has to be recoverable — does not
+    /// transfer: recovering from a collision is a job for hands and a clutch, not for a motor, and
+    /// a limit that helpfully permitted more motion because the last one climbed would be helping
+    /// the mount grind against a leg. It refuses everything from inside, and the operator releases
+    /// the clutch.
+    fn collides_at(&self, target: RaDec, at: DateTime<Utc>) -> Option<Collision> {
+        let rig = self.rig?;
+        let altaz = self.horizontal_at(target, at);
+        rig.collides(
+            Horizontal {
+                altitude_degrees: altaz.alt.degrees(),
+                azimuth_degrees: altaz.az.degrees(),
+            },
+            self.inner.pier_side(),
+        )
+    }
+
     /// Publish an alert for something this wrapper did on its own.
     fn alert(&self, code: &str, message: String) {
         tracing::warn!(alert = code, %message, "the safety wrapper stopped the mount");
@@ -350,6 +380,26 @@ fn travel_violation(axis: Axis, travelled: f64, limit: f64, homeward: Direction)
     }
 }
 
+/// The refusal a collision check produces (SDD §5.4.3).
+///
+/// Names the obstacle and the depth, because the two remedies differ: the legs mean "release the
+/// clutch and lift the tube clear", the ground means "your `head_height_mm` is wrong or the rig is
+/// not on the tripod you configured".
+fn collision_violation(hit: Collision) -> DeviceError {
+    let what = match hit.what {
+        Obstacle::Tripod => "the tripod legs",
+        Obstacle::Ground => "the ground",
+    };
+    DeviceError::LimitViolation {
+        limit: Limit::Collision,
+        detail: format!(
+            "the rig would be touching {what} — {:.0} mm below the mount axes \
+             (mount.geometry); stop and clear it by hand rather than driving further",
+            hit.depth_mm
+        ),
+    }
+}
+
 /// What an operator calls a slew direction.
 const fn direction_name(dir: Direction) -> &'static str {
     match dir {
@@ -375,11 +425,24 @@ impl SafeMount {
         site: Site,
         bus: EventBus,
     ) -> Self {
+        Self::with_geometry(inner, limits, site, None, bus)
+    }
+
+    /// As [`new`](Self::new), with the rig geometry the collision check needs (SDD §5.4.3).
+    #[must_use]
+    pub fn with_geometry(
+        inner: Arc<dyn MountDevice>,
+        limits: MountLimits,
+        site: Site,
+        geometry: Option<astroctl_core::config::RigGeometry>,
+        bus: EventBus,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 inner,
                 limits,
                 site,
+                rig: RigModel::new(geometry, site),
                 bus,
                 motion: Mutex::new(Motion::default()),
             }),
@@ -389,10 +452,11 @@ impl SafeMount {
     /// Wrap `inner` with the limits and site the operator configured (`mount.limits`, `site`).
     #[must_use]
     pub fn from_config(inner: Arc<dyn MountDevice>, config: &FieldConfig, bus: EventBus) -> Self {
-        Self::new(
+        Self::with_geometry(
             inner,
             config.mount.limits,
             Site::from_config(&config.site),
+            config.mount.geometry,
             bus,
         )
     }
@@ -523,6 +587,15 @@ impl SafeMount {
                 altitude,
                 self.shared.limits.min_altitude_degrees,
             ));
+        }
+        // Collision before travel: both refuse the same motion, and "the tube is about to touch
+        // the tripod" is the sentence that changes what the operator does in the next second.
+        if let Some(hit) = self
+            .shared
+            .predict(from, axis, dir)
+            .and_then(|ahead| self.shared.collides_at(ahead, Utc::now()))
+        {
+            return Err(collision_violation(hit));
         }
         if let Some(travelled) = self.shared.winds_past_limit(axis, dir) {
             return Err(travel_violation(
@@ -735,18 +808,41 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
     for (axis, lease) in leases.into_iter().filter_map(|(a, l)| l.map(|l| (a, l))) {
         // Altitude first, travel second, and whichever fires stops the axis: the two are
         // independent reasons to stop the same motion and the operator needs the one that fired.
+        // SDD §5.4.3, and it is first because it is the most urgent: altitude and travel are
+        // about where the telescope will be pointing and how wound the cables are; this one is
+        // about metal touching metal in the next fraction of a second.
         let breach = shared
-            .descends_below_limit(position, axis, lease.dir, now)
-            .map(|altitude| {
+            .predict(position, axis, lease.dir)
+            .and_then(|ahead| shared.collides_at(ahead, now))
+            .map(|hit| {
+                let what = match hit.what {
+                    Obstacle::Tripod => "the tripod legs",
+                    Obstacle::Ground => "the ground",
+                };
                 (
-                    Limit::Altitude,
+                    Limit::Collision,
                     format!(
+                        "the {} axis stopped: the rig is about to touch {what}, {:.0} mm below \
+                         the mount axes. Clear it by hand — do not drive further",
+                        axis_name(axis),
+                        hit.depth_mm
+                    ),
+                )
+            })
+            .or_else(|| {
+                shared
+                    .descends_below_limit(position, axis, lease.dir, now)
+                    .map(|altitude| {
+                        (
+                            Limit::Altitude,
+                            format!(
                         "the {} axis stopped: continuing would take the telescope to altitude \
                          {altitude:.1}°, below the configured minimum of {:.1}°",
                         axis_name(axis),
                         shared.limits.min_altitude_degrees
                     ),
-                )
+                        )
+                    })
             })
             .or_else(|| {
                 // M3-T07. This is the check that catches a wind-up in progress: the renewal path
