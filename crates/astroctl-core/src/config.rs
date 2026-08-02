@@ -809,6 +809,26 @@ pub struct RigGeometry {
     /// circumscribes them. It therefore refuses some poses that would have cleared a gap between
     /// two legs, which is the direction to be wrong in.
     pub base_radius_mm: f64,
+    /// The counterweight shaft and weights, absent until measured — the same rule as the rig
+    /// itself: an unmeasured part gets no limit rather than a guessed one.
+    #[serde(default)]
+    pub counterweight: Option<CounterweightGeometry>,
+}
+
+/// The counterweight assembly, modelled as a second capsule opposite the saddle (SDD §5.4.3).
+///
+/// It swings on the other side of the declination axis and is a real collision hazard during
+/// right-ascension motion — 180° of RA at the home pose is zero celestial change and a half-turn
+/// of exactly this.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CounterweightGeometry {
+    /// From the declination axis to the shaft's tip, along the shaft.
+    pub length_mm: f64,
+    /// The largest weight's radius. It inflates the *whole* shaft: weights slide along it, so any
+    /// point may carry one, and a stale weight position would be worse than the small
+    /// over-refusal.
+    pub radius_mm: f64,
 }
 
 /// Every field is a length in millimetres and must be positive; `head_height_mm` must also exceed
@@ -843,6 +863,19 @@ impl RigGeometry {
                 "the tube reaches the ground from the home pose — the head height must exceed \
                  dec_axis_offset_mm + tube_half_length_mm, or every slew is refused",
             );
+        }
+        if let Some(cw) = self.counterweight {
+            c.range_f64("counterweight.length_mm", cw.length_mm, 0.0, 100_000.0);
+            c.range_f64("counterweight.radius_mm", cw.radius_mm, 0.0, 100_000.0);
+            // The same typo guard as the tube's: a shaft that reaches below the feet at every
+            // pose would refuse everything, and the operator would disable the limit.
+            if cw.length_mm + cw.radius_mm >= self.head_height_mm {
+                c.fail(
+                    "counterweight.length_mm",
+                    "the counterweight reaches the ground — length_mm + radius_mm must stay \
+                     under head_height_mm, or every slew is refused",
+                );
+            }
         }
     }
 }

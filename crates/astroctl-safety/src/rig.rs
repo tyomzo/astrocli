@@ -24,14 +24,14 @@
 //! than none. The cone circumscribes the pyramid, so it refuses some poses that would in fact have
 //! cleared a gap between two legs. That is the error worth having.
 //!
-//! # What it does not model
-//!
-//! The **counterweight shaft and weights**, which swing on the other side of the declination axis
-//! and are a real collision hazard during right-ascension motion. Adding them is a second capsule
-//! along `-d̂` and nothing else; it is left out because nobody has measured the shaft on this rig
-//! and a guessed length would be a limit enforced against a number that came from no measurement —
-//! the objection that removed `park_position` in M3-T07. Named here so it is a known gap rather
-//! than an oversight.
+//! **The counterweight is a second capsule along `-d̂`**, from the axes' intersection to the
+//! shaft's tip, inflated by the largest weight's radius over its whole length (weights slide, so
+//! any point may carry one). It swings on the other side of the declination axis and is a real
+//! collision hazard during right-ascension motion — 180° of RA at the home pose is zero celestial
+//! change and a half-turn of exactly this. It is optional in the configuration and absent means
+//! *no* counterweight capsule, for the same reason `mount.geometry` itself ships absent: a guessed
+//! length would be a limit enforced against a number that came from no measurement — the objection
+//! that removed `park_position` in M3-T07.
 
 use astroctl_core::config::RigGeometry;
 use astroctl_core::types::PierSide;
@@ -203,10 +203,12 @@ impl RigModel {
             .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
     }
 
-    /// Test the tube capsule for one declination-axis direction.
+    /// Test the moving assembly — the tube capsule and, when measured, the counterweight capsule
+    /// — for one declination-axis direction.
     ///
-    /// `dec_axis` points from the polar axis toward the saddle, so the capsule's centre is
-    /// `dec_axis_offset_mm` along it and its axis is the optical axis `tube`.
+    /// `dec_axis` points from the polar axis toward the saddle, so the tube capsule's centre is
+    /// `dec_axis_offset_mm` along it and its axis is the optical axis `tube`; the counterweight
+    /// runs the other way, from the axes' intersection out along `-d̂`.
     fn capsule_collides(&self, dec_axis: Vec3, tube: Vec3) -> Option<Collision> {
         // The tube lies on the saddle, not through the declination axis, so its axis is offset
         // perpendicular to both — and that offset rotates with declination, which is part of what
@@ -219,16 +221,30 @@ impl RigModel {
             });
         let centre = dec_axis.scale(self.geometry.dec_axis_offset_mm).add(saddle);
         let half = self.geometry.tube_half_length_mm;
-        (0..=SAMPLES)
+        let tube_hit = (0..=SAMPLES)
             .filter_map(|i| {
                 #[expect(clippy::cast_precision_loss, reason = "i is bounded by SAMPLES = 64")]
                 let along = (2.0 * i as f64 / SAMPLES as f64 - 1.0) * half;
-                self.point_collides(centre.add(tube.scale(along)))
+                self.point_collides(centre.add(tube.scale(along)), self.geometry.tube_radius_mm)
             })
+            .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm));
+        let counterweight_hit = self.geometry.counterweight.and_then(|cw| {
+            (0..=SAMPLES)
+                .filter_map(|i| {
+                    #[expect(clippy::cast_precision_loss, reason = "i is bounded by SAMPLES = 64")]
+                    let along = cw.length_mm * i as f64 / SAMPLES as f64;
+                    self.point_collides(dec_axis.scale(-along), cw.radius_mm)
+                })
+                .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+        });
+        tube_hit
+            .into_iter()
+            .chain(counterweight_hit)
             .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
     }
 
-    /// One point of the capsule's axis against the obstacle, inflated by the capsule radius.
+    /// One point of a capsule's axis against the obstacle, inflated by that capsule's radius `r`
+    /// — the tube's for the tube capsule, the largest weight's for the counterweight.
     ///
     /// The origin is the intersection of the two mount axes, so `p.u` is height relative to the
     /// mount head and the ground is at `-head_height_mm`.
@@ -246,9 +262,8 @@ impl RigModel {
     /// The conservatism that remains is deliberate: three thin legs are treated as a continuous
     /// skirt, so a tube that would in fact have passed through a gap is still refused. That error
     /// costs a pose; the opposite error costs a tube.
-    fn point_collides(&self, p: Vec3) -> Option<Collision> {
+    fn point_collides(&self, p: Vec3, r: f64) -> Option<Collision> {
         let g = &self.geometry;
-        let r = g.tube_radius_mm;
         let depth = -p.u;
 
         if p.u - r <= -g.head_height_mm {

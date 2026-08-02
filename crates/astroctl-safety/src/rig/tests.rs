@@ -6,6 +6,8 @@
 //! properties that hold for *any* consistent rig — symmetry, monotonicity, which obstacle is
 //! reported, and that the pose (not just the pointing) is what decides.
 
+use astroctl_core::config::CounterweightGeometry;
+
 use super::*;
 
 /// A rig in the shape of the operator's, with the two numbers they gave and placeholders for the
@@ -20,6 +22,7 @@ const RIG: RigGeometry = RigGeometry {
     mount_body_height_mm: 250.0,
     top_radius_mm: 80.0,
     base_radius_mm: 650.0,
+    counterweight: None,
 };
 
 const VILNIUS: Site = Site {
@@ -146,6 +149,74 @@ fn the_home_pose_is_swept_rather_than_guessed() {
     assert!(
         reaching.collides(pointing(54.6872, 0.0), None).is_some(),
         "a tube long enough to reach the ground was cleared at the singular home pose"
+    );
+}
+
+#[test]
+fn a_counterweight_is_never_safer_and_an_unmeasured_one_changes_nothing() {
+    // Adding a part to the moving assembly can only add refusals, and leaving it unmeasured must
+    // leave the verdicts exactly as they were — the same no-guessed-limits rule as the rig itself.
+    let bare = model();
+    let with_shaft = RigModel::new(
+        Some(RigGeometry {
+            counterweight: Some(CounterweightGeometry {
+                length_mm: 400.0,
+                radius_mm: 100.0,
+            }),
+            ..RIG
+        }),
+        VILNIUS,
+    )
+    .expect("geometry");
+    for step in 0..=36 {
+        let altitude = 90.0 - f64::from(step) * 5.0;
+        for azimuth in [0.0, 90.0, 180.0, 270.0] {
+            let p = pointing(altitude, azimuth);
+            if bare.collides(p, None).is_some() {
+                assert!(
+                    with_shaft.collides(p, None).is_some(),
+                    "adding a counterweight cleared a pose that collided at {altitude}°/{azimuth}°"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_counterweight_long_enough_to_reach_the_ground_is_refused() {
+    // A near-pointlike tube isolates the shaft, the same way the pencil-thin tripod isolates the
+    // ground below. Pointing at the horizon due east puts the declination axis in the meridian
+    // plane, the steepest it can lean at this latitude — cos φ below horizontal — so a shaft
+    // longer than head height by that factor reaches the ground on the side that swings it down.
+    let stub_tube = RigGeometry {
+        tube_half_length_mm: 50.0,
+        tube_radius_mm: 30.0,
+        saddle_offset_mm: 50.0,
+        ..RIG
+    };
+    let reach = (RIG.head_height_mm + 1.0) / VILNIUS.latitude_degrees.to_radians().cos();
+    let with_shaft = RigModel::new(
+        Some(RigGeometry {
+            counterweight: Some(CounterweightGeometry {
+                length_mm: reach,
+                radius_mm: 75.0,
+            }),
+            ..stub_tube
+        }),
+        VILNIUS,
+    )
+    .expect("geometry");
+    let east_horizon = pointing(0.0, 90.0);
+    assert!(
+        RigModel::new(Some(stub_tube), VILNIUS)
+            .expect("geometry")
+            .collides(east_horizon, None)
+            .is_none(),
+        "the shaftless rig must clear this pose, or the shaft is not what is being tested"
+    );
+    assert!(
+        with_shaft.collides(east_horizon, None).is_some(),
+        "a shaft reaching the ground was cleared at the east horizon"
     );
 }
 

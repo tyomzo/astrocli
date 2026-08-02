@@ -1217,6 +1217,7 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
+        counterweight: None,
     };
     let at = Utc::now();
     let low = target_at_altitude(VILNIUS, 20.0, at);
