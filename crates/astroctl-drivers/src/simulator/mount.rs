@@ -1215,6 +1215,11 @@ impl MountDevice for SimulatorMount {
         None
     }
 
+    /// `None` — the model has no pier to be on a side of (M3-T08).
+    fn pier_side(&self) -> Option<astroctl_core::types::PierSide> {
+        None
+    }
+
     /// `None`, for the reason above (M3-T08).
     ///
     /// The model has no mechanical axes, so it has no branch — and a look-ahead that guessed one

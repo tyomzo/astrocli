@@ -234,6 +234,11 @@ impl MountDevice for FakeMount {
         None
     }
 
+    /// `None` — a fake with no mechanism is on no side of a pier.
+    fn pier_side(&self) -> Option<astroctl_core::types::PierSide> {
+        None
+    }
+
     /// `None` — likewise, a fake with no mechanism has no branch to project a motion through.
     fn motion_lookahead(
         &self,

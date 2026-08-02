@@ -8,8 +8,8 @@ use astroctl_core::config::{FieldConfig, MountLimits};
 use astroctl_core::error::{DeviceError, ErrorCode, Limit};
 use astroctl_core::event::Alert;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, RaDec,
-    SlewSpeed, TrackingMode,
+    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, PierSide,
+    RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use async_trait::async_trait;
@@ -972,6 +972,11 @@ impl MountDevice for SafeMount {
             )),
         };
         result
+    }
+
+    /// Forwarded unchanged — the wrapper holds no mechanical state of its own.
+    fn pier_side(&self) -> Option<PierSide> {
+        self.shared.inner.pier_side()
     }
 
     /// Forwarded unchanged: the wrapper adds no mechanical knowledge, it only consumes the

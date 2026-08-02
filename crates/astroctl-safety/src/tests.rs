@@ -14,7 +14,7 @@ use astroctl_core::bus::{EventBus, Recv};
 use astroctl_core::config::MountLimits;
 use astroctl_core::error::{DeviceError, ErrorCode, Limit};
 use astroctl_core::event::Topic;
-use astroctl_core::types::{Axis, Direction, RaDec, SlewSpeed, TrackingMode};
+use astroctl_core::types::{Axis, Direction, PierSide, RaDec, SlewSpeed, TrackingMode};
 use astroctl_hal::mount::MountDevice;
 use chrono::{DateTime, Utc};
 
@@ -1116,4 +1116,23 @@ async fn a_held_declination_slew_is_stopped_when_crossing_the_pole_turns_it_down
         !device.is_slewing(Axis::Dec),
         "the axis kept descending under a held button"
     );
+}
+
+/// The pier side a driver knows must reach the layer that publishes it (M3-T08).
+///
+/// It was an inherent method on the skywatcher driver, so `mount.position.pier_side` reported
+/// `unknown` on hardware whose driver had the answer — SDD §5.4's obligation 3, outstanding since
+/// M1-T05. The wrapper adds nothing here and must subtract nothing either.
+#[tokio::test]
+async fn the_pier_side_a_driver_reports_reaches_the_wrapper() {
+    let device = RecordingMount::at(above_the_limit())
+        .with_pier_side(PierSide::East)
+        .shared();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+    assert_eq!(safe.pier_side(), Some(PierSide::East));
+
+    // And a device with no mechanical state still says nothing, rather than guessing east.
+    let bodiless = RecordingMount::at(above_the_limit()).shared();
+    let safe = wrap(&bodiless, EXAMPLE_LIMITS, &EventBus::new());
+    assert_eq!(safe.pier_side(), None);
 }

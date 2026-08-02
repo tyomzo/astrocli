@@ -42,7 +42,7 @@ use std::time::Duration;
 use astroctl_core::bus::EventBus;
 use astroctl_core::config::MountConfig;
 use astroctl_core::error::{ApiError, DeviceError, ErrorCode};
-use astroctl_core::event::{self, PierSide};
+use astroctl_core::event;
 use astroctl_core::types::{
     Axis, DeviceKind, Direction, MountState, MountStatus, RaDec, SlewSpeed, TrackingMode,
 };
@@ -252,11 +252,11 @@ fn to_wire_status(status: MountStatus) -> event::MountStatus {
     event::MountStatus::new(to_wire_state(status.state), status.tracking)
 }
 
-/// The mount's declination axis tells which side of the pier the tube is on; nothing above the
-/// HAL derives it. `RaDec` carries no pier side, so until a driver reports one this is `unknown`
-/// — which is a value the wire enum has precisely so that "not derivable yet" does not have to
-/// be guessed at as east.
-const UNKNOWN_PIER: PierSide = PierSide::Unknown;
+// The pier side now comes from the driver (M3-T08). `RaDec` carries none, and the declination
+// axis is what decides it, so only a layer holding mechanical state can answer — the wire enum's
+// `unknown` is what a driver without one produces, via `From<Option<types::PierSide>>`. Until
+// M3-T08 `unknown` was the *only* value this payload ever carried, including on hardware whose
+// driver knew the answer and had no way to say so (SDD §5.4, obligation 3).
 
 /// Build the `mount.position` payload from a coordinate pair (MNT-02, MNT-03).
 ///
@@ -271,7 +271,7 @@ fn to_wire_position(safety: &SafeMount, pos: RaDec) -> event::MountPosition {
         pos.dec.degrees(),
         Some(horizontal.alt.degrees()),
         Some(horizontal.az.degrees()),
-        UNKNOWN_PIER,
+        safety.pier_side().into(),
     );
     // Travel from the mechanical home pose (M3-T07), when the driver has a home to measure from.
     // Read *after* `position()`, which is what refreshed the driver's counters — the same

@@ -17,8 +17,8 @@ use std::fmt::Debug;
 
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, RaDec,
-    SlewSpeed, TrackingMode,
+    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, PierSide,
+    RaDec, SlewSpeed, TrackingMode,
 };
 use async_trait::async_trait;
 
@@ -273,6 +273,24 @@ pub trait MountDevice: Debug + Send + Sync {
     /// that it cannot be bypassed, and a channel the binary has to remember to wire is a channel
     /// the binary will one day forget.
     fn axis_travel(&self) -> Option<MountTravel>;
+
+    /// Which side of the pier the tube is on, as of the driver's last counter read (M3-T08).
+    ///
+    /// The reporting half of Layer 1 (SDD §5.4.2). `MountDevice::position` returns an `RaDec` and
+    /// SDD §4.3's `mount.position` carries a pier side too, because the same coordinate is two
+    /// different mount states and the fact is *not* recoverable from the return value — which is
+    /// the whole of §5.4.1's asymmetry, in one field.
+    ///
+    /// `None` on the same terms as [`axis_travel`](Self::axis_travel): a device with no mechanical
+    /// state has no side, and the wire enum has an `unknown` member so that this does not have to
+    /// be guessed at as east.
+    ///
+    /// Note that this is **not** what [`motion_lookahead`](Self::motion_lookahead) consults. A pier
+    /// side is the branch at the *current* position, and the branch can change inside a single
+    /// look-ahead step; a limit built on this field rather than on the projection would be the
+    /// defect M3-T08 fixed, wearing different clothes. This is for the operator's display and for
+    /// the meridian limit's eventual comparison (SDD §5.4, obligation 3).
+    fn pier_side(&self) -> Option<PierSide>;
 
     /// Where the tube would point after `degrees` more of the motion `dir` on `axis` (M3-T08).
     ///

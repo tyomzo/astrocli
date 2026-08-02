@@ -351,6 +351,22 @@ pub enum PierSide {
     Unknown,
 }
 
+impl From<Option<crate::types::PierSide>> for PierSide {
+    /// The wire value for what a driver reported, `Unknown` for a driver that reported nothing.
+    ///
+    /// Two enums rather than one because the domain type is a fact about a *mount* — a tube is on
+    /// one side or the other, there is no third pose — while the wire type answers "what does the
+    /// node currently know", which has three answers. Collapsing them would put `Unknown` into
+    /// every match a driver writes about its own geometry (M3-T08).
+    fn from(side: Option<crate::types::PierSide>) -> Self {
+        match side {
+            Some(crate::types::PierSide::East) => Self::East,
+            Some(crate::types::PierSide::West) => Self::West,
+            None => Self::Unknown,
+        }
+    }
+}
+
 /// Mount lifecycle state accompanying the motion flags in [`MountStatus`].
 ///
 /// SDD §4.3 names the field but not its value set; this is the minimum that distinguishes the

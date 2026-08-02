@@ -20,7 +20,7 @@ use std::time::Duration;
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
     Axis, AxisTravel, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus,
-    MountTravel, RaDec, SlewSpeed, TrackingMode,
+    MountTravel, PierSide, RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use async_trait::async_trait;
@@ -52,6 +52,8 @@ struct State {
     /// with no mechanical state — the INDI/Alpaca and simulator case — and exercises the wrapper's
     /// documented fallback rather than its branch-aware path.
     lookahead: Option<LookaheadModel>,
+    /// What `pier_side` answers (M3-T08).
+    pier_side: Option<PierSide>,
 }
 
 /// How the double answers `motion_lookahead`, as the change one step of each direction makes.
@@ -110,6 +112,7 @@ impl RecordingMount {
                 generation: 0,
                 travel: None,
                 lookahead: None,
+                pier_side: None,
             }),
             goto_duration: Duration::from_secs(2),
             slew_duration: Duration::ZERO,
@@ -140,6 +143,13 @@ impl RecordingMount {
                 homeward: dec.1,
             },
         });
+        self
+    }
+
+    /// Report a pier side, as a driver holding mechanical state does.
+    #[must_use]
+    pub fn with_pier_side(self, side: PierSide) -> Self {
+        self.locked().pier_side = Some(side);
         self
     }
 
@@ -354,6 +364,10 @@ impl MountDevice for RecordingMount {
 
     fn axis_travel(&self) -> Option<MountTravel> {
         self.locked().travel
+    }
+
+    fn pier_side(&self) -> Option<PierSide> {
+        self.locked().pier_side
     }
 
     fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {

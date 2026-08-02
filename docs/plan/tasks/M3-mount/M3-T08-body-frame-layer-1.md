@@ -49,6 +49,15 @@ not in this task.
   a directional guarantee. Accept and state the limitation in the manner of obligation 3; do not
   invent a heuristic. The observed-sense alternative is recorded in §5.4.2 as considered and not
   chosen.
+
+> **Both of the two bullets above turned out to be wrong, and §5.4.2 carries the corrections.**
+> The branch alone is not sufficient — it can change inside one look-ahead step, and at the home
+> pose it does — so the forward step moved behind `MountDevice::motion_lookahead`, which advances
+> the mechanical angle and re-derives the branch at the advanced point. And the `None` fallback
+> stayed *celestial* rather than becoming positional: the devices that answer `None` have no
+> mechanical model, so their motion really is celestially monotonic, and a positional fallback
+> would have trapped every simulator session to protect nobody. The right-ascension half of the
+> derivation survived and is now pinned by a test.
 - The simulator has no counters and no branch. Whatever it reports must not make the wrapper's
   branch path untested — if the simulator cannot exercise it, the driver tests must.
 
@@ -57,6 +66,9 @@ not in this task.
 - [x] From the home pose, a declination slew in **either** sense is refused at the same travel angle
       (within the look-ahead's one degree), and that angle is the altitude floor's, not the travel
       limit's. This is the whole point of the task and it must be a test, not a hardware note.
+      *Covered as two tests rather than one: `from_home_both_mechanical_senses_lower_the_declination`
+      pins the mechanics, and `a_declination_slew_that_descends_past_the_pole_is_refused` pins the
+      refusal. The latter fails against the previous behaviour, which is what makes it evidence.*
 - [x] A declination slew that *unwinds* an axis already below the floor is still permitted, on both
       branches — obligation 5's guarantee must survive the fix rather than be traded for it.
 - [x] `mount.position.pier_side` reports a real side on the skywatcher driver, on both branches, and
@@ -64,8 +76,19 @@ not in this task.
 - [x] The right-ascension arms of `lookahead` are unchanged, and a test pins the branch-invariance
       claim (`∂HA/∂h = s` on both branches) so that §5.4.2's derivation is falsifiable in CI rather
       than by reasoning.
-- [x] A driver returning `None` for body state produces the documented positional fallback, and the
-      accepted limitation is stated where a reader of the code will meet it.
+- [x] A driver returning `None` for body state produces the documented fallback, and the accepted
+      limitation is stated where a reader of the code will meet it. **Amended**: the documented
+      fallback is the celestial look-ahead, not the positional check — see the correction above.
+
+## Not done in this task
+
+- **Layer 2 is untouched**, by design (SDD §5.4.3). There is still no rig geometry and therefore no
+  collision protection; `max_travel_from_home_degrees` remains a cable-wind proxy and must not be
+  described as anything else.
+- **The `Branch → PierSide` label mapping is still `derived` and unverified** (`mech.rs`). M3-T08
+  makes the field truthful about *which branch the mount is on*; whether this project's east/west
+  labelling matches what an ASCOM client would expect is a separate measurement. Nothing
+  safety-critical depends on it — the altitude limit consults the projection, never the label.
 
 ## Hardware verification (operator, mount bare)
 

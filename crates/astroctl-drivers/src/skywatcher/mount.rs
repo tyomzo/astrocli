@@ -1546,6 +1546,17 @@ impl MountDevice for SkywatcherMount {
     /// `None` before the handshake or before the first read — there is no home reference until
     /// the counts per revolution are known, and inventing one would hand the safety wrapper a
     /// number it would then enforce a limit against.
+    /// The pier side of the last counter read (M3-T08 promoted this from an inherent method).
+    ///
+    /// It was inherent because widening `MountDevice` for one driver would have made every other
+    /// implementor answer a question it may not have; `Option` is the answer to that objection,
+    /// the same one `axis_travel` takes. Until it moved here, `mount.position.pier_side` reported
+    /// `unknown` on real hardware while the driver knew the answer — SDD §5.4's obligation 3,
+    /// outstanding since M1-T05.
+    fn pier_side(&self) -> Option<PierSide> {
+        Self::pier_side(self)
+    }
+
     /// Advance the mechanical state one step and project — SDD §5.4.1, §5.4.2 (M3-T08).
     ///
     /// The whole of this method is deciding *which mechanical sense* the step runs in, because
