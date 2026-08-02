@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.31.1
+**Version:** 1.31.2
 **Author:** Artiom
 **Date:** 2026-08-02
 **Status:** Draft
@@ -288,6 +288,18 @@ only from the last status the node could read, since by definition it cannot rea
 
 **Change note (1.30.0):** §5.2.3's mech↔sky map is corrected by six hours (M3-T06). The section
 **Change note (1.31.0):** **§5.4.1–§5.4.3 added — the celestial and body frames, and which frame each limit belongs to (ADR-14).** §5.4 specified *what* is enforced and was silent on *in which frame*, so `SafeMount::lookahead` predicted motion celestially and assumed `north ⇒ declination increases` — true on the normal branch only. The home pose is the pole, so a declination move crosses branches on its first step and the check then permits unconditionally; measured on hardware 2026-08-02 with the tube ending 60° below the horizon. §5.4.1 states the rule (advance body state, project; never invert), §5.4.2 specifies Layer 1 (axis angles and branch, making the long-unimplemented `pier_side` of §5.2.3 truthful) and shows the fix is one sign on one axis, and §5.4.3 defers Layer 2 (rig geometry, collision) while fixing the four interface points that stop the two layers from growing contradictory answers. Records that 180° of RA at the home pose is zero celestial change and a half-turn of counterweight — a hazard class no celestial predicate can express.
+**Change note (1.31.2):** §5.4.3 implemented (Layer 2: capsule rig, truncated-cone tripod, optional
+counterweight capsule, all under `mount.geometry`), and corrected once by hardware the same day:
+a limit that consumes only a *pointing* judges the pole — the home pointing — by the worst of the
+whole family of poses that share it, and with the pier side unknown at the pole both saddle signs
+are tested everywhere else too. Measured on the operator's mount 2026-08-02: every motion from
+home refused, `LIMIT_COLLISION`, a prison. The missing fact is body state that Layer 1 already
+owns — the declination axis's direction is set by the right-ascension counter alone and is defined
+at every pose *including* the singular pointing — so it crosses the HAL the way `pier_side` does:
+`MountDevice::dec_axis_hour_angle_degrees`, `Option`, `None` for drivers with no mechanical state,
+which keep the conservative sweep. §5.4.3's point 3 ("Layer 2 changes no HAL signature") is
+amended accordingly: rig *geometry* still enters through config and never through the HAL; the
+*pose* enters through Layer 1's reporting surface, which is point 1 doing its job.
 **Change note (1.31.1):** §5.4.2 corrected twice by M3-T08, which implemented it. The branch alone is **not sufficient** — it can change inside a single look-ahead step, and at the home pose it does, so a wrapper flipping a sign from the branch-at-current-position reproduces the very defect; the forward step must re-derive the branch at the advanced angle, which puts it behind a new `MountDevice::motion_lookahead` because the safety crate may not depend on a driver. And the `None` fallback is the celestial look-ahead, not the positional check: the devices that answer `None` have no mechanical model, so their motion really is celestially monotonic and a positional fallback would trap them for nothing. The right-ascension half of the derivation survived and is now pinned by a test.
 
 
@@ -1167,7 +1179,7 @@ The rule that follows, and the one this section exists to state:
 | Altitude (MNT-15) | celestial | the direction `dec` moves for the commanded direction — i.e. the branch |
 | Meridian (MNT-16) | celestial | pier side (§5.4, obligation 3) |
 | Travel from home (M3-T07) | body | unfolded per-axis travel and the homeward direction |
-| Collision (§5.4.3) | body | rig geometry — **not modelled; no protection exists** |
+| Collision (§5.4.3) | body | rig geometry (`mount.geometry`, absent by default) + the dec-axis bearing when the driver reports one |
 
 **The defect that produced this section.** `SafeMount::lookahead` predicted one degree of motion by
 adding a delta to the *celestial* position and hardcoding `Direction::North ⇒ declination
@@ -1264,6 +1276,14 @@ remains the natural way to protect a bodiless driver on real hardware, and is re
 it is chosen deliberately if it ever is.
 
 #### 5.4.3 Layer 2 — body geometry (deferred; its interface fixed here)
+
+> **Implemented 2026-08-02** (change note 1.31.2): capsule tube + optional counterweight capsule
+> against a truncated-cone tripod shell, configured under `mount.geometry`, enforced by
+> `SafeMount` on the near-current lookahead paths. Point 3 below is amended by that note: the
+> *pose* (the declination axis's bearing, `MountDevice::dec_axis_hour_angle_degrees`) crosses as
+> Layer 1 body state, the way `pier_side` does; the *geometry* still never touches the HAL. The
+> section's original text is kept — the deferral reasoning is the record of why the interface
+> looks the way it does.
 
 What it would model: the optical tube's length and its offset from the declination axis, the
 counterweight shaft, the tripod or pier envelope, and cable anchor points. What it would protect:
