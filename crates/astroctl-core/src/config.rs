@@ -787,10 +787,15 @@ pub struct RigGeometry {
     /// The tube's radius, which also inflates the obstacle: a hit is the *surface* touching, not
     /// the centreline.
     pub tube_radius_mm: f64,
-    /// How far the optical axis sits off the declination axis — saddle height plus tube radius.
+    /// How far the optical axis sits off the declination axis — saddle height plus tube radius,
+    /// measured **along** the declination axis, continuing `dec_axis_offset_mm` outward: the
+    /// saddle stack builds radially away from the mount, so the optical axis crosses the
+    /// declination axis's line at the *sum* of the two.
     ///
-    /// Not zero on any real rig: the tube lies *on* the saddle, not through it. It matters because
-    /// this offset rotates with declination, so it is part of what sweeps.
+    /// Not zero on any real rig: the tube lies *on* the saddle, not through it. The direction is
+    /// worth stating because the first implementation applied it perpendicular to the axis
+    /// instead, which held the modelled tube 230 mm closer to the pier than the metal and refused
+    /// a third of the right-ascension turn at dec-home for a rig standing half a metre clear.
     pub saddle_offset_mm: f64,
     /// Height of the intersection of the two mount axes above the ground.
     pub head_height_mm: f64,

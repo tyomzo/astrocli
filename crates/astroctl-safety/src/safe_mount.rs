@@ -41,12 +41,23 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(500);
 /// again, and one millisecond against T-SLW-1's 100 ms of slack is not a cost.
 const MIN_TICK: Duration = Duration::from_millis(1);
 
-/// How far ahead of the current position a manual slew is checked, in degrees.
+/// How far ahead of the current position a manual slew is checked, in degrees, by speed.
 ///
 /// A manual slew has no target coordinate — the "target" MNT-15 speaks of is wherever the axis is
-/// heading. One degree is far enough to be well outside the mount's pointing error and near enough
-/// that the check is about the next second of motion rather than about the far side of the sky.
-const LOOKAHEAD_DEGREES: f64 = 1.0;
+/// heading. One degree was tuned for the unbounded rungs (≤32× sidereal, 0.13°/s): well outside
+/// the pointing error, and the 2 Hz watch sees a breach seven ticks out. The chunked rungs (E16)
+/// cruise at the firmware's ~51× and ~835×, where one degree is *under half a watch tick* of
+/// travel — measured on hardware 2026-08-02 punching 2–3° through the altitude floor per press.
+/// The lookahead has to cover at least a tick and a half of travel plus the stop's own
+/// deceleration (~1° at 835×), so the fast rungs look further: firing ~1.7 s early at Max is the
+/// margin doing its job, not conservatism.
+const fn lookahead_degrees(speed: SlewSpeed) -> f64 {
+    match speed {
+        SlewSpeed::Guide | SlewSpeed::Slow | SlewSpeed::Medium => 1.0,
+        SlewSpeed::Fast => 2.0,
+        SlewSpeed::Max => 6.0,
+    }
+}
 
 /// The largest hour-angle step between two ticks that still counts as the sky turning.
 ///
@@ -268,9 +279,10 @@ impl Shared {
         from: RaDec,
         axis: Axis,
         dir: Direction,
+        lookahead: f64,
         at: DateTime<Utc>,
     ) -> Option<f64> {
-        let ahead = self.predict(from, axis, dir)?;
+        let ahead = self.predict(from, axis, dir, lookahead)?;
         let ahead_altitude = self.horizontal_at(ahead, at).alt.degrees();
         let here_altitude = self.horizontal_at(from, at).alt.degrees();
         // The guard needs no special case for where the prediction came from, and that is worth
@@ -288,10 +300,52 @@ impl Shared {
     /// Asks the driver first — it is the only layer holding the mechanical state that decides which
     /// way declination moves (SDD §5.4.1) — and falls back to [`celestial_lookahead`] for a driver
     /// that has none.
-    fn predict(&self, from: RaDec, axis: Axis, dir: Direction) -> Option<RaDec> {
+    fn predict(&self, from: RaDec, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {
         self.inner
-            .motion_lookahead(axis, dir, LOOKAHEAD_DEGREES)
-            .or_else(|| celestial_lookahead(from, axis, dir))
+            .motion_lookahead(axis, dir, degrees)
+            .or_else(|| celestial_lookahead(from, axis, dir, degrees))
+    }
+
+    /// The collision one lookahead step along, when that step does not *shrink* it (SDD §5.4.3).
+    ///
+    /// The check is positional — a tube already inside the legs must not be driven further in —
+    /// but positional-without-an-escape is a trap, and it sprang on 2026-08-02: an 835× press
+    /// overshot the altitude floor by ~2°, into a pose the fat capsule and the circumscribing
+    /// cone call "inside" while the metal touched nothing, and every direction out was then
+    /// refused. So a pose already colliding permits the motion that both **climbs and shrinks
+    /// the penetration**, and refuses everything else. Both conditions carry weight:
+    ///
+    /// * Penetration alone is not enough, because the cone is a *shell* and sliding down through
+    ///   it thins the number while the tube keeps descending — the exact motion the original
+    ///   positional rule exists to refuse. Climbing alone is not enough either, or the clause
+    ///   would wave through a climb that grinds harder against the underside of a leg.
+    /// * The climb requirement is strict, which is what keeps the singular pointing honest: at
+    ///   the pole a right-ascension step changes the pose but not the pointing, so `ahead` equals
+    ///   `from`, nothing climbs, and a mount whose driver reports no bearing stays refused by the
+    ///   sweep rather than excused by a comparison that cannot see the difference.
+    ///
+    /// A clear pose still refuses *any* predicted collision — the escape clause never helps a
+    /// motion that would begin the contact.
+    fn collision_worsens(
+        &self,
+        from: RaDec,
+        axis: Axis,
+        dir: Direction,
+        lookahead: f64,
+        at: DateTime<Utc>,
+    ) -> Option<Collision> {
+        let ahead = self.predict(from, axis, dir, lookahead)?;
+        let hit = self.collides_at(ahead, at)?;
+        match self.collides_at(from, at) {
+            Some(now)
+                if hit.penetration_mm <= now.penetration_mm
+                    && self.horizontal_at(ahead, at).alt.degrees()
+                        > self.horizontal_at(from, at).alt.degrees() =>
+            {
+                None
+            }
+            _ => Some(hit),
+        }
     }
 
     /// The travel one axis has accumulated, when moving `dir` would make it worse (M3-T07).
@@ -586,9 +640,10 @@ impl SafeMount {
         // call this makes first; it is a read, and a read cannot move a telescope. It also
         // refreshes the counters the travel check reads, which is why that check follows it.
         let from = self.shared.inner.position().await?;
-        if let Some(altitude) = self
-            .shared
-            .descends_below_limit(from, axis, dir, Utc::now())
+        let lookahead = lookahead_degrees(speed);
+        if let Some(altitude) =
+            self.shared
+                .descends_below_limit(from, axis, dir, lookahead, Utc::now())
         {
             return Err(altitude_violation(
                 altitude,
@@ -599,8 +654,7 @@ impl SafeMount {
         // the tripod" is the sentence that changes what the operator does in the next second.
         if let Some(hit) = self
             .shared
-            .predict(from, axis, dir)
-            .and_then(|ahead| self.shared.collides_at(ahead, Utc::now()))
+            .collision_worsens(from, axis, dir, lookahead, Utc::now())
         {
             return Err(collision_violation(hit));
         }
@@ -673,26 +727,18 @@ impl SafeMount {
 /// project, where it is not an approximation but the device's actual model: the simulator holds an
 /// `RaDec` and moves it, so north really does raise declination there. What it cannot describe is
 /// a *German equatorial* behind a driver that will not say which way its metal turns.
-fn celestial_lookahead(from: RaDec, axis: Axis, dir: Direction) -> Option<RaDec> {
+fn celestial_lookahead(from: RaDec, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {
     let (ra_hours, dec_degrees) = match (axis, dir) {
         // East is the direction in which right ascension increases (the same mapping the API's
         // `positive`/`negative` uses, and the same one the simulator asserts on).
-        (Axis::Ra, Direction::East) => (
-            from.ra.hours() + LOOKAHEAD_DEGREES / 15.0,
-            from.dec.degrees(),
-        ),
-        (Axis::Ra, Direction::West) => (
-            from.ra.hours() - LOOKAHEAD_DEGREES / 15.0,
-            from.dec.degrees(),
-        ),
-        (Axis::Dec, Direction::North) => (
-            from.ra.hours(),
-            (from.dec.degrees() + LOOKAHEAD_DEGREES).min(90.0),
-        ),
-        (Axis::Dec, Direction::South) => (
-            from.ra.hours(),
-            (from.dec.degrees() - LOOKAHEAD_DEGREES).max(-90.0),
-        ),
+        (Axis::Ra, Direction::East) => (from.ra.hours() + degrees / 15.0, from.dec.degrees()),
+        (Axis::Ra, Direction::West) => (from.ra.hours() - degrees / 15.0, from.dec.degrees()),
+        (Axis::Dec, Direction::North) => {
+            (from.ra.hours(), (from.dec.degrees() + degrees).min(90.0))
+        }
+        (Axis::Dec, Direction::South) => {
+            (from.ra.hours(), (from.dec.degrees() - degrees).max(-90.0))
+        }
         _ => return None,
     };
     // `RaHours::new` normalises, so stepping east past 24 h is 0 h rather than a failure.
@@ -818,9 +864,9 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
         // SDD §5.4.3, and it is first because it is the most urgent: altitude and travel are
         // about where the telescope will be pointing and how wound the cables are; this one is
         // about metal touching metal in the next fraction of a second.
+        let lookahead = lookahead_degrees(lease.speed);
         let breach = shared
-            .predict(position, axis, lease.dir)
-            .and_then(|ahead| shared.collides_at(ahead, now))
+            .collision_worsens(position, axis, lease.dir, lookahead, now)
             .map(|hit| {
                 let what = match hit.what {
                     Obstacle::Tripod => "the tripod legs",
@@ -830,7 +876,8 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
                     Limit::Collision,
                     format!(
                         "the {} axis stopped: the rig is about to touch {what}, {:.0} mm below \
-                         the mount axes. Clear it by hand — do not drive further",
+                         the mount axes. Clear it by hand or drive the direction that backs away \
+                         — that one stays permitted",
                         axis_name(axis),
                         hit.depth_mm
                     ),
@@ -838,7 +885,7 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
             })
             .or_else(|| {
                 shared
-                    .descends_below_limit(position, axis, lease.dir, now)
+                    .descends_below_limit(position, axis, lease.dir, lookahead, now)
                     .map(|altitude| {
                         (
                             Limit::Altitude,

@@ -51,9 +51,21 @@ fn no_geometry_configured_means_no_collision_limit() {
 
 #[test]
 fn a_tube_driven_straight_down_is_refused() {
-    // The pose the 2026-08-01 strike ended in. Whatever the tripod's dimensions, a tube pointing
-    // into the ground from a mount standing on that ground has to be refused.
-    let hit = model()
+    // The pose the 2026-08-01 strike ended in. Whatever the tripod's dimensions, a tube long
+    // enough to reach past its own head height, pointing into the ground from a mount standing
+    // on that ground, has to be refused. (RIG's own 450 mm half-tube genuinely clears here — the
+    // saddle stack holds it 360 mm out from the polar axis and its tip 800 mm off the ground —
+    // which the sideways-saddle bug of 2026-08-02 masked by holding the model's tube 230 mm
+    // closer to the pier than the metal.)
+    let long = RigModel::new(
+        Some(RigGeometry {
+            tube_half_length_mm: 1_400.0,
+            ..RIG
+        }),
+        VILNIUS,
+    )
+    .expect("geometry");
+    let hit = long
         .collides(pointing(-90.0, 0.0), Some(PierSide::West))
         .expect("driving the tube into the ground must be refused");
     assert!(
@@ -311,6 +323,41 @@ fn the_southern_hemisphere_polar_axis_points_south_and_up() {
         m.polar.n < 0.0,
         "in the south it is due south, not due north"
     );
+}
+
+#[test]
+fn penetration_deepens_as_the_pose_does() {
+    // The escape rule's load-bearing property: `penetration_mm` must order colliding poses by
+    // how bad they are, or "permit what shrinks it" would permit the wrong motions. The tripod
+    // shell is not monotone along a sweep (its interior is free space — see the longer-tube
+    // test), but the ground is: a tube tipping further below the horizon reaches deeper into it,
+    // whatever the rig's dimensions. The pencil-thin tripod isolates the ground case.
+    let m = RigModel::new(
+        Some(RigGeometry {
+            top_radius_mm: 1.0,
+            base_radius_mm: 2.0,
+            tube_half_length_mm: 1_500.0,
+            ..RIG
+        }),
+        VILNIUS,
+    )
+    .expect("geometry");
+    let mut last: Option<f64> = None;
+    for altitude in [-70.0, -80.0, -90.0] {
+        let hit = m
+            .collides(pointing(altitude, 180.0), Some(PierSide::West))
+            .unwrap_or_else(|| panic!("a tube this long at {altitude}° reaches the ground"));
+        assert_eq!(hit.what, Obstacle::Ground);
+        assert!(hit.penetration_mm > 0.0, "a collision penetrates by definition");
+        if let Some(previous) = last {
+            assert!(
+                hit.penetration_mm > previous,
+                "tipping lower shrank the penetration: {previous} → {} at {altitude}°",
+                hit.penetration_mm
+            );
+        }
+        last = Some(hit.penetration_mm);
+    }
 }
 
 #[test]

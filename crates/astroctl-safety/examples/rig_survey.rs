@@ -102,6 +102,31 @@ fn survey(label: &str, geometry: RigGeometry, site: Site) {
     println!();
 }
 
+fn pole_bearing_sweep(label: &str, geometry: RigGeometry, site: Site) {
+    // The dec-home diagnostic: pointing at the pole, sweep the RA bearing and print what the
+    // model refuses and by how much. This is the pose an operator sits in at the start and end
+    // of every session, so a refused band here is felt nightly.
+    let model = RigModel::new(Some(geometry), site).expect("geometry");
+    let pole = Horizontal {
+        altitude_degrees: site.latitude_degrees,
+        azimuth_degrees: 0.0,
+    };
+    println!("== bearing sweep at the pole pointing — {label}");
+    let mut refused = 0;
+    for b in (0..360).step_by(3) {
+        if let Some(hit) = model.collides_with_dec_axis(pole, f64::from(b)) {
+            refused += 3;
+            if b % 15 == 0 {
+                println!(
+                    "   bearing {b:3}°: {:?}, penetration {:5.1} mm, {:4.0} mm below the axes",
+                    hit.what, hit.penetration_mm, hit.depth_mm
+                );
+            }
+        }
+    }
+    println!("   refused: ~{refused}° of the full RA turn\n");
+}
+
 fn main() {
     let site = Site {
         latitude_degrees: 54.687,
@@ -142,6 +167,30 @@ fn main() {
         "capsule fattened for the radial camera (r 250)",
         RigGeometry {
             tube_radius_mm: 250.0,
+            ..measured
+        },
+        site,
+    );
+
+    // What the model refuses at dec-home as the RA axis turns — with the full configured rig,
+    // without the counterweight, and with the bare tube radius, so a refusal names its culprit.
+    let configured = RigGeometry {
+        tube_radius_mm: 160.0,
+        ..measured
+    };
+    pole_bearing_sweep("configured rig (r 160, counterweight on)", configured, site);
+    pole_bearing_sweep(
+        "counterweight removed",
+        RigGeometry {
+            counterweight: None,
+            ..configured
+        },
+        site,
+    );
+    pole_bearing_sweep(
+        "bare tube (r 70), counterweight on",
+        RigGeometry {
+            tube_radius_mm: 70.0,
             ..measured
         },
         site,

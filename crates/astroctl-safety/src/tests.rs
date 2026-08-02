@@ -1207,7 +1207,11 @@ async fn the_altitude_limit_depends_on_the_hour_angle_not_only_the_declination()
 async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
     use astroctl_core::config::RigGeometry;
 
-    // A rig whose tube is long enough that pointing anywhere low puts it in the legs.
+    // A rig whose tube is long enough that the pole pointing's all-RA sweep finds a pose in the
+    // legs — the same family the 2026-08-01 strike lived in. The pole rather than a low target,
+    // because under the corrected saddle geometry a low-pointing tube swings wide of the tripod
+    // and the altitude limit owns that region anyway; the collision limit's own territory is the
+    // pier zone, and the sweep is how a pointing-only caller meets it.
     let geometry = RigGeometry {
         dec_axis_offset_mm: 180.0,
         tube_half_length_mm: 1_400.0,
@@ -1219,8 +1223,7 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         base_radius_mm: 650.0,
         counterweight: None,
     };
-    let at = Utc::now();
-    let low = target_at_altitude(VILNIUS, 20.0, at);
+    let low = RaDec::from_parts(0.0, 90.0).expect("the pole is a coordinate");
 
     let unmeasured = RecordingMount::at(low).shared();
     SafeMount::with_geometry(
@@ -1267,6 +1270,72 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         "the axis was commanded despite the refusal: {:?}",
         measured.log()
     );
+}
+
+/// A pose already inside the model permits the motion that backs out (SDD §5.4.3's escape rule).
+///
+/// Hardware, 2026-08-02, evening: an 835× press overshot the altitude floor by ~2°, the fat
+/// capsule called the resulting pose "inside" the cone while the metal touched nothing, and the
+/// positional collision check then refused the way out along with everything else — the mount
+/// was bricked at altitude 13° until this rule existed. Below is that trap in miniature on the
+/// ground obstacle, where penetration is provably monotone: from inside, the climbing sense must
+/// be permitted *because its predicted penetration shrinks*, and the digging sense must stay
+/// refused.
+#[tokio::test]
+async fn a_pose_inside_the_model_permits_the_motion_that_backs_out() {
+    use astroctl_core::config::RigGeometry;
+
+    // A pencil-thin tripod isolates the ground, and a tube this long is inside it at −30° —
+    // the lowest the meridian reaches from this latitude is −35°, which bounds the fixture.
+    let geometry = RigGeometry {
+        dec_axis_offset_mm: 180.0,
+        tube_half_length_mm: 2_400.0,
+        tube_radius_mm: 120.0,
+        saddle_offset_mm: 180.0,
+        head_height_mm: 1_250.0,
+        mount_body_height_mm: 250.0,
+        top_radius_mm: 1.0,
+        base_radius_mm: 2.0,
+        counterweight: None,
+    };
+    let at = Utc::now();
+    let buried = target_at_altitude(VILNIUS, -30.0, at);
+
+    let mount = RecordingMount::at(buried)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .shared();
+    let safe = SafeMount::with_geometry(
+        Arc::clone(&mount) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    );
+
+    safe.slew_for(
+        Axis::Dec,
+        Direction::North,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("climbing out of the obstacle shrinks the penetration and must be permitted");
+    assert!(
+        mount.log().contains(&"slew".to_owned()),
+        "the escape never reached the device: {:?}",
+        mount.log()
+    );
+
+    let error = safe
+        .slew_for(
+            Axis::Dec,
+            Direction::South,
+            SlewSpeed::Medium,
+            Duration::from_millis(500),
+        )
+        .await
+        .expect_err("digging deeper must stay refused");
+    assert!(matches!(error, DeviceError::LimitViolation { .. }));
 }
 
 /// Home is not a prison once the driver says where the declination axis is (SDD §5.4.3).

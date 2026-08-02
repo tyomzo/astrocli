@@ -117,6 +117,11 @@ const WEST: Vec3 = Vec3::new(-1.0, 0.0, 0.0);
 pub struct Collision {
     /// How far below the mount head the offending point sits, in millimetres. Negative is above.
     pub depth_mm: f64,
+    /// How far past the obstacle's surface the capsule's own surface reaches, in millimetres.
+    /// Strictly positive for any collision, and the number that says which of two colliding
+    /// poses is *worse* — which is what lets a limit permit the motion that shrinks it
+    /// (SDD §5.4.3's escape rule, added after the 2026-08-02 altitude-overshoot trap).
+    pub penetration_mm: f64,
     /// What it reached.
     pub what: Obstacle,
 }
@@ -193,7 +198,7 @@ impl RigModel {
         signs
             .iter()
             .filter_map(|&sign| self.capsule_collides(dec_axis.scale(sign), t))
-            .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+            .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
     }
 
     /// Like [`collides`](Self::collides), with the declination axis's actual bearing supplied by
@@ -241,7 +246,7 @@ impl RigModel {
                 let axis = seed.scale(angle.cos()).add(other.scale(angle.sin()));
                 self.capsule_collides(axis, tube)
             })
-            .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+            .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
     }
 
     /// Test the moving assembly — the tube capsule and, when measured, the counterweight capsule
@@ -251,16 +256,16 @@ impl RigModel {
     /// `dec_axis_offset_mm` along it and its axis is the optical axis `tube`; the counterweight
     /// runs the other way, from the axes' intersection out along `-d̂`.
     fn capsule_collides(&self, dec_axis: Vec3, tube: Vec3) -> Option<Collision> {
-        // The tube lies on the saddle, not through the declination axis, so its axis is offset
-        // perpendicular to both — and that offset rotates with declination, which is part of what
-        // makes the model see a declination slew at all.
-        let saddle = dec_axis
-            .cross(tube)
-            .unit()
-            .map_or(Vec3::new(0.0, 0.0, 0.0), |u| {
-                u.scale(self.geometry.saddle_offset_mm)
-            });
-        let centre = dec_axis.scale(self.geometry.dec_axis_offset_mm).add(saddle);
+        // The tube lies *on* the saddle, and the saddle stack — plate, dovetail, rings — builds
+        // radially outward along the declination axis, so the optical axis crosses the `d̂` line
+        // at `dec_axis_offset + saddle_offset` from the polar axis. The first version put the
+        // saddle term perpendicular to both axes (`d̂×t̂`), which twisted the tube 230 mm
+        // *sideways* and left it 230 mm closer to the pier than the metal ever is; the model then
+        // refused a ~140° band of right-ascension bearings at dec-home for a tube the operator
+        // could see standing half a metre clear (2026-08-02, the bearing-sweep diagnostic in
+        // `examples/rig_survey.rs`). The camera confirmed the frame: the whole stack points along
+        // `d̂`, away from the mount.
+        let centre = dec_axis.scale(self.geometry.dec_axis_offset_mm + self.geometry.saddle_offset_mm);
         let half = self.geometry.tube_half_length_mm;
         let tube_hit = (0..=SAMPLES)
             .filter_map(|i| {
@@ -268,7 +273,7 @@ impl RigModel {
                 let along = (2.0 * i as f64 / SAMPLES as f64 - 1.0) * half;
                 self.point_collides(centre.add(tube.scale(along)), self.geometry.tube_radius_mm)
             })
-            .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm));
+            .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm));
         let counterweight_hit = self.geometry.counterweight.and_then(|cw| {
             (0..=SAMPLES)
                 .filter_map(|i| {
@@ -276,12 +281,12 @@ impl RigModel {
                     let along = cw.length_mm * i as f64 / SAMPLES as f64;
                     self.point_collides(dec_axis.scale(-along), cw.radius_mm)
                 })
-                .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+                .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
         });
         tube_hit
             .into_iter()
             .chain(counterweight_hit)
-            .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+            .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
     }
 
     /// One point of a capsule's axis against the obstacle, inflated by that capsule's radius `r`
@@ -310,6 +315,7 @@ impl RigModel {
         if p.u - r <= -g.head_height_mm {
             return Some(Collision {
                 depth_mm: depth,
+                penetration_mm: r - p.u - g.head_height_mm,
                 what: Obstacle::Ground,
             });
         }
@@ -331,6 +337,7 @@ impl RigModel {
         let distance = (px - cx).hypot(pz - cz);
         (distance < r).then_some(Collision {
             depth_mm: depth,
+            penetration_mm: r - distance,
             what: Obstacle::Tripod,
         })
     }
