@@ -28,6 +28,8 @@ const POSITION: MountPosition = {
   alt: 47.2,
   az: 128.4,
   pier_side: 'west',
+  ra_travel: null,
+  dec_travel: null,
 };
 
 function observed(value: Partial<MountPosition> = {}, atMs = T0): Observation<MountPosition> {

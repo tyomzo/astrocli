@@ -9,9 +9,8 @@ mount:
   driver: skywatcher        # "skywatcher", "indi", "ascom_alpaca", "simulator"
   port: auto                # "auto" for detection, or "/dev/ttyUSB0"
   baud: 9600
-  park_position:
-    ra_hours: 0.0
-    dec_degrees: 90.0
+  # No park_position: park drives both axis counters to the mechanical home (0x800000), the pose
+  # power-on assumes. It is a fact about the mount, not a setting (M3-T07).
   settle_time_seconds: 3    # pause after slew before capture
   serial:
     request_timeout_ms: 500   # per request/response exchange
@@ -21,6 +20,9 @@ mount:
   limits:
     min_altitude_degrees: 15    # reject goto/slew targets below this altitude (MNT-15)
     meridian_limit_minutes: 15  # stop tracking this long past the meridian (MNT-16)
+    max_travel_from_home_degrees: 180  # refuse a manual slew winding an axis further than
+                                       #   this from the home pose (M3-T07). A property of
+                                       #   your cabling: lower it if your leads are short.
     slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
     slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
   # indi_device: "EQMod Mount"    # if driver=indi

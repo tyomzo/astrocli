@@ -83,6 +83,7 @@ export const ERROR_CODES = [
   'CHECKSUM_MISMATCH',
   'LIMIT_ALTITUDE',
   'LIMIT_MERIDIAN',
+  'LIMIT_TRAVEL',
   'SLEW_TTL_EXPIRED',
   'AUTH',
   'FRAME_ID_CONFLICT',
@@ -120,6 +121,17 @@ export interface MountPosition {
   alt: number | null;
   az: number | null;
   pier_side: PierSide;
+  /**
+   * Degrees the right-ascension **axis** has been driven from the mount's mechanical home pose,
+   * or `null` from a mount with no home reference.
+   *
+   * Not a coordinate and not folded to +/-180: this is accumulated rotation, so an axis wound
+   * 215.6 degrees past home reads 215.6 and not the congruent -144.4. It is what tells an
+   * operator on a D-pad how much winding the cables have taken, which nothing else here says.
+   */
+  ra_travel: number | null;
+  /** The declination axis's travel from home. Nullable together with `ra_travel`. */
+  dec_travel: number | null;
 }
 
 /**
@@ -330,10 +342,23 @@ export function parseEvent(value: unknown): TelemetryEvent | null {
       const dec = num(data['dec']);
       const pier = oneOf(data['pier_side'], ['east', 'west', 'unknown'] as const);
       if (ra === null || dec === null || pier === null) return null;
+      // `ra_travel`/`dec_travel` are narrowed but never required, the same way `tracking_mode`
+      // is: a node older than this bundle does not send them, and refusing the frame over a
+      // missing field would blank the pointing panel against a node that is working perfectly.
+      // Absent and unreadable both become `null`, which the UI renders as an explicit unknown —
+      // never as 0.0°, which would say the axis is at home when nobody knows where it is.
       return {
         topic: 'mount.position',
         ts,
-        data: { ra, dec, alt: num(data['alt']), az: num(data['az']), pier_side: pier },
+        data: {
+          ra,
+          dec,
+          alt: num(data['alt']),
+          az: num(data['az']),
+          pier_side: pier,
+          ra_travel: num(data['ra_travel']),
+          dec_travel: num(data['dec_travel']),
+        },
       };
     }
     case 'mount.status': {

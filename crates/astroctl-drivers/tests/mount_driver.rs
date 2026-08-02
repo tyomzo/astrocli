@@ -24,9 +24,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use astroctl_core::config::{
-    MountConfig, MountDriver, MountLimits, ParkPosition, SerialConfig, SiteConfig,
-};
+use astroctl_core::config::{MountConfig, MountDriver, MountLimits, SerialConfig, SiteConfig};
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{Axis, MountState, RaDec, SlewSpeed, TrackingMode};
 use astroctl_drivers::skywatcher::codec::{decode_u24, encode_u24, U24};
@@ -502,10 +500,6 @@ fn config(settle_seconds: u32) -> MountConfig {
         driver: MountDriver::Skywatcher,
         port: "auto".to_owned(),
         baud: 9600,
-        park_position: ParkPosition {
-            ra_hours: 0.0,
-            dec_degrees: 90.0,
-        },
         settle_time_seconds: settle_seconds,
         serial: SerialConfig {
             request_timeout_ms: 500,
@@ -516,6 +510,7 @@ fn config(settle_seconds: u32) -> MountConfig {
         limits: MountLimits {
             min_altitude_degrees: 15.0,
             meridian_limit_minutes: 15.0,
+            max_travel_from_home_degrees: 180.0,
             slew_ttl_default_ms: 500,
             slew_ttl_max_ms: 2000,
         },
@@ -1109,6 +1104,164 @@ async fn a_park_ends_stopped_untracked_and_refusing_motion_until_it_is_unparked(
         driver.status().await.expect("status").state,
         MountState::Idle
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_park_drives_both_counters_home_and_unwinds_rather_than_taking_the_short_way() {
+    // M3-T07, the whole of it, asserted **by the frames** and by the counters.
+    //
+    // The reported sky position proves nothing here and that is exactly how the defect survived:
+    // the old park was a goto to `ra 0, dec 90`, and at declination 90 every right ascension names
+    // the pole, so the target was met by the declination axis alone. On 2026-08-02 it was met with
+    // nothing commanded at all — the axis was already 215.6° from home and the app reported
+    // `parked: true`, dec 90, tube at the pole. Every statement true; together useless.
+    //
+    // 5,400,000 counts is 215.4° at the operator's gearing: the wind of that evening, to a round
+    // number the double can hold exactly.
+    const WOUND: u32 = 5_400_000;
+    const DEC_OFF: u32 = 1_128_000; // 45°
+
+    let mount = SyntaMount::new();
+    mount.park_counter(Axis::Ra, HOME + WOUND);
+    mount.park_counter(Axis::Dec, HOME + DEC_OFF);
+    let driver = connected(&mount, 0).await;
+    driver
+        .start_tracking(TrackingMode::Sidereal)
+        .await
+        .expect("tracks");
+    mount.clear_frames();
+
+    driver.park().await.expect("parks");
+
+    let frames = mount.frames();
+    // Both axes are commanded. The old park sent nothing on axis 1, which is the defect.
+    for axis in ['1', '2'] {
+        let program: Vec<&String> = frames
+            .iter()
+            .filter(|frame| frame.as_bytes()[2] == axis as u8 && frame.as_bytes()[1] == b'G')
+            .collect();
+        assert_eq!(
+            program.len(),
+            1,
+            "axis {axis} must be programmed exactly once by a park: {frames:?}"
+        );
+    }
+
+    // The direction digit is `1` — **backward**, i.e. unwinding. The short way round from 215.4°
+    // past home is +144.6° *forward*, which reaches a congruent mechanical angle with the cable a
+    // further half-turn worse; `home_steps` sends the raw counter delta for exactly this reason.
+    assert!(
+        frames.contains(&":G101".to_owned()),
+        "the right-ascension axis unwinds: GOTO, high class, backward — {frames:?}"
+    );
+    assert!(
+        frames.contains(&format!(":H1{}", hex(WOUND))),
+        "the increment is the whole {WOUND}-count unwind and not the 3,624,000-count short way \
+         round: {frames:?}"
+    );
+    assert!(
+        frames.contains(&":G201".to_owned()) && frames.contains(&format!(":H2{}", hex(DEC_OFF))),
+        "and the declination axis is driven home too: {frames:?}"
+    );
+
+    // No `:j` beyond the counter reads a goto needs, and in particular nothing that would only be
+    // needed to turn counters into a sky coordinate: park consults no map, no site and no clock.
+    assert_eq!(
+        &frames[..2],
+        &[":j1", ":j2"],
+        "the counters the program is built against, read with the axes stopped: {frames:?}"
+    );
+
+    // The acceptance criterion, stated where it cannot be degenerate.
+    assert_eq!(mount.counter(Axis::Ra), HOME, "the RA counter is home");
+    assert_eq!(mount.counter(Axis::Dec), HOME, "the DEC counter is home");
+    assert_eq!(
+        &frames[frames.len() - 2..],
+        &[":K1", ":K2"],
+        "a park is a goto and then a stop — the protocol has no park opcode: {frames:?}"
+    );
+    assert!(driver.status().await.expect("status").parked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_park_from_the_home_pose_commands_nothing_and_is_still_a_park() {
+    // The other end of the same rule. Both counters already read `0x800000`, so both moves are
+    // zero — and a move of nothing has no inside for a break point, so the codec refuses one and
+    // the driver must send no motion frames at all. It is still a park: the interlock latches, and
+    // this time the mount really is in the pose the flag claims.
+    let mount = SyntaMount::new();
+    let driver = connected(&mount, 0).await;
+    mount.clear_frames();
+
+    driver.park().await.expect("parks");
+
+    let frames = mount.frames();
+    assert_eq!(
+        frames,
+        vec![":j1", ":j2", ":j1", ":j2", ":K1", ":K2"],
+        "read both counters, find them home, command nothing, re-derive the branch on arrival, \
+         stop — and not one motion opcode: {frames:?}"
+    );
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| frame.as_bytes()[1].is_ascii_uppercase() && frame.as_bytes()[1] != b'K'),
+        "no action opcode but the stop: {frames:?}"
+    );
+    assert_eq!(mount.counter(Axis::Ra), HOME);
+    assert_eq!(mount.counter(Axis::Dec), HOME);
+    let status = driver.status().await.expect("status");
+    assert_eq!(status.state, MountState::Parked);
+    assert!(status.parked);
+}
+
+#[tokio::test(start_paused = true)]
+async fn travel_from_home_is_accumulated_rotation_and_is_never_folded_to_the_short_way() {
+    // M3-T07's second half, at the layer that measures it. `AxisScale::angle_at` folds into
+    // [-180, 180) because its subject is where the tube points; travel must not, because its
+    // subject is how much rotation a power lead and a USB cable have absorbed. An axis wound
+    // 215.4° past home reads 215.4 and not 144.6 the other way — the folded number would tell the
+    // safety wrapper the cable was better off than it is, and would name the winding direction as
+    // the way out.
+    const WOUND: u32 = 5_400_000; // 215.4255° at the operator's gearing
+
+    let mount = SyntaMount::new();
+    mount.park_counter(Axis::Ra, HOME + WOUND);
+    mount.park_counter(Axis::Dec, HOME - 1_128_000); // 45° the other way
+    let driver = connected(&mount, 0).await;
+
+    assert!(
+        driver.axis_travel().is_none(),
+        "nothing has read a counter yet, so there is no travel to report"
+    );
+    driver.position().await.expect("a position");
+
+    let travel = driver.axis_travel().expect("the counters have been read");
+    let expected = f64::from(WOUND) / f64::from(CPR) * 360.0;
+    assert!(
+        (travel.ra.degrees - expected).abs() < 1e-6,
+        "expected {expected}° of travel, got {}",
+        travel.ra.degrees
+    );
+    assert!(
+        travel.ra.degrees > 180.0,
+        "a folded reading would be {}° — the whole defect",
+        360.0 - travel.ra.degrees
+    );
+    // Unsigned on both axes: the declination axis is wound the *other* way and has still gone 45°.
+    assert!((travel.dec.degrees - 45.0).abs() < 1e-6, "{:?}", travel.dec);
+
+    // Homeward is the direction that shrinks the counter's distance from `0x800000`. In the north
+    // east is a decreasing right-ascension counter, so an over-wound axis unwinds east — and the
+    // declination axis, wound the other way, unwinds the other way.
+    assert_eq!(travel.ra.homeward, astroctl_core::types::Direction::East);
+    assert_eq!(travel.dec.homeward, astroctl_core::types::Direction::South);
+
+    // And park is what makes it zero, which is the point of the two halves being one task.
+    driver.park().await.expect("parks");
+    let travel = driver.axis_travel().expect("still connected");
+    assert!(travel.ra.degrees.abs() < 1e-9, "{:?}", travel.ra);
+    assert!(travel.dec.degrees.abs() < 1e-9, "{:?}", travel.dec);
 }
 
 #[tokio::test(start_paused = true)]

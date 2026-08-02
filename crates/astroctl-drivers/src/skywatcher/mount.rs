@@ -45,8 +45,8 @@ use std::time::Duration;
 use astroctl_core::config::{MountConfig, SiteConfig};
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus, PierSide,
-    RaDec, SlewSpeed, TrackingMode,
+    Axis, AxisTravel, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus,
+    MountTravel, PierSide, RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use astroctl_hal::registry::{DetectedDevice, DriverInitError, MountFactory};
@@ -54,7 +54,7 @@ use async_trait::async_trait;
 use tokio::sync::oneshot;
 
 use super::codec::{
-    AxisStatus, Command, Counts, FirmwareVersion, GotoProgram, MotionDirection, SpeedClass,
+    AxisStatus, Command, Counts, FirmwareVersion, GotoProgram, MotionDirection, Move, SpeedClass,
 };
 use super::controller::exchange::{handshake, run_goto, Exchange as ExchangeSeam, SequenceError};
 use super::controller::{AxisParams, ControllerError, MotorController};
@@ -260,6 +260,19 @@ struct State {
     /// physically moves the tube past the pole, and caching it is what keeps a 2 Hz manual-slew
     /// renewal from costing a counter read.
     branch: Option<Branch>,
+    /// The counters as of the last read, for [`MountDevice::axis_travel`] (M3-T07).
+    ///
+    /// Cached rather than fetched on demand so that reporting travel costs no exchange: the
+    /// safety watch reads a position at 2 Hz and asks for travel immediately afterwards, so the
+    /// value is fresh by construction and a second pair of `:j` frames would learn nothing.
+    ///
+    /// **Updated by `read_counts`, unlike `branch`, and the asymmetry is deliberate.** A stalled
+    /// axis keeps counting steps the metal never made (E11), which corrupts a *branch* into
+    /// inverting the declination motor's sense — a wrong answer. It cannot corrupt travel in the
+    /// dangerous direction: a phantom count over-reports how far the axis has gone, so a limit
+    /// built on it refuses earlier than the metal requires. Erring toward "stop winding" is the
+    /// error to have.
+    counts: Option<AxisCounts>,
     /// Bumped by everything that takes the axes away from someone. A goto that wakes to find this
     /// changed knows it was overridden — and, unlike a cancellation token, this survives the
     /// caller's future being dropped.
@@ -341,8 +354,6 @@ struct Shared {
     timings: SerialTimings,
     site: SiteConfig,
     clock: Arc<dyn SiderealClock>,
-    /// `mount.park_position`.
-    park: RaDec,
     /// `mount.settle_time_seconds`.
     settle: Duration,
     /// The sink every link this driver spawns reports to. Created once, at construction, so a
@@ -383,7 +394,9 @@ impl SkywatcherMount {
     /// belongs to `connect`.
     ///
     /// # Errors
-    /// [`DriverInitError`] if `mount.park_position` is not a coordinate.
+    /// [`DriverInitError`] — none is produced today, but the signature is
+    /// [`MountFactory::create`]'s and a driver that cannot be built from a valid configuration is
+    /// a case this type is entitled to grow back.
     pub fn new(
         config: &MountConfig,
         site: SiteConfig,
@@ -432,10 +445,6 @@ impl SkywatcherMount {
         cable: Cable,
         describe: String,
     ) -> Result<Self, DriverInitError> {
-        let park = RaDec::from_parts(
-            config.park_position.ra_hours,
-            config.park_position.dec_degrees,
-        )?;
         let (watchdog, source) = watchdog_channel();
         Ok(Self {
             shared: Arc::new(Shared {
@@ -443,7 +452,6 @@ impl SkywatcherMount {
                 timings: SerialTimings::from(&config.serial),
                 site,
                 clock,
-                park,
                 settle: Duration::from_secs(u64::from(config.settle_time_seconds)),
                 watchdog,
                 watchdog_source: Mutex::new(Some(source)),
@@ -455,6 +463,7 @@ impl SkywatcherMount {
                     ra: Activity::Free,
                     dec: Activity::Free,
                     branch: None,
+                    counts: None,
                     generation: 0,
                     overridden_by: "nothing",
                 }),
@@ -571,6 +580,10 @@ impl Shared {
         // and the side is a property of which half of the meridian the mount is working. Only the
         // deliberate acts change it — a goto that chose a side, or a fresh connect — so those are
         // the only places that write it (`refresh_branch`).
+        //
+        // The *counters* are cached here, though, because `axis_travel` needs them and a stall
+        // cannot make that answer unsafe — see `State::counts`.
+        self.locked().counts = Some(counts);
         Ok(counts)
     }
 
@@ -742,6 +755,100 @@ struct Leg {
     programmed: bool,
 }
 
+/// What a supervised motion is aiming at.
+///
+/// The two arms are different *kinds* of destination, not two spellings of one, and separating
+/// them is the whole of M3-T07.
+#[derive(Debug, Clone, Copy)]
+enum Destination {
+    /// A sky coordinate, resolved through the mech↔sky map, the site and local sidereal time.
+    Sky(RaDec),
+    /// Both axis counters at the mechanical home, `0x800000`.
+    ///
+    /// **Deliberately not expressible as [`Self::Sky`], and that is the point.** Power-on sets
+    /// both counters to home regardless of where the metal is, so the contract of parking is not
+    /// "point at the pole" but "return to the pose power-on will assume". The pole is where the
+    /// home pose happens to look, and a sky target there cannot constrain the right-ascension
+    /// axis at all: at declination 90 every right ascension names the same point, so the goto is
+    /// satisfied by the declination axis alone. That is how a park reported success on
+    /// 2026-08-02 with the RA axis 215.6° from home and nothing commanded.
+    ///
+    /// This arm consults no coordinate map, no sidereal clock and no site. It is the one motion
+    /// in the driver that is correct independently of M3-T06's hour-angle correction — and, per
+    /// the collision entry in `spikes/skywatcher-heq5/FINDINGS.md`, the correct primitive to have
+    /// whenever the map is under suspicion.
+    Home,
+}
+
+/// One axis's move, before anything has been sent: where it starts, how far, where it lands.
+///
+/// The seam between "what does this destination mean" and "how is a goto programmed". Both
+/// [`Destination`] arms produce this, and only one of them has ever heard of the sky.
+#[derive(Debug, Clone, Copy)]
+struct Step {
+    axis: Axis,
+    start: Counts,
+    movement: Move,
+    arrival: Counts,
+}
+
+/// The two moves a sky coordinate implies, through the coordinate map (SDD §5.2.3).
+fn sky_steps(
+    session: Session,
+    from: AxisCounts,
+    target: RaDec,
+    lst: Lst,
+) -> Result<[Step; 2], DeviceError> {
+    let solution = session
+        .geometry
+        .goto(from, target, lst)
+        .map_err(|error| DeviceError::Protocol(error.to_string()))?;
+    Ok([
+        Step {
+            axis: Axis::Ra,
+            start: from.ra,
+            movement: solution.ra(),
+            arrival: solution.destination().ra,
+        },
+        Step {
+            axis: Axis::Dec,
+            start: from.dec,
+            movement: solution.dec(),
+            arrival: solution.destination().dec,
+        },
+    ])
+}
+
+/// The two moves that put both counters back on `0x800000` — M3-T07's whole subject.
+///
+/// # Why the raw delta and not the short way round
+///
+/// [`AxisScale::shortest_delta`](super::math::AxisScale::shortest_delta) reduces modulo the counts
+/// per revolution, so from 215.6° past home it would return −144.4° — the *same mechanical pose*,
+/// reached by winding a further 144° in the direction that made the problem. That is right for a
+/// goto, whose subject is where the tube points, and wrong here, whose subject is the counter
+/// itself. Park unwinds; it does not take the scenic route to a congruent angle.
+///
+/// So the delta is `home − counts` exactly, and the arrival is `Counts::HOME` exactly. The
+/// magnitude always fits the 24-bit increment register: both endpoints are 24-bit counters and
+/// home is `0x800000`, so `|delta| ≤ 0x800000 < 0xFFFFFF`. The `map_err` is therefore unreachable
+/// rather than defensive, and is written as a total conversion instead of an `expect` because
+/// panicking is not a thing to do while parking a telescope.
+fn home_steps(from: AxisCounts) -> Result<[Step; 2], DeviceError> {
+    let home = i64::from(Counts::HOME.get());
+    let step = |axis: Axis, start: Counts| -> Result<Step, DeviceError> {
+        let movement = Move::from_delta(home - i64::from(start.get()))
+            .map_err(|error| DeviceError::Protocol(error.to_string()))?;
+        Ok(Step {
+            axis,
+            start,
+            movement,
+            arrival: Counts::HOME,
+        })
+    };
+    Ok([step(Axis::Ra, from.ra)?, step(Axis::Dec, from.dec)?])
+}
+
 /// Program a goto on both axes and start them, or leave nothing moving.
 ///
 /// The order is per axis and sequential because there is one cable, and each axis's eight frames
@@ -753,40 +860,25 @@ async fn program_goto(
     shared: &Shared,
     link: &SerialLink,
     session: Session,
-    from: AxisCounts,
-    target: RaDec,
-    lst: Lst,
+    steps: [Step; 2],
     generation: u64,
 ) -> Result<[Leg; 2], DeviceError> {
-    let solution = session
-        .geometry
-        .goto(from, target, lst)
-        .map_err(|error| DeviceError::Protocol(error.to_string()))?;
+    let mut done = steps.map(|step| Leg {
+        axis: step.axis,
+        target: step.arrival,
+        programmed: false,
+    });
 
-    let legs = [
-        (Axis::Ra, from.ra, solution.ra(), solution.destination().ra),
-        (
-            Axis::Dec,
-            from.dec,
-            solution.dec(),
-            solution.destination().dec,
-        ),
-    ];
-
-    let mut done = [
-        Leg {
-            axis: Axis::Ra,
-            target: solution.destination().ra,
-            programmed: false,
+    for (
+        index,
+        Step {
+            axis,
+            start,
+            movement,
+            arrival,
         },
-        Leg {
-            axis: Axis::Dec,
-            target: solution.destination().dec,
-            programmed: false,
-        },
-    ];
-
-    for (index, (axis, start, movement, arrival)) in legs.into_iter().enumerate() {
+    ) in steps.into_iter().enumerate()
+    {
         // Checked before **every** axis, not once at the top. Programming a goto is eight frames
         // and ~128 ms, and an emergency stop that arrives in the middle of it must not be followed
         // by this loop calmly sending the next axis's `J`. This is the check that makes the stop
@@ -833,12 +925,12 @@ async fn program_goto(
 /// keeps going — which is the whole point.
 async fn supervise(
     shared: Arc<Shared>,
-    target: RaDec,
+    destination: Destination,
     parking: bool,
     generation: u64,
     report: oneshot::Sender<Result<(), DeviceError>>,
 ) {
-    let outcome = run_supervised(&shared, target, parking, generation).await;
+    let outcome = run_supervised(&shared, destination, parking, generation).await;
 
     // Release before reporting, so a caller that immediately issues its next command finds the
     // axes free. `release` is a no-op if something else has since taken them.
@@ -848,7 +940,7 @@ async fn supervise(
 
 async fn run_supervised(
     shared: &Arc<Shared>,
-    target: RaDec,
+    destination: Destination,
     parking: bool,
     generation: u64,
 ) -> Result<(), DeviceError> {
@@ -865,9 +957,18 @@ async fn run_supervised(
         // motion on top of it.
         return Err(aborted(shared, parking));
     }
-    let lst = shared.lst()?;
 
-    let legs = match program_goto(shared, &link, session, from, target, lst, generation).await {
+    // The clock is read inside the `Sky` arm and nowhere else. A park that asked for local
+    // sidereal time would fail on a node whose clock wiring is broken — and would be *right* to,
+    // if it needed the answer. It does not: driving a counter to `0x800000` is the same motion at
+    // every instant of the night, so making park depend on the clock would be inventing a way for
+    // the one motion that stows the telescope to become unavailable.
+    let steps = match destination {
+        Destination::Sky(target) => sky_steps(session, from, target, shared.lst()?)?,
+        Destination::Home => home_steps(from)?,
+    };
+
+    let legs = match program_goto(shared, &link, session, steps, generation).await {
         Ok(legs) => legs,
         Err(error) => {
             // Nothing may be moving, but something might: a failure between RA's `J` and DEC's
@@ -1160,7 +1261,7 @@ impl MountDevice for SkywatcherMount {
     }
 
     async fn goto(&self, target: RaDec) -> Result<(), DeviceError> {
-        run_goto_command(&self.shared, target, false).await
+        run_goto_command(&self.shared, Destination::Sky(target), false).await
     }
 
     async fn sync(&self, pos: RaDec) -> Result<(), DeviceError> {
@@ -1356,11 +1457,16 @@ impl MountDevice for SkywatcherMount {
         Ok(())
     }
 
+    /// Drives **both axis counters** to `0x800000`, the pose power-on assumes (M3-T07, MNT-07).
+    ///
+    /// Not a goto to a sky coordinate. See [`Destination::Home`] for why no sky target can state
+    /// this requirement, and [`home_steps`] for why the move is the raw counter delta rather than
+    /// the short way round.
     async fn park(&self) -> Result<(), DeviceError> {
         if self.shared.locked().parked {
             return Ok(()); // parking a parked mount is not an error
         }
-        run_goto_command(&self.shared, self.shared.park, true).await?;
+        run_goto_command(&self.shared, Destination::Home, true).await?;
         // The Synta protocol has no park opcode, so a park is a goto and then a stop: the axes are
         // already stopped by the bounded goto, and `K` is what makes sure nothing restarted them.
         let (link, session) = self.shared.engaged()?;
@@ -1407,6 +1513,37 @@ impl MountDevice for SkywatcherMount {
 
     fn capabilities(&self) -> MountCapabilities {
         self.shared.capabilities()
+    }
+
+    /// Travel from `0x800000` on both axes, as of the last counter read (M3-T07).
+    ///
+    /// `None` before the handshake or before the first read — there is no home reference until
+    /// the counts per revolution are known, and inventing one would hand the safety wrapper a
+    /// number it would then enforce a limit against.
+    fn axis_travel(&self) -> Option<MountTravel> {
+        let state = self.shared.locked();
+        let session = state.session?;
+        let counts = state.counts?;
+        // Cold cache is `Normal`, matching `sense`: the branch only decides which sky direction
+        // *names* the homeward motion on the declination axis. Getting it wrong swaps two labels
+        // and never changes how far the axis has travelled, which is the number the limit
+        // compares. It also cannot be wrong for long — one `sense` call on a declination slew
+        // fills the cache from the mount.
+        let branch = state.branch.unwrap_or(Branch::Normal);
+        drop(state);
+
+        let hemisphere = session.geometry.hemisphere();
+        let of = |axis: Axis, scale: super::math::AxisScale, at: Counts| {
+            let travel = scale.travel_from_home(at);
+            AxisTravel {
+                degrees: travel.abs(),
+                homeward: homeward(axis, travel, branch, hemisphere),
+            }
+        };
+        Some(MountTravel {
+            ra: of(Axis::Ra, session.geometry.ra_scale(), counts.ra),
+            dec: of(Axis::Dec, session.geometry.dec_scale(), counts.dec),
+        })
     }
 
     fn device_info(&self) -> DeviceInfo {
@@ -1460,6 +1597,36 @@ fn firmware_string(firmware: FirmwareVersion) -> String {
     )
 }
 
+/// The sky direction that drives an axis back toward home (M3-T07).
+///
+/// `travel` is signed in counter terms — positive means an increasing counter — so the motor has
+/// to run the other way, and which *sky* direction that is depends on the hemisphere and, for the
+/// declination axis, on the mechanical branch. This is the one place that mapping is inverted, and
+/// it is inverted by asking [`motor_direction`] rather than by restating its table: a second copy
+/// of the sign rules is a second chance to get a limit's escape hatch backwards, which would refuse
+/// the direction that unwinds and permit the one that winds.
+fn homeward(
+    axis: Axis,
+    travel: f64,
+    branch: Branch,
+    hemisphere: super::math::Hemisphere,
+) -> Direction {
+    let wanted = if travel > 0.0 {
+        MotionDirection::Backward
+    } else {
+        MotionDirection::Forward
+    };
+    let (first, second) = match axis {
+        Axis::Ra => (Direction::East, Direction::West),
+        Axis::Dec => (Direction::North, Direction::South),
+    };
+    if motor_direction(first, branch, hemisphere) == wanted {
+        first
+    } else {
+        second
+    }
+}
+
 /// Which axis a sky direction belongs to.
 const fn axis_of(direction: Direction) -> Axis {
     match direction {
@@ -1471,7 +1638,7 @@ const fn axis_of(direction: Direction) -> Axis {
 /// The body of both `goto` and `park`: claim synchronously, supervise asynchronously, wait.
 async fn run_goto_command(
     shared: &Arc<Shared>,
-    target: RaDec,
+    destination: Destination,
     parking: bool,
 ) -> Result<(), DeviceError> {
     shared.link()?;
@@ -1490,7 +1657,7 @@ async fn run_goto_command(
     let (report, wait) = oneshot::channel();
     tokio::spawn(supervise(
         Arc::clone(shared),
-        target,
+        destination,
         parking,
         generation,
         report,
@@ -1646,7 +1813,7 @@ impl MountFactory for SkywatcherMountFactory {
 mod tests {
     use super::*;
     use crate::skywatcher::mock_port::{MockPort, Scripted};
-    use astroctl_core::config::{MountDriver, MountLimits, ParkPosition, SerialConfig};
+    use astroctl_core::config::{MountDriver, MountLimits, SerialConfig};
     use astroctl_hal::registry::DriverRegistry;
 
     /// Oslo, the site the shipped example configures.
@@ -1665,10 +1832,6 @@ mod tests {
             driver: MountDriver::Skywatcher,
             port: "auto".to_owned(),
             baud: 9600,
-            park_position: ParkPosition {
-                ra_hours: 0.0,
-                dec_degrees: 90.0,
-            },
             // Zero, so a test that is not about settling does not pay three virtual seconds of it.
             settle_time_seconds: 0,
             serial: SerialConfig {
@@ -1680,6 +1843,7 @@ mod tests {
             limits: MountLimits {
                 min_altitude_degrees: 15.0,
                 meridian_limit_minutes: 15.0,
+                max_travel_from_home_degrees: 180.0,
                 slew_ttl_default_ms: 500,
                 slew_ttl_max_ms: 2000,
             },

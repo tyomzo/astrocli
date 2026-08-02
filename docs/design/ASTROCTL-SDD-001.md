@@ -505,6 +505,7 @@ The closed enum, with the status and default retryability of each code. `ErrorCo
 | `COMMAND_STALE` | 422 | no | staleness rejection (§5.8.1) |
 | `CHECKSUM_MISMATCH` | 422 | no | ingest (§5.11.2) |
 | `LIMIT_ALTITUDE`, `LIMIT_MERIDIAN` | 403 | no | safety monitor (§5.4, MNT-15/16) |
+| `LIMIT_TRAVEL` | 403 | no | safety monitor (§5.4, M3-T07) — a manual slew would wind an axis past `mount.limits.max_travel_from_home_degrees` |
 | `SLEW_TTL_EXPIRED` | 403 | no | dead-man's switch (§5.8.1) — also an `alert` code |
 | `AUTH` | 401 | no | bearer middleware (§4.5) |
 | `FRAME_ID_CONFLICT` | 409 | no | ingest (§5.11.2) |
@@ -541,7 +542,7 @@ Phase 1 topics and payloads:
 
 | Topic | Payload | Cadence |
 |-------|---------|---------|
-| `mount.position` | `{ra, dec, alt, az, pier_side}` — `alt`/`az` are **nullable**: the facade that publishes this does not compute the topocentric transform, the safety monitor wrapping it does (§5.4, M1-T05). `null` rather than `0.0`, which is the horizon and therefore the one value that would corrupt the altitude limit | 1 Hz (MNT-02) |
+| `mount.position` | `{ra, dec, alt, az, pier_side, ra_travel, dec_travel}` — `ra_travel`/`dec_travel` are degrees each **axis** has been driven from the mechanical home pose, **nullable** for a mount with no home reference (M3-T07). Accumulated rotation, not folded to ±180°: an axis wound 215.6° past home reports 215.6, because the number exists to tell the operator how much winding the cables have taken. `alt`/`az` are **nullable**: the facade that publishes this does not compute the topocentric transform, the safety monitor wrapping it does (§5.4, M1-T05). `null` rather than `0.0`, which is the horizon and therefore the one value that would corrupt the altitude limit | 1 Hz (MNT-02) |
 | `mount.status` | `{state, tracking, tracking_mode, slewing, parked}` — `tracking_mode` is the rate (`sidereal`\|`lunar`\|`solar`) or `null` when the drive is off, and `tracking` is derived from it so the two cannot contradict. The rate is carried because only the mount knows it: a driver may refuse one as `Unsupported`, and a goto suspends tracking and resumes whatever was running before, so a UI deriving it from the last accepted command guesses wrong exactly when it is checked | on change |
 | `camera.status` | `{connected, battery_pct, charging, storage_free_mb}` | on change + 60s |
 | `capture.progress` | `{frame_id, state: exposing\|downloading\|saved\|preview_ready, elapsed_s}` | on change |
@@ -885,8 +886,20 @@ slewing forever. The driver keeps its own record of what it commanded and uses `
 thing that record cannot know: a manual slew has no completion signal, so an axis stopped by a hard
 limit, a stall or somebody's hand controller is only visible in the status word.
 
-**Two smaller notes.** *Park has no protocol state*: `park` is a goto to `mount.park_position`
-followed by `K` on both axes, and `unpark` clears a host-side flag and **sends nothing** — the
+**6. Park targets the home *counters*, not a sky coordinate (M3-T07).** `park` computes a bounded
+per-axis move from the counters `j` reports to `0x800000` and runs it through the same
+`G`/`I`/`H`/`M`/readback/`J` sequence a goto uses — consulting no coordinate map, no sidereal
+clock and no site. The reason is that power-on assigns `0x800000` to both counters *regardless of
+where the metal is*, so the contract of parking is "return to the pose power-on will assume", and
+no sky coordinate can state that: at declination 90 every right ascension names the pole, so a
+target there is satisfied by the declination axis alone. Observed on 2026-08-02 — a park that
+reported success with the right-ascension axis 215.6° from home and nothing commanded on it. The
+move is the **raw** counter delta and not the shortest way round: from 215.6° past home the short
+way is a further 144° in the direction that caused the problem, arriving at a congruent angle with
+the cable one turn worse. `mount.park_position` was removed from §8.1 in the same change.
+
+**Two smaller notes.** *Park has no protocol state*: `park` is the bounded goto above followed by
+`K` on both axes, and `unpark` clears a host-side flag and **sends nothing** — the
 obvious alternative, re-issuing `F`, would write an action opcode whose effect on the axis counter
 is unmeasured to a mount whose counter is the night's pointing model. *`sync` is unimplemented*:
 `E` is `derived` and unverified in ENCODINGS.md, and a half-applied sync is a pointing model wrong

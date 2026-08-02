@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus, RaDec,
-    SlewSpeed, TrackingMode,
+    Axis, AxisTravel, DeviceInfo, Direction, GuideRate, MountCapabilities, MountState, MountStatus,
+    MountTravel, RaDec, SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use async_trait::async_trait;
@@ -46,6 +46,8 @@ struct State {
     /// Bumped by every stop, so an in-flight goto can tell it was overridden — the same
     /// mechanism the simulator uses, and the reason a stopped goto is `Aborted` and not `Ok`.
     generation: u64,
+    /// What `axis_travel` answers. `None` is a mount with no home reference (M3-T07).
+    travel: Option<MountTravel>,
 }
 
 impl RecordingMount {
@@ -59,6 +61,7 @@ impl RecordingMount {
                 slewing: [false, false],
                 tracking: None,
                 generation: 0,
+                travel: None,
             }),
             goto_duration: Duration::from_secs(2),
             slew_duration: Duration::ZERO,
@@ -71,6 +74,35 @@ impl RecordingMount {
     pub fn with_slow_slew(mut self, duration: Duration) -> Self {
         self.slew_duration = duration;
         self
+    }
+
+    /// Report this much travel from home on each axis, with the given homeward directions.
+    ///
+    /// A driver derives these from its counters; this double is told, because the travel *limit*
+    /// is what this crate's tests are about and the derivation is the driver's test.
+    #[must_use]
+    pub fn with_travel(self, ra: (f64, Direction), dec: (f64, Direction)) -> Self {
+        self.locked().travel = Some(MountTravel {
+            ra: AxisTravel {
+                degrees: ra.0,
+                homeward: ra.1,
+            },
+            dec: AxisTravel {
+                degrees: dec.0,
+                homeward: dec.1,
+            },
+        });
+        self
+    }
+
+    /// Move the reported travel while the mount is running — what an axis winding under a held
+    /// D-pad looks like to the safety watch.
+    pub fn set_travel(&self, ra_degrees: f64, dec_degrees: f64) {
+        let mut state = self.locked();
+        if let Some(travel) = state.travel.as_mut() {
+            travel.ra.degrees = ra_degrees;
+            travel.dec.degrees = dec_degrees;
+        }
     }
 
     /// Hand it out the way every consumer above the HAL holds a device.
@@ -255,6 +287,10 @@ impl MountDevice for RecordingMount {
         state.tracking = None;
         state.generation += 1;
         Ok(())
+    }
+
+    fn axis_travel(&self) -> Option<MountTravel> {
+        self.locked().travel
     }
 
     fn capabilities(&self) -> MountCapabilities {

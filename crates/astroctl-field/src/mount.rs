@@ -108,7 +108,15 @@ pub struct MountFacade {
 #[derive(Debug, Clone)]
 struct GotoRun {
     correlation_id: String,
-    target: RaDec,
+    /// The sky coordinate the running motion is aiming at, or `None` for a park.
+    ///
+    /// `None` rather than a stand-in, because since M3-T07 a park genuinely has no sky target: it
+    /// drives both axis counters to the mechanical home, which is a pose and not a coordinate. The
+    /// old code filled this from `mount.park_position` and reported `0h +90°` — a coordinate that
+    /// described the pole, was satisfied without moving the right-ascension axis, and was the
+    /// defect. A 409 that says "a park is running" is the whole truth; a 409 that names a
+    /// coordinate the park is not aiming at is worse than one that names nothing.
+    target: Option<RaDec>,
 }
 
 impl MountFacade {
@@ -258,13 +266,20 @@ const UNKNOWN_PIER: PierSide = PierSide::Unknown;
 /// "it says 20° but it will not slew" cannot happen.
 fn to_wire_position(safety: &SafeMount, pos: RaDec) -> event::MountPosition {
     let horizontal = safety.horizontal(pos);
-    event::MountPosition::new(
+    let wire = event::MountPosition::new(
         pos.ra.hours(),
         pos.dec.degrees(),
         Some(horizontal.alt.degrees()),
         Some(horizontal.az.degrees()),
         UNKNOWN_PIER,
-    )
+    );
+    // Travel from the mechanical home pose (M3-T07), when the driver has a home to measure from.
+    // Read *after* `position()`, which is what refreshed the driver's counters — the same
+    // ordering the safety wrapper's own travel check relies on. A mount with no home reference
+    // reports `null` and the PWA renders an explicit unknown rather than a plausible zero.
+    safety.axis_travel().map_or(wire, |travel| {
+        wire.with_travel(travel.ra.degrees, travel.dec.degrees)
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -694,16 +709,17 @@ pub async fn goto(
                 )
                 .with_detail(serde_json::json!({
                     "correlation_id": running.correlation_id,
-                    "target": {
-                        "ra_hours": running.target.ra.hours(),
-                        "dec_degrees": running.target.dec.degrees(),
-                    },
+                    // `null` when the running motion is a park, which has no sky target at all.
+                    "target": running.target.map(|target| serde_json::json!({
+                        "ra_hours": target.ra.hours(),
+                        "dec_degrees": target.dec.degrees(),
+                    })),
                 })),
             ));
         }
         *inflight = Some(GotoRun {
             correlation_id: correlation_id.clone(),
-            target,
+            target: Some(target),
         });
     }
 
@@ -948,7 +964,6 @@ async fn long_running(state: AppState, motion: Motion) -> Result<Response, ApiFa
         ))
     })?;
 
-    let park_target = park_target(&state);
     {
         let mut inflight = state.mount.goto.lock().await;
         if inflight.is_some() {
@@ -959,7 +974,8 @@ async fn long_running(state: AppState, motion: Motion) -> Result<Response, ApiFa
         }
         *inflight = Some(GotoRun {
             correlation_id: correlation_id.clone(),
-            target: park_target,
+            // A park has no sky target — see `GotoRun::target`.
+            target: None,
         });
     }
 
@@ -1026,19 +1042,6 @@ async fn preflight(state: &AppState) -> Result<(), ApiFailure> {
         ))),
         _ => Ok(()),
     }
-}
-
-/// Where `park` goes, from `mount.park_position`.
-///
-/// Only used to fill the in-flight record's `target` so a concurrent goto's 409 can name what is
-/// running. A park position that does not parse was already refused at config load.
-fn park_target(state: &AppState) -> RaDec {
-    let park = &state.config.mount.park_position;
-    RaDec::from_parts(park.ra_hours, park.dec_degrees).unwrap_or_else(|_| {
-        // Unreachable: the config validator checks this at load (SDD §4.4). Not an `expect`,
-        // because panicking here would take the node down while parking the telescope.
-        RaDec::from_parts(0.0, 90.0).unwrap_or_else(|_| unreachable!("0h +90° is a coordinate"))
-    })
 }
 
 /// A correlation id for a long-running action.
@@ -1548,6 +1551,15 @@ mod tests {
         // driver*, and no Phase 1 driver reports it. Guessing "east" would be worse than saying
         // so, because the meridian limit is documented as consuming this value.
         assert_eq!(body["pier_side"], "unknown");
+
+        // Travel from home is on the wire and is explicitly `null` here, for the same kind of
+        // reason (M3-T07): this node runs the simulator, which holds an `RaDec` and has no axis
+        // counters, so it has no home to measure from. The keys have to be *present* and null —
+        // an absent key and a null one are the same thing to the client's parser, but a `0.0`
+        // would tell the operator the axes are at home when nothing knows where they are.
+        assert!(body.get("ra_travel").is_some(), "no ra_travel key: {body}");
+        assert!(body["ra_travel"].is_null(), "{body}");
+        assert!(body["dec_travel"].is_null(), "{body}");
 
         // The number on the wire is the number the safety layer computed, not a second opinion.
         let position = state.mount.device.position().await.expect("a position");

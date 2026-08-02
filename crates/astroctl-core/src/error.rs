@@ -136,6 +136,15 @@ pub enum Limit {
     Altitude,
     /// Past `mount.limits.meridian_limit_minutes` (MNT-16).
     Meridian,
+    /// Further from the mechanical home pose than `mount.limits.max_travel_from_home_degrees`
+    /// (M3-T07).
+    ///
+    /// A third variant rather than a reuse, for the reason the first two are separate: the
+    /// operator action is different again. Altitude says "point higher", meridian says "flip or
+    /// park", and this one says "you are winding the cables — drive back toward home". A refusal
+    /// that borrowed one of the other codes would send the operator to the wrong remedy while an
+    /// axis is a quarter-turn from where they think it is.
+    Travel,
 }
 
 impl Limit {
@@ -145,6 +154,7 @@ impl Limit {
         match self {
             Self::Altitude => ErrorCode::LimitAltitude,
             Self::Meridian => ErrorCode::LimitMeridian,
+            Self::Travel => ErrorCode::LimitTravel,
         }
     }
 }
@@ -154,6 +164,7 @@ impl fmt::Display for Limit {
         f.write_str(match self {
             Self::Altitude => "altitude",
             Self::Meridian => "meridian",
+            Self::Travel => "travel-from-home",
         })
     }
 }
@@ -239,6 +250,8 @@ pub enum ErrorCode {
     LimitAltitude,
     /// The mount is past the configured meridian limit (MNT-16).
     LimitMeridian,
+    /// A manual slew would drive an axis past the configured travel from home (M3-T07).
+    LimitTravel,
     /// A manual slew's dead-man's-switch TTL expired (SDD §5.8.1).
     SlewTtlExpired,
     // --- auth (401) ---
@@ -290,6 +303,7 @@ impl ErrorCode {
         ErrorCode::ChecksumMismatch,
         ErrorCode::LimitAltitude,
         ErrorCode::LimitMeridian,
+        ErrorCode::LimitTravel,
         ErrorCode::SlewTtlExpired,
         ErrorCode::Auth,
         ErrorCode::FrameIdConflict,
@@ -323,6 +337,7 @@ impl ErrorCode {
             Self::ChecksumMismatch => "CHECKSUM_MISMATCH",
             Self::LimitAltitude => "LIMIT_ALTITUDE",
             Self::LimitMeridian => "LIMIT_MERIDIAN",
+            Self::LimitTravel => "LIMIT_TRAVEL",
             Self::SlewTtlExpired => "SLEW_TTL_EXPIRED",
             Self::Auth => "AUTH",
             Self::FrameIdConflict => "FRAME_ID_CONFLICT",
@@ -365,7 +380,10 @@ impl ErrorCode {
             | Self::CommandStale
             | Self::ChecksumMismatch => 422,
             // Safety-limit rejection → 403.
-            Self::LimitAltitude | Self::LimitMeridian | Self::SlewTtlExpired => 403,
+            Self::LimitAltitude
+            | Self::LimitMeridian
+            | Self::LimitTravel
+            | Self::SlewTtlExpired => 403,
             // Auth failure → 401.
             Self::Auth => 401,
             // A frame id re-used with different content is a conflict with stored state.
@@ -425,6 +443,7 @@ impl ErrorCode {
             | Self::ChecksumMismatch
             | Self::LimitAltitude
             | Self::LimitMeridian
+            | Self::LimitTravel
             | Self::SlewTtlExpired
             | Self::Auth
             | Self::FrameIdConflict
@@ -697,8 +716,13 @@ mod tests {
         // M0 while being read by nothing — a validated key that does nothing tells the operator a
         // protection exists. Unlike the four above it, no route returns this one; it is
         // alert-only, like `DISK_FULL`'s warning twin, and the row is here so `alert.code` can
-        // draw from the same closed set §4.2 says it draws from.
-        assert_eq!(before, 27);
+        // draw from the same closed set §4.2 says it draws from. 27 → 28 is `LIMIT_TRAVEL`
+        // (M3-T07, SDD §4.2): manual slew had no bound on how far it could wind an axis from the
+        // home pose, and an operator reached 215.6° holding a D-pad. It is a third *limit* rather
+        // than a reuse of the two existing ones because the remedy is different — not "point
+        // higher" and not "flip or park" but "drive back toward home" — and a refusal that
+        // borrowed one of their codes would send the operator to the wrong action.
+        assert_eq!(before, 28);
     }
 
     #[test]

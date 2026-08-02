@@ -8,8 +8,8 @@ use astroctl_core::config::{FieldConfig, MountLimits};
 use astroctl_core::error::{DeviceError, ErrorCode, Limit};
 use astroctl_core::event::Alert;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, RaDec, SlewSpeed,
-    TrackingMode,
+    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, RaDec,
+    SlewSpeed, TrackingMode,
 };
 use astroctl_hal::mount::MountDevice;
 use async_trait::async_trait;
@@ -87,6 +87,11 @@ const EMERGENCY_STOP: &str = "EMERGENCY_STOP";
 ///   identical repeat extends the deadline without touching the motors; silence stops the axis.
 /// * **Meridian (MNT-16).** While the mount is tracking, an hour angle crossing
 ///   `mount.limits.meridian_limit_minutes` past the meridian stops tracking and alerts.
+/// * **Travel from home (M3-T07).** A manual slew that would drive an axis further than
+///   `mount.limits.max_travel_from_home_degrees` from the mechanical home pose is refused before
+///   the driver is called, and an axis that reaches the limit *during* a hold is stopped. See
+///   [`Shared::winds_past_limit`] for why the check is directional and
+///   [`SafeMount::slew_for`] for why it must also run in the watch.
 ///
 /// # What it deliberately does not gate
 ///
@@ -266,6 +271,30 @@ impl Shared {
             .then_some(ahead_altitude)
     }
 
+    /// The travel one axis has accumulated, when moving `dir` would make it worse (M3-T07).
+    ///
+    /// `None` means the motion is allowed: the driver has no home reference, the axis is inside
+    /// the limit, or the direction asked for is the one that unwinds.
+    ///
+    /// # The check is directional, for the same reason the altitude check is
+    ///
+    /// A bare `travel >= limit` comparison would be simpler and would trap the mount at exactly
+    /// the moment somebody needs to drive it back: an axis already past the limit could not be
+    /// moved at all, and the only recovery left is the one the operator was reduced to on
+    /// 2026-08-02 — power off, loosen the clutch, unwind by hand. So the limit refuses the
+    /// direction that winds and always permits the one that unwinds. Which sky direction that is
+    /// depends on the hemisphere and the mechanical branch, so the driver states it
+    /// ([`AxisTravel::homeward`](astroctl_core::types::AxisTravel::homeward)) rather than exporting
+    /// the inputs for a second implementation here to get backwards.
+    ///
+    /// One implementation, two callers — the pre-flight check and the watch — for the reason
+    /// [`Self::descends_below_limit`] gives.
+    fn winds_past_limit(&self, axis: Axis, dir: Direction) -> Option<f64> {
+        let travel = self.inner.axis_travel()?.axis(axis);
+        (travel.degrees >= self.limits.max_travel_from_home_degrees && dir != travel.homeward)
+            .then_some(travel.degrees)
+    }
+
     /// Publish an alert for something this wrapper did on its own.
     fn alert(&self, code: &str, message: String) {
         tracing::warn!(alert = code, %message, "the safety wrapper stopped the mount");
@@ -284,6 +313,33 @@ fn altitude_violation(altitude: f64, minimum: f64) -> DeviceError {
             "the target is at altitude {altitude:.1}°, below the configured minimum of \
              {minimum:.1}° (mount.limits.min_altitude_degrees)"
         ),
+    }
+}
+
+/// The refusal a travel check produces (M3-T07).
+///
+/// Both numbers are in the message, as in [`altitude_violation`], and the homeward direction is
+/// too: an operator who is refused needs to know which way is out, in the dark, holding a D-pad
+/// that has just stopped responding to one of its buttons.
+fn travel_violation(axis: Axis, travelled: f64, limit: f64, homeward: Direction) -> DeviceError {
+    DeviceError::LimitViolation {
+        limit: Limit::Travel,
+        detail: format!(
+            "the {} axis is {travelled:.1}° from home, at or past the configured maximum of \
+             {limit:.1}° (mount.limits.max_travel_from_home_degrees); slew {} to unwind it",
+            axis_name(axis),
+            direction_name(homeward)
+        ),
+    }
+}
+
+/// What an operator calls a slew direction.
+const fn direction_name(dir: Direction) -> &'static str {
+    match dir {
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::East => "east",
+        Direction::West => "west",
     }
 }
 
@@ -402,6 +458,15 @@ impl SafeMount {
     /// to drive it back up, which is the failure an operator meets at 2 a.m. after a goto they
     /// stopped halfway.
     ///
+    /// # The travel check here is necessary and **not sufficient**, which is why the watch has one
+    ///
+    /// The renewal path above returns before any check runs, and it has to: the app renews at
+    /// 2 Hz for as long as a thumb is on the D-pad. So a hold that begins inside the travel limit
+    /// is never re-examined here however long it lasts — and a hold that lasts is exactly how an
+    /// axis reached 215.6° from home. This check catches the press that starts already past the
+    /// limit; [`check_limits`] catches the axis winding past it under a thumb that never lifted.
+    /// Neither alone is the requirement.
+    ///
     /// # Errors
     /// [`DeviceError::LimitViolation`] before anything reaches the device if the motion would
     /// descend below `min_altitude_degrees`, plus whatever the driver itself returns.
@@ -428,9 +493,10 @@ impl SafeMount {
             }
         }
 
-        // A new authorisation, so the limit is checked — and checked *before* the device is
+        // A new authorisation, so the limits are checked — and checked *before* the device is
         // commanded, which is the MNT-15 acceptance criterion. `position()` is the one device
-        // call this makes first; it is a read, and a read cannot move a telescope.
+        // call this makes first; it is a read, and a read cannot move a telescope. It also
+        // refreshes the counters the travel check reads, which is why that check follows it.
         let from = self.shared.inner.position().await?;
         if let Some(altitude) = self
             .shared
@@ -439,6 +505,19 @@ impl SafeMount {
             return Err(altitude_violation(
                 altitude,
                 self.shared.limits.min_altitude_degrees,
+            ));
+        }
+        if let Some(travelled) = self.shared.winds_past_limit(axis, dir) {
+            return Err(travel_violation(
+                axis,
+                travelled,
+                self.shared.limits.max_travel_from_home_degrees,
+                // Safe to unwrap the same way the check did: `winds_past_limit` only answers
+                // `Some` when the driver reported travel.
+                self.shared
+                    .inner
+                    .axis_travel()
+                    .map_or(dir, |travel| travel.axis(axis).homeward),
             ));
         }
 
@@ -621,7 +700,38 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
     let now = Utc::now();
 
     for (axis, lease) in leases.into_iter().filter_map(|(a, l)| l.map(|l| (a, l))) {
-        let Some(altitude) = shared.descends_below_limit(position, axis, lease.dir, now) else {
+        // Altitude first, travel second, and whichever fires stops the axis: the two are
+        // independent reasons to stop the same motion and the operator needs the one that fired.
+        let breach = shared
+            .descends_below_limit(position, axis, lease.dir, now)
+            .map(|altitude| {
+                (
+                    Limit::Altitude,
+                    format!(
+                        "the {} axis stopped: continuing would take the telescope to altitude \
+                         {altitude:.1}°, below the configured minimum of {:.1}°",
+                        axis_name(axis),
+                        shared.limits.min_altitude_degrees
+                    ),
+                )
+            })
+            .or_else(|| {
+                // M3-T07. This is the check that catches a wind-up in progress: the renewal path
+                // in `slew_for` short-circuits before any limit runs, so nothing else in the
+                // system looks at an axis again once the operator's thumb is down.
+                let travelled = shared.winds_past_limit(axis, lease.dir)?;
+                Some((
+                    Limit::Travel,
+                    format!(
+                        "the {} axis stopped: it is {travelled:.1}° from the home pose, at the \
+                         configured maximum of {:.1}° (mount.limits.max_travel_from_home_degrees). \
+                         Slew the other way to unwind it",
+                        axis_name(axis),
+                        shared.limits.max_travel_from_home_degrees
+                    ),
+                ))
+            });
+        let Some((limit, message)) = breach else {
             continue;
         };
         {
@@ -629,17 +739,9 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
             motion.axis(axis).take();
         }
         if let Err(error) = shared.inner.stop_slew(axis).await {
-            tracing::error!(%error, ?axis, "could not stop an axis at the altitude limit");
+            tracing::error!(%error, ?axis, %limit, "could not stop an axis at a motion limit");
         }
-        shared.alert(
-            Limit::Altitude.code().as_str(),
-            format!(
-                "the {} axis stopped: continuing would take the telescope to altitude \
-                 {altitude:.1}°, below the configured minimum of {:.1}°",
-                axis_name(axis),
-                shared.limits.min_altitude_degrees
-            ),
-        );
+        shared.alert(limit.code().as_str(), message);
     }
 
     if tracking {
@@ -837,6 +939,10 @@ impl MountDevice for SafeMount {
             )),
         };
         result
+    }
+
+    fn axis_travel(&self) -> Option<MountTravel> {
+        self.shared.inner.axis_travel()
     }
 
     fn capabilities(&self) -> MountCapabilities {

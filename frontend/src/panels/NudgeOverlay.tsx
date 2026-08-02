@@ -4,8 +4,12 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { RequestFailure } from '../lib/api';
 import type { SlewAxis, SlewDirection, SlewSpeed } from '../lib/commands';
 import { SLEW_SPEEDS } from '../lib/commands';
+import { formatDegrees } from '../lib/coords';
+import type { MountPosition } from '../lib/link/protocol';
 import type { SlewHold } from '../lib/slewHold';
 import { beginSlewHold } from '../lib/slewHold';
+import type { Slot } from '../store/telemetry';
+import { selectMountPosition, useTelemetryStore } from '../store/telemetry';
 import { useTokenStore } from '../store/token';
 import { FailureNote } from '../ui/FailureNote';
 
@@ -55,6 +59,54 @@ const DIRECTIONS: readonly {
   { axis: 'dec', direction: 'negative', glyph: 'DEC−', label: 'declination down', cell: 'col-start-2 row-start-3' },
 ];
 
+/*
+ * Travel from the home pose, shown while the D-pad is up — M3-T07.
+ *
+ * # Why this number is on screen at all
+ *
+ * A Synta mount has no soft limits and its axes will turn as long as they are told to. On
+ * 2026-08-02 an operator holding these buttons wound the right-ascension axis 215.6° from home
+ * without anything on screen changing to say so, and the only recovery was to power the mount
+ * off, loosen the clutch and unwind it by hand. The axis counter is the one thing that knows,
+ * and until now it was not published. The field node refuses a slew that would wind an axis past
+ * `mount.limits.max_travel_from_home_degrees`, but a refusal that arrives with no warning is a
+ * button that stops working for no visible reason — so the number goes where the thumb is.
+ *
+ * # It is a number, deliberately
+ *
+ * §5.9 forbids colour as the only channel. The strongest answer here is not a second channel but
+ * the *first* one being quantitative: an operator can read 173° and decide, where a colour can
+ * only say "concerned". Nothing here is colour-coded, so there is no colour to be alone. A
+ * threshold marker would need the configured limit, which this payload does not carry — inventing
+ * one in the client would draw a line the node does not enforce.
+ *
+ * # Degrees of axis, not of sky
+ *
+ * These are mechanical: the right-ascension axis angle is not an hour angle and the declination
+ * axis angle is not a declination. The label says "from home" rather than naming a coordinate,
+ * and the value is accumulated rotation — never folded, so half a turn reads as more than 180°
+ * rather than wrapping back toward zero while the cable keeps winding.
+ */
+export function TravelReadout({ position }: { position: Slot<MountPosition> }): ReactNode {
+  const travel = position.state === 'observed' ? position.value : null;
+  return (
+    <dl className="flex items-baseline justify-center gap-4 text-xs">
+      <div className="flex items-baseline gap-1.5">
+        <dt className="text-muted">RA from home</dt>
+        <dd className="tabular font-mono text-fg">{formatDegrees(travel?.ra_travel ?? null)}</dd>
+      </div>
+      <div className="flex items-baseline gap-1.5">
+        <dt className="text-muted">DEC from home</dt>
+        <dd className="tabular font-mono text-fg">{formatDegrees(travel?.dec_travel ?? null)}</dd>
+      </div>
+      <span className="sr-only">
+        How far each axis has been driven from the mount&apos;s home pose. The node refuses a nudge
+        that would wind an axis further than the configured maximum.
+      </span>
+    </dl>
+  );
+}
+
 export function NudgeOverlay({ onDismiss }: { onDismiss: () => void }): ReactNode {
   // Level 2 (8x sidereal), not 3. Level 3 is 64x, and on this HEQ5 the motor stalls there
   // unloaded: it ramps, the rotor loses sync, the axis buzzes and stops while the *counter keeps
@@ -66,9 +118,15 @@ export function NudgeOverlay({ onDismiss }: { onDismiss: () => void }): ReactNod
   // run; this is it, run by an operator's thumb.
   const [speed, setSpeed] = useState<SlewSpeed>(2);
   const [failure, setFailure] = useState<RequestFailure | null>(null);
+  // Subscribed here rather than passed down from `ImageSurface`: `mount.position` ticks at 1 Hz
+  // and the surface renders the frame, so reading it there would re-render the image every second
+  // to move two small numbers (the note on the telemetry selectors makes this rule explicit).
+  const position = useTelemetryStore(selectMountPosition);
 
   return (
     <div className="absolute inset-0 flex flex-col justify-between bg-surface/50 p-3 backdrop-blur-[1px]">
+      <TravelReadout position={position} />
+
       <div className="flex flex-1 items-center justify-center">
         <div className="grid grid-cols-3 grid-rows-3 gap-2">
           {DIRECTIONS.map((entry) => (

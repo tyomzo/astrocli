@@ -458,6 +458,58 @@ pub enum Direction {
     West,
 }
 
+/// How far one axis has been driven from the mount's mechanical home pose (M3-T07).
+///
+/// # Why this is not an angle, and not folded
+///
+/// [`degrees`](Self::degrees) is **accumulated travel**, not a position: it is not reduced modulo
+/// a revolution, so an axis wound 215.6° past home reads 215.6 and not −144.4. That distinction is
+/// the entire point. A cable does not care that 215.6° and −144.4° name the same direction in the
+/// sky; it cares how many degrees of rotation it has absorbed, and the folded angle answers the
+/// wrong question. 215.6° is what an operator on a D-pad reached on 2026-08-02.
+///
+/// # Why the homeward direction travels with it
+///
+/// A limit on travel has to let the operator *unwind* — a bound that refuses both directions once
+/// it is exceeded traps the mount at exactly the moment somebody needs to drive it back, which is
+/// how the incident above ended (power off, loosen the clutch, unwind by hand). Deciding which way
+/// is back needs the hemisphere and the mechanical branch, which are the driver's business and
+/// nobody else's, so the driver states the answer rather than exporting the inputs.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct AxisTravel {
+    /// Unsigned degrees of axis rotation away from home.
+    pub degrees: f64,
+    /// The sky direction on this axis that moves it back toward home.
+    ///
+    /// Arbitrary but harmless when [`degrees`](Self::degrees) is zero: at home neither direction
+    /// is homeward, and nothing consults this below the limit.
+    pub homeward: Direction,
+}
+
+/// Both axes' travel from home, as of a driver's last counter read (M3-T07).
+///
+/// The units are degrees of *axis* rotation, which on a German equatorial is not degrees of sky:
+/// the declination axis angle and the declination differ by the home offset, and the
+/// right-ascension axis angle and the hour angle differ by another. Nothing here is a coordinate.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct MountTravel {
+    /// The right-ascension axis.
+    pub ra: AxisTravel,
+    /// The declination axis.
+    pub dec: AxisTravel,
+}
+
+impl MountTravel {
+    /// One axis's travel.
+    #[must_use]
+    pub const fn axis(self, axis: Axis) -> AxisTravel {
+        match axis {
+            Axis::Ra => self.ra,
+            Axis::Dec => self.dec,
+        }
+    }
+}
+
 /// Manual-slew speed class (SDD §4.1); concrete rates are a driver concern.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

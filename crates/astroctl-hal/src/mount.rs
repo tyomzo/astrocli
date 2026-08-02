@@ -17,8 +17,8 @@ use std::fmt::Debug;
 
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
-    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, RaDec, SlewSpeed,
-    TrackingMode,
+    Axis, DeviceInfo, Direction, GuideRate, MountCapabilities, MountStatus, MountTravel, RaDec,
+    SlewSpeed, TrackingMode,
 };
 use async_trait::async_trait;
 
@@ -242,6 +242,37 @@ pub trait MountDevice: Debug + Send + Sync {
     /// revolution, for instance) may sharpen afterwards, but the *set* of supported operations
     /// may not change — the UI decides what to render from this.
     fn capabilities(&self) -> MountCapabilities;
+
+    /// How far each axis has been driven from the mount's mechanical home pose, as of the last
+    /// counter read — or `None` from a mount that has no home reference (M3-T07).
+    ///
+    /// # This is a measurement, not a limit
+    ///
+    /// The module docs above say a driver does no limit checking, and this does not change that.
+    /// A driver *reports* travel exactly as it reports [`position`](Self::position); the rule
+    /// that bounds it lives in `astroctl-safety`'s `SafeMount`, next to altitude and the meridian,
+    /// because that is where a configured threshold belongs and — decisively — because the wrapper
+    /// owns the only thing that runs *during* a hold. Both slew paths short-circuit an identical
+    /// renewal, so a check made when the operator presses the D-pad never runs again while they
+    /// keep pressing it; the wrapper's 2 Hz watch is what catches an axis winding.
+    ///
+    /// # Synchronous, and honest about being a cache
+    ///
+    /// No I/O, like [`capabilities`](Self::capabilities): the value is whatever the driver learned
+    /// on its last counter read. Making it an exchange would double the wire traffic of a watch
+    /// that already calls `position()` at 2 Hz, to learn something that cannot have changed since
+    /// — and every caller in the system reads a position immediately before asking.
+    ///
+    /// # Why `Option` rather than a required answer
+    ///
+    /// `pier_side` was deliberately *not* put on this trait, because widening it for one driver
+    /// would make every other implementor answer a question it may not have. The same objection
+    /// applies here and `Option` is the answer to it: a mount with no absolute home — an INDI or
+    /// Alpaca device, the simulator — says so, and the limit above simply has nothing to enforce.
+    /// It is on the trait rather than beside it because ADR-11 puts enforcement below the API so
+    /// that it cannot be bypassed, and a channel the binary has to remember to wire is a channel
+    /// the binary will one day forget.
+    fn axis_travel(&self) -> Option<MountTravel>;
 
     /// Human-readable identity for logs, the UI and calibration-profile tagging (HAL-06).
     ///

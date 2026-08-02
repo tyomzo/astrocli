@@ -17,8 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use astroctl_core::config::{
-    CameraConfig, GuideCameraConfig, MountConfig, MountDriver, MountLimits, ParkPosition,
-    SerialConfig,
+    CameraConfig, GuideCameraConfig, MountConfig, MountDriver, MountLimits, SerialConfig,
 };
 use astroctl_core::error::DeviceError;
 use astroctl_core::types::{
@@ -47,10 +46,6 @@ pub fn mount_config(driver: MountDriver) -> MountConfig {
         driver,
         port: "/dev/null".to_owned(),
         baud: 9600,
-        park_position: ParkPosition {
-            ra_hours: 0.0,
-            dec_degrees: 90.0,
-        },
         settle_time_seconds: 2,
         serial: SerialConfig {
             request_timeout_ms: 500,
@@ -61,6 +56,7 @@ pub fn mount_config(driver: MountDriver) -> MountConfig {
         limits: MountLimits {
             min_altitude_degrees: 15.0,
             meridian_limit_minutes: 5.0,
+            max_travel_from_home_degrees: 180.0,
             slew_ttl_default_ms: 500,
             slew_ttl_max_ms: 2000,
         },
@@ -231,6 +227,11 @@ impl MountDevice for FakeMount {
         state.slewing = false;
         state.tracking = None;
         Ok(())
+    }
+
+    /// `None` — a fake with no mechanism has no home to measure travel from.
+    fn axis_travel(&self) -> Option<astroctl_core::types::MountTravel> {
+        None
     }
 
     fn capabilities(&self) -> MountCapabilities {

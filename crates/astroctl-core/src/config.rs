@@ -648,8 +648,6 @@ pub struct MountConfig {
     pub port: String,
     /// Serial line rate; 9600 for the HEQ5 Pro (PRD §4.2).
     pub baud: u32,
-    /// Where `park` sends the mount.
-    pub park_position: ParkPosition,
     /// Pause after a slew before capture starts.
     pub settle_time_seconds: u32,
     /// Serial request timing and watchdog thresholds (SDD §5.2.4).
@@ -696,7 +694,6 @@ impl MountConfig {
             );
         }
         c.range("settle_time_seconds", self.settle_time_seconds, 0, 300);
-        c.section("park_position", |c| self.park_position.validate(c));
         c.section("serial", |c| self.serial.validate(c));
         c.section("limits", |c| self.limits.validate(c));
 
@@ -717,27 +714,26 @@ impl MountConfig {
     }
 }
 
-/// Park position (PRD §8.1 `mount.park_position`).
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParkPosition {
-    /// Right ascension in hours, `[0, 24)`.
-    pub ra_hours: f64,
-    /// Declination in degrees, `[-90, 90]`.
-    pub dec_degrees: f64,
-}
-
-impl ParkPosition {
-    fn validate(&self, c: &mut Check) {
-        if !self.ra_hours.is_finite() || !(0.0..24.0).contains(&self.ra_hours) {
-            c.fail(
-                "ra_hours",
-                format!("{} is out of range; expected 0.0..24.0", self.ra_hours),
-            );
-        }
-        c.range_f64("dec_degrees", self.dec_degrees, -90.0, 90.0);
-    }
-}
+// `mount.park_position` was here until M3-T07, and its removal is the fix rather than a tidy-up.
+//
+// It was a *sky* coordinate, shipped as `ra_hours: 0.0, dec_degrees: 90.0`. At declination 90 the
+// right ascension is degenerate — every value names the celestial pole — so the goto it produced
+// was satisfied by the declination axis alone and left the right-ascension axis wherever it
+// happened to be. Observed on 2026-08-02 with that axis 215.6° from home while the app reported
+// `parked: true`.
+//
+// No value of this key could have fixed that. Park's contract is not "point at the pole", it is
+// "return to the pose power-on will assume" — both counters at `0x800000` — and that pose is a
+// mechanical fact of the mount, not an operator preference. A sky coordinate cannot express it
+// (any target with `dec = 90` under-constrains one axis by construction, and any target with
+// `dec ≠ 90` is not the home pose), and an axis-angle pair could express it but only by letting
+// an operator configure a pose at which power-on would then lie about where the mount is. So
+// there is nothing left for the key to say, and `deny_unknown_fields` now rejects a configuration
+// that still carries it — see `tests::a_configuration_that_still_names_a_park_position_is_refused`.
+//
+// A separate "stow" pose (tube horizontal for a cover, say) would be a different concept with
+// different semantics, and can arrive with its own key when something needs it. Keeping this one
+// warm for that hypothetical would ship a key that is read and ignored.
 
 /// Serial request timing and watchdog thresholds (PRD §8.1 `mount.serial`, SDD §5.2.4).
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -772,6 +768,21 @@ pub struct MountLimits {
     pub min_altitude_degrees: f64,
     /// Stop tracking this long past the meridian (MNT-16).
     pub meridian_limit_minutes: f64,
+    /// Refuse a manual slew that would drive an axis further than this from the mechanical home
+    /// pose, in degrees of axis rotation (M3-T07).
+    ///
+    /// **A property of the rig's cabling, which is why it is configuration and not a constant.**
+    /// Synta motion has no soft limits and nothing else in the system tracked distance from home,
+    /// so before this existed an operator on a D-pad could wind an axis indefinitely: 215.6° was
+    /// reached on 2026-08-02, and with a telescope, a power lead and a USB cable attached that is
+    /// how a cable is torn out or a tube is driven into the pier.
+    ///
+    /// It bounds *manual* slew only. A goto is bounded by its own target and checked against the
+    /// altitude limit; the D-pad has no target at all, which is exactly why it needed a bound.
+    ///
+    /// One number for both axes rather than two: what it stands for is the shortest lead on the
+    /// mount, and no per-axis figure has been measured. If one ever is, this is where it splits.
+    pub max_travel_from_home_degrees: f64,
     /// Default authorization window for a manual slew (SDD §5.8.1).
     pub slew_ttl_default_ms: u64,
     /// Server-side clamp on a client-requested TTL (SDD §5.8.1).
@@ -787,6 +798,20 @@ impl MountLimits {
             "meridian_limit_minutes",
             self.meridian_limit_minutes,
             0.0,
+            180.0,
+        );
+        // The ceiling is 180° and it is a fact about the mechanism rather than a policy: an axis
+        // counter spans one revolution, so every mechanical pose is reachable within half a turn
+        // of home. Travel past 180° is by construction the long way round to somewhere the short
+        // way already reaches — wind, never necessity — so above 180 the setting could not refuse
+        // anything an operator needs, which makes it not a limit.
+        //
+        // The floor is a degree rather than zero: zero would refuse every manual slew from the
+        // home pose itself and leave the operator no way to move the mount at all.
+        c.range_f64(
+            "max_travel_from_home_degrees",
+            self.max_travel_from_home_degrees,
+            1.0,
             180.0,
         );
         // A TTL under 100 ms cannot survive one VPN round trip, so the D-pad would stutter; a
@@ -2284,6 +2309,29 @@ mod tests {
             .expect("present");
         assert_eq!(tls.cert_path, home.join("tls/fullchain.pem"));
         assert_eq!(tls.key_path, home.join("tls/privkey.pem"));
+    }
+
+    #[test]
+    fn a_configuration_that_still_names_a_park_position_is_refused() {
+        // M3-T07's third acceptance criterion: "a configuration whose park position cannot be
+        // expressed is rejected at load rather than silently under-constraining an axis".
+        //
+        // It cannot be expressed *at all* now, which is the strongest form of that: park drives
+        // both counters to `0x800000` and there is no value an operator could write that would
+        // change where it goes. `deny_unknown_fields` therefore refuses the key outright, and an
+        // operator upgrading an old file finds out at load rather than at the pier.
+        let yaml = FIELD_EXAMPLE.replace(
+            "  settle_time_seconds: 3",
+            "  park_position:\n    ra_hours: 0.0\n    dec_degrees: 90.0\n  settle_time_seconds: 3",
+        );
+        let err = field(&yaml).expect_err("a park position must not be accepted");
+        let text = err.to_string();
+        assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
+        assert!(
+            text.contains("park_position"),
+            "no offending key in: {text}"
+        );
+        assert!(text.contains("unknown field"), "unclear message: {text}");
     }
 
     // --- fixture: unknown key ------------------------------------------------------------
