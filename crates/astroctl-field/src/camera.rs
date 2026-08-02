@@ -586,6 +586,12 @@ async fn run_capture(
                 ErrorCode::from_device_error(DeviceKind::Camera, &error).as_str(),
                 error.to_string(),
             ));
+            // Terminal on the *progress* stream too, or every client that renders it keeps
+            // showing the stage this capture died in — measured 2026-08-02 as an operator
+            // watching "reading off the camera" for minutes after a three-second refusal.
+            facade
+                .bus
+                .publish(event::CaptureProgress::failed(&frame, 0.0));
             return finish(&facade, &correlation_id, orchestrator::classify(&error));
         }
     };
@@ -594,6 +600,9 @@ async fn run_capture(
         Ok(()) => finish(&facade, &correlation_id, Outcome::Saved),
         Err(outcome) => {
             sweep_staging(&staging, &frame).await;
+            facade
+                .bus
+                .publish(event::CaptureProgress::failed(&frame, 0.0));
             finish(&facade, &correlation_id, outcome);
         }
     }
@@ -816,6 +825,9 @@ fn finish(facade: &CameraFacade, correlation_id: &str, outcome: Outcome) {
 /// The setup-failure path: report and end the run in one call.
 fn fail(facade: &CameraFacade, correlation_id: &str, frame: &str, outcome: Outcome) {
     tracing::error!(correlation_id = %correlation_id, frame = %frame, "capture could not start");
+    facade
+        .bus
+        .publish(event::CaptureProgress::failed(frame, 0.0));
     finish(facade, correlation_id, outcome);
 }
 

@@ -39,7 +39,7 @@ export type PierSide = 'east' | 'west' | 'unknown';
 
 export type MountState = 'disconnected' | 'idle' | 'slewing' | 'parked' | 'fault';
 
-export type CaptureState = 'exposing' | 'downloading' | 'saved' | 'preview_ready';
+export type CaptureState = 'exposing' | 'downloading' | 'saved' | 'preview_ready' | 'failed';
 
 export type TransferState = 'idle' | 'uploading' | 'offline';
 
@@ -411,6 +411,7 @@ export function parseEvent(value: unknown): TelemetryEvent | null {
         'downloading',
         'saved',
         'preview_ready',
+        'failed',
       ] as const);
       const elapsed = num(data['elapsed_s']);
       if (frameId === null || state === null || elapsed === null) return null;

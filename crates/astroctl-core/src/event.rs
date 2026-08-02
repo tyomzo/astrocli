@@ -398,6 +398,15 @@ pub enum CaptureState {
     Saved,
     /// The preview JPEG for this frame has been generated (§5.7).
     PreviewReady,
+    /// The capture ended without a frame — the device refused, the link died, or the operator
+    /// aborted. Terminal, like `PreviewReady`.
+    ///
+    /// This member exists because its absence lied to an operator (2026-08-02): a capture that
+    /// failed three seconds in left `downloading` as the last event on the stream, and every
+    /// client — including one freshly reloaded — showed "reading the frame off the camera" for
+    /// minutes while the sensor sat idle. A progress stream whose failure is expressible only in
+    /// a *different* stream (`alert`) strands every consumer that renders this one.
+    Failed,
 }
 
 /// Link state of the transfer agent (SDD §4.3 `transfer.status`, §5.10).
@@ -787,6 +796,14 @@ impl CaptureProgress {
     #[must_use]
     pub fn preview_ready(frame_id: impl Into<String>, elapsed_s: f64) -> Self {
         Self::new(frame_id, CaptureState::PreviewReady, elapsed_s)
+    }
+
+    /// The capture ended without a frame. Terminal — the detail travels in the paired `alert`;
+    /// this is what releases every consumer of the *progress* stream from a stage that will
+    /// never advance.
+    #[must_use]
+    pub fn failed(frame_id: impl Into<String>, elapsed_s: f64) -> Self {
+        Self::new(frame_id, CaptureState::Failed, elapsed_s)
     }
 
     /// Frame id this progress refers to.

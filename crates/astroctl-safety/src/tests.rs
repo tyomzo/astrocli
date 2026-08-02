@@ -1223,9 +1223,14 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         base_radius_mm: 650.0,
         counterweight: None,
     };
+    // Right-ascension motion, deliberately: at the pole it changes the pose without changing
+    // the pointing, so the verdict cannot depend on the sidereal time of the test run — a
+    // declination step's "does it climb" answer does, and made this test flaky by the clock.
     let low = RaDec::from_parts(0.0, 90.0).expect("the pole is a coordinate");
 
-    let unmeasured = RecordingMount::at(low).shared();
+    let unmeasured = RecordingMount::at(low)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .shared();
     SafeMount::with_geometry(
         Arc::clone(&unmeasured) as Arc<dyn MountDevice>,
         EXAMPLE_LIMITS,
@@ -1234,15 +1239,17 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         EventBus::new(),
     )
     .slew_for(
-        Axis::Dec,
-        Direction::South,
+        Axis::Ra,
+        Direction::East,
         SlewSpeed::Medium,
         Duration::from_millis(500),
     )
     .await
     .expect("with no geometry there is no collision limit");
 
-    let measured = RecordingMount::at(low).shared();
+    let measured = RecordingMount::at(low)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .shared();
     let error = SafeMount::with_geometry(
         Arc::clone(&measured) as Arc<dyn MountDevice>,
         EXAMPLE_LIMITS,
@@ -1251,8 +1258,8 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         EventBus::new(),
     )
     .slew_for(
-        Axis::Dec,
-        Direction::South,
+        Axis::Ra,
+        Direction::East,
         SlewSpeed::Medium,
         Duration::from_millis(500),
     )

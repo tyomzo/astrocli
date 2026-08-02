@@ -289,10 +289,14 @@ function CaptureState({
   }
 
   const elapsed = Math.floor(capture.elapsed_s);
+  const failed = capture.state === 'failed';
   return (
     <p role="status" className="mt-2 font-mono text-sm text-fg">
-      <span aria-hidden="true" className={exposing ? 'text-accent' : 'text-ok'}>
-        {exposing ? '◐' : '●'}
+      <span
+        aria-hidden="true"
+        className={failed ? 'text-warn' : exposing ? 'text-accent' : 'text-ok'}
+      >
+        {failed ? '✕' : exposing ? '◐' : '●'}
       </span>{' '}
       {capture.frame_id} — {describe(capture.state)}
       {exposing && ` ${elapsed}s`}
@@ -300,7 +304,7 @@ function CaptureState({
   );
 }
 
-/** The four `capture.progress` states, in words an operator reads rather than state names. */
+/** The `capture.progress` states, in words an operator reads rather than state names. */
 function describe(state: string): string {
   switch (state) {
     case 'exposing':
@@ -311,6 +315,10 @@ function describe(state: string): string {
       return 'stored';
     case 'preview_ready':
       return 'preview ready';
+    case 'failed':
+      // Terminal since 2026-08-02: before this state existed, a refused shutter left
+      // "reading off the camera" on screen indefinitely — the alert strip carries the why.
+      return 'failed — see the alert';
     default:
       return state;
   }
