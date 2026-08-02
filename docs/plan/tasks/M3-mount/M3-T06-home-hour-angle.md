@@ -128,3 +128,30 @@ instrument.
 Still unobserved: the southern-hemisphere sign (derived, no access to a southern mount), and the
 pier-side *label* — which branch is physically east and which west — which remains `derived` and
 needs a known star, not a bare mount.
+
+
+## The 90° protocol, and the case that needed no motion
+
+Repeated at 90° on the operator's request. RA axis both directions with returns between, each step
+confirmed by eye before the next:
+
+| commanded | model predicted | observed |
+|-----------|-----------------|----------|
+| RA axis +90° (HA +6h → +12h) | due north, 30° up; shaft horizontal | confirmed |
+| back | north-west, 49°; shaft vertical | confirmed |
+| RA axis −90° (HA +6h → 0h) | the zenith | confirmed, ~2° off |
+| back, then DEC home | the home pose | confirmed |
+
+**The 2° at the zenith is polar alignment, not the map.** The tube's real altitude is set by how the
+mount's polar axis is physically tilted; the model computes from the *configured* latitude, still
+Oslo's 59.9139° while the mount stands in Lithuania. Errors in this map arrive in units of 90°, not
+2°. It is a clean illustration of the open-loop limit: the software cannot know the alignment, only
+what it was told — which is what plate solving in Phase 2a exists to fix.
+
+**The DEC 90° case was verified without moving the mount.** That swing had already been performed
+earlier the same night, from home, and the tube went *west onto the horizon* — the ground truth the
+whole correction was derived from. The only open question was whether the corrected model agrees, so
+the command was re-issued and the altitude limit answered: **`LIMIT_ALTITUDE`, "the target is at
+altitude −0.0°"**. The old model called the identical command *south at 30°*. A refusal is not
+motion, so this cost nothing and risked nothing — the cheapest verification of the session, and a
+reminder that a safety refusal carrying a computed number is itself an instrument.
