@@ -42,6 +42,7 @@
 //! `scripts/check-deps.sh` enforces it.
 
 pub mod horizontal;
+pub mod rig;
 mod safe_mount;
 
 #[cfg(test)]

@@ -654,6 +654,14 @@ pub struct MountConfig {
     pub serial: SerialConfig,
     /// Safety limits and the manual-slew dead-man's switch (SDD §5.4, §5.8.1).
     pub limits: MountLimits,
+    /// Rig and tripod dimensions for the collision check (SDD §5.4.3, Layer 2).
+    ///
+    /// **Absent by default, and that is the honest default.** Every number here is a measurement
+    /// of one physical installation; a shipped guess would be a limit enforced against a quantity
+    /// nobody measured, which is the objection that deleted `park_position` in M3-T07. A node with
+    /// no geometry has no collision limit and says so, rather than having one that is wrong.
+    #[serde(default)]
+    pub geometry: Option<RigGeometry>,
     /// INDI device name; required when `driver: indi`.
     #[serde(default)]
     pub indi_device: Option<String>,
@@ -696,6 +704,9 @@ impl MountConfig {
         c.range("settle_time_seconds", self.settle_time_seconds, 0, 300);
         c.section("serial", |c| self.serial.validate(c));
         c.section("limits", |c| self.limits.validate(c));
+        if let Some(geometry) = self.geometry.as_ref() {
+            c.section("geometry", |c| geometry.validate(c));
+        }
 
         match self.driver {
             MountDriver::Indi if self.indi_device.is_none() => c.fail(
@@ -757,6 +768,82 @@ impl SerialConfig {
         // MNT-02 requires at least 1 Hz position telemetry; the upper bound keeps the poll from
         // saturating a link whose measured round trip is ~16.6 ms (SDD §5.2.4).
         c.range("poll_hz", self.poll_hz, 1, 20);
+    }
+}
+
+/// Rig and tripod dimensions for the Layer 2 collision check (SDD §5.4.3).
+///
+/// Millimetres throughout, and every one of them a measurement of the operator's own installation.
+/// The origin is the intersection of the two mount axes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RigGeometry {
+    /// Distance from the polar axis to the declination axis, along the declination axis — where
+    /// the saddle sits. 180 mm on an HEQ5 Pro.
+    pub dec_axis_offset_mm: f64,
+    /// Half the optical tube's length. The tube is modelled as a capsule centred on the
+    /// declination axis, so this is how far each end reaches.
+    pub tube_half_length_mm: f64,
+    /// The tube's radius, which also inflates the obstacle: a hit is the *surface* touching, not
+    /// the centreline.
+    pub tube_radius_mm: f64,
+    /// How far the optical axis sits off the declination axis — saddle height plus tube radius.
+    ///
+    /// Not zero on any real rig: the tube lies *on* the saddle, not through it. It matters because
+    /// this offset rotates with declination, so it is part of what sweeps.
+    pub saddle_offset_mm: f64,
+    /// Height of the intersection of the two mount axes above the ground.
+    pub head_height_mm: f64,
+    /// How far the tripod's top plate sits *below* the intersection of the two axes.
+    ///
+    /// The mount body raises the axes above the tripod; without this the legs are modelled as
+    /// starting at the axes themselves, which puts them a couple of hundred millimetres too high
+    /// and refuses poses that clear them comfortably.
+    pub mount_body_height_mm: f64,
+    /// Tripod radius at the top, where the legs meet the head — the "cut tip" of the pyramid.
+    pub top_radius_mm: f64,
+    /// Tripod radius at ground level, i.e. how far the legs splay.
+    ///
+    /// The obstacle is a truncated **cone**, not the three-sided pyramid the legs actually form:
+    /// leg azimuths change at every setup and a stale one is worse than none, so the cone
+    /// circumscribes them. It therefore refuses some poses that would have cleared a gap between
+    /// two legs, which is the direction to be wrong in.
+    pub base_radius_mm: f64,
+}
+
+/// Every field is a length in millimetres and must be positive; `head_height_mm` must also exceed
+/// the tube's reach, or the rig is inside the ground before it has moved.
+impl RigGeometry {
+    fn validate(&self, c: &mut Check) {
+        for (name, value) in [
+            ("dec_axis_offset_mm", self.dec_axis_offset_mm),
+            ("tube_half_length_mm", self.tube_half_length_mm),
+            ("tube_radius_mm", self.tube_radius_mm),
+            ("saddle_offset_mm", self.saddle_offset_mm),
+            ("head_height_mm", self.head_height_mm),
+            ("mount_body_height_mm", self.mount_body_height_mm),
+            ("top_radius_mm", self.top_radius_mm),
+            ("base_radius_mm", self.base_radius_mm),
+        ] {
+            c.range_f64(name, value, 0.0, 100_000.0);
+        }
+        if self.base_radius_mm < self.top_radius_mm {
+            c.fail(
+                "base_radius_mm",
+                "a tripod widens toward the ground, so the base radius cannot be smaller than the \
+                 top radius — check whether the two have been swapped",
+            );
+        }
+        // A rig that reaches below its own feet before it has moved is a typo, not a limit: the
+        // check would refuse every pose and the operator would disable it, which is worse than
+        // having no model at all.
+        if self.tube_half_length_mm + self.dec_axis_offset_mm >= self.head_height_mm {
+            c.fail(
+                "head_height_mm",
+                "the tube reaches the ground from the home pose — the head height must exceed \
+                 dec_axis_offset_mm + tube_half_length_mm, or every slew is refused",
+            );
+        }
     }
 }
 

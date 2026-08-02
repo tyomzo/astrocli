@@ -60,6 +60,7 @@ pub fn mount_config(driver: MountDriver) -> MountConfig {
             slew_ttl_default_ms: 500,
             slew_ttl_max_ms: 2000,
         },
+        geometry: None,
         indi_device: None,
         ascom_host: None,
     }
