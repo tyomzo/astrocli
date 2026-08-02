@@ -274,6 +274,36 @@ pub trait MountDevice: Debug + Send + Sync {
     /// the binary will one day forget.
     fn axis_travel(&self) -> Option<MountTravel>;
 
+    /// Where the tube would point after `degrees` more of the motion `dir` on `axis` (M3-T08).
+    ///
+    /// **The one question the safety wrapper cannot answer for itself**, and SDD §5.4.1 is the
+    /// reason. A limit that must decide whether a motion is safe holds a sky position, and the map
+    /// from mechanical state to sky position is many-to-one: each coordinate is reachable in two
+    /// mechanical poses, and at the pole in a whole family of them. So the branch — the fact that
+    /// decides which way declination moves for a given command — is not recoverable from what the
+    /// wrapper holds. Only a driver that keeps mechanical state can advance it and project.
+    ///
+    /// # Why this is not a second predictor
+    ///
+    /// It is the *only* one. Before M3-T08 the wrapper predicted motion by adding a delta to a sky
+    /// coordinate and assuming `North` raises declination, which holds on one branch; this replaces
+    /// that, it does not join it. Anything later that needs to predict motion — a rig-geometry
+    /// collision check (SDD §5.4.3) — asks the same driver from the same mechanical state rather
+    /// than growing a second answer to "where would this motion end up".
+    ///
+    /// # Contract
+    ///
+    /// * `degrees` is a magnitude; the direction comes from `dir`.
+    /// * If the axis is **already moving**, the answer must follow the mechanical sense actually
+    ///   running, not the sense `dir` would resolve to now. The two differ once an axis has crossed
+    ///   the pole, which is exactly when a held slew is most in need of checking.
+    /// * `None` if the driver has no mechanical state — the INDI and Alpaca case of
+    ///   [`axis_travel`](Self::axis_travel), and the simulator. A caller that gets `None` cannot be
+    ///   given a directional guarantee and must say so rather than assume one.
+    /// * Synchronous and side-effect-free: it reads the same cached counters `axis_travel` does, and
+    ///   every caller reads a position immediately before asking.
+    fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec>;
+
     /// Human-readable identity for logs, the UI and calibration-profile tagging (HAL-06).
     ///
     /// Synchronous and callable while disconnected, same as `capabilities`. Fields the device

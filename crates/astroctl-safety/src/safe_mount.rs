@@ -264,11 +264,28 @@ impl Shared {
         dir: Direction,
         at: DateTime<Utc>,
     ) -> Option<f64> {
-        let ahead = lookahead(from, axis, dir)?;
+        let ahead = self.predict(from, axis, dir)?;
         let ahead_altitude = self.horizontal_at(ahead, at).alt.degrees();
         let here_altitude = self.horizontal_at(from, at).alt.degrees();
+        // The guard needs no special case for where the prediction came from, and that is worth
+        // stating because the first M3-T08 draft added one. "Permit anything that climbs"
+        // (obligation 5) is sound exactly when `ahead` is sound; the 2026-08-02 defect was never
+        // this comparison, it was being handed a prediction from a frame that could not see the
+        // branch. Fix the prediction and the rule is correct again — for both sources, since a
+        // device with no mechanical state is one whose motion really is celestially monotonic.
         (ahead_altitude < self.limits.min_altitude_degrees && ahead_altitude <= here_altitude)
             .then_some(ahead_altitude)
+    }
+
+    /// One degree of the commanded motion, from the best frame available (M3-T08).
+    ///
+    /// Asks the driver first — it is the only layer holding the mechanical state that decides which
+    /// way declination moves (SDD §5.4.1) — and falls back to [`celestial_lookahead`] for a driver
+    /// that has none.
+    fn predict(&self, from: RaDec, axis: Axis, dir: Direction) -> Option<RaDec> {
+        self.inner
+            .motion_lookahead(axis, dir, LOOKAHEAD_DEGREES)
+            .or_else(|| celestial_lookahead(from, axis, dir))
     }
 
     /// The travel one axis has accumulated, when moving `dir` would make it worse (M3-T07).
@@ -555,12 +572,28 @@ impl SafeMount {
     }
 }
 
-/// Where one degree of motion along `axis` in `dir` would put the tube.
+/// Where one degree of motion along `axis` in `dir` would put the tube — **celestial fallback**.
 ///
 /// `None` for a direction that is not on the axis (`slew(Ra, North)`): that is a caller bug and
 /// the driver is the layer that refuses it, with a message about the axis rather than about the
 /// horizon.
-fn lookahead(from: RaDec, axis: Axis, dir: Direction) -> Option<RaDec> {
+///
+/// # This is the wrong frame, and is used only when the right one is unavailable (M3-T08)
+///
+/// It assumes `north` raises declination. That holds on the normal branch and inverts past the
+/// pole, so on a mount that has crossed it this predicts a tube climbing while the real one
+/// descends — and because [`Shared::descends_below_limit`]'s guard then never sees a descent, the
+/// altitude limit does not merely mis-estimate, it permits unconditionally. Measured on hardware
+/// 2026-08-02: a declination slew from the home pose ran the full 180° travel limit with the tube
+/// ending 60° below the horizon.
+///
+/// The fix is not to repair this function — the branch it needs is *not recoverable* from the
+/// `RaDec` it is given (SDD §5.4.1). [`MountDevice::motion_lookahead`] is the real predictor and
+/// [`Shared::predict`] prefers it; this survives for devices that have no mechanical state to
+/// project, where it is not an approximation but the device's actual model: the simulator holds an
+/// `RaDec` and moves it, so north really does raise declination there. What it cannot describe is
+/// a *German equatorial* behind a driver that will not say which way its metal turns.
+fn celestial_lookahead(from: RaDec, axis: Axis, dir: Direction) -> Option<RaDec> {
     let (ra_hours, dec_degrees) = match (axis, dir) {
         // East is the direction in which right ascension increases (the same mapping the API's
         // `positive`/`negative` uses, and the same one the simulator asserts on).
@@ -939,6 +972,13 @@ impl MountDevice for SafeMount {
             )),
         };
         result
+    }
+
+    /// Forwarded unchanged: the wrapper adds no mechanical knowledge, it only consumes the
+    /// driver's. Present so that a caller holding a `SafeMount` as `dyn MountDevice` sees the same
+    /// body-frame surface the driver offers (SDD §5.4.2).
+    fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {
+        self.shared.inner.motion_lookahead(axis, dir, degrees)
     }
 
     fn axis_travel(&self) -> Option<MountTravel> {

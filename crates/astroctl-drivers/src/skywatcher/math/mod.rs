@@ -44,7 +44,9 @@ pub use mech::{
 pub use target::{goto_solution, AxisCounts, GotoSolution};
 
 use astroctl_core::config::SiteConfig;
-use astroctl_core::types::RaDec;
+use astroctl_core::types::{Axis, RaDec};
+
+use super::codec::MotionDirection;
 
 use super::codec::{CountsPerRev, EncodeError};
 
@@ -176,6 +178,59 @@ impl MountGeometry {
         mech_to_sky(self.mech(counts), lst, self.hemisphere)
     }
 
+    /// Where the tube would point after `degrees` more of mechanical motion on `axis` (M3-T08).
+    ///
+    /// **This is the forward step SDD §5.4.1's rule names**: advance the body state, then project.
+    /// It exists because the projection cannot be run backwards — the safety wrapper holds a sky
+    /// position, and a sky position does not know which branch produced it, so a limit that tries
+    /// to reason about a *motion* from one has to guess.
+    ///
+    /// # Why the branch is re-derived here rather than passed in
+    ///
+    /// The branch can change *inside* a single look-ahead step, and the interesting case is the
+    /// only pose the mount is ever certain to start from. At home the declination axis sits at
+    /// `d = 0`, which is [`Branch::Normal`] by the `d >= 0` rule — but declination is at its
+    /// maximum there, so **both** mechanical senses reduce it, and one of them lands on `d < 0`,
+    /// the other branch, immediately. A caller that resolved the branch once and applied it to the
+    /// whole step would conclude that one of the two directions increases declination, because
+    /// that is what the label says, and would then permit the motion forever on the grounds that
+    /// the tube is climbing. That is precisely the 2026-08-02 defect. Deriving the branch from the
+    /// *advanced* angle is what makes the step honest across the pole, and it costs nothing:
+    /// [`mech_to_sky`] already does it.
+    ///
+    /// `sense` is a mechanical direction rather than a sky one for the same reason. Which sky
+    /// direction a motor sense corresponds to is exactly the fact that inverts at the pole; the
+    /// motor sense itself does not, so it is the one the caller can hold across a step.
+    #[must_use]
+    pub fn after_motion(
+        self,
+        counts: AxisCounts,
+        axis: Axis,
+        sense: MotionDirection,
+        degrees: f64,
+        lst: Lst,
+    ) -> SkyPosition {
+        let mech = self.mech(counts);
+        let delta = match sense {
+            MotionDirection::Forward => degrees,
+            MotionDirection::Backward => -degrees,
+        };
+        // `wrapped` rather than `from_degrees`: the inputs are a folded angle and a small finite
+        // step, so the sum is finite by construction and there is no error to propagate into a
+        // limit check that must not be able to fail for an arithmetic reason.
+        let advanced = match axis {
+            Axis::Ra => MechPosition {
+                ra_axis: AxisAngle::wrapped(mech.ra_axis.degrees() + delta),
+                ..mech
+            },
+            Axis::Dec => MechPosition {
+                dec_axis: AxisAngle::wrapped(mech.dec_axis.degrees() + delta),
+                ..mech
+            },
+        };
+        mech_to_sky(advanced, lst, self.hemisphere)
+    }
+
     /// The counters that would put the telescope on `target` from a chosen pier side.
     #[must_use]
     pub fn counts_for(self, target: RaDec, branch: Branch, lst: Lst) -> AxisCounts {
@@ -214,6 +269,92 @@ mod tests {
             elevation: 100.0,
             timezone: "Europe/Oslo".to_owned(),
         }
+    }
+
+    /// **M3-T08's reason for existing**, at the one pose the mount is always certain to be in.
+    ///
+    /// At home the tube is on the pole, so declination is at its maximum and *both* mechanical
+    /// senses must lower it. A model that resolved the branch once — `d = 0` is `Normal` — and
+    /// applied it to the whole step would report one of these as raising declination, because that
+    /// is what the `Normal` branch's sign says, and the altitude limit built on it would then
+    /// permit that direction forever. That is the 2026-08-02 hardware defect, and this is the
+    /// assertion that could have caught it before the tube went 60° below the horizon.
+    #[test]
+    fn from_home_both_mechanical_senses_lower_the_declination() {
+        let geometry = MountGeometry::from_handshake(fixture_cpr(), fixture_cpr(), &site(59.9139))
+            .expect("valid");
+        let lst = Lst::from_hours(21.5).expect("valid");
+
+        let forward = geometry.after_motion(
+            AxisCounts::HOME,
+            Axis::Dec,
+            MotionDirection::Forward,
+            1.0,
+            lst,
+        );
+        let backward = geometry.after_motion(
+            AxisCounts::HOME,
+            Axis::Dec,
+            MotionDirection::Backward,
+            1.0,
+            lst,
+        );
+
+        assert!(
+            forward.coords.dec.degrees() < 90.0,
+            "forward from the pole raised declination to {}",
+            forward.coords.dec.degrees()
+        );
+        assert!(
+            backward.coords.dec.degrees() < 90.0,
+            "backward from the pole raised declination to {}",
+            backward.coords.dec.degrees()
+        );
+        // Mirror images: the same declination reached down opposite sides of the sky, which is why
+        // the altitude limit must stop them at the same angle.
+        assert!((forward.coords.dec.degrees() - backward.coords.dec.degrees()).abs() < 1e-9);
+        assert_ne!(
+            forward.pier_side, backward.pier_side,
+            "the two senses leave home on opposite branches"
+        );
+    }
+
+    /// The step re-derives the branch, rather than carrying the starting one across it.
+    ///
+    /// One degree short of the pole, a motion that continues *through* it must come out with
+    /// declination falling again — the tent function of SDD §5.2.3, not a straight line.
+    #[test]
+    fn a_step_across_the_pole_turns_the_declination_around() {
+        let geometry = MountGeometry::from_handshake(fixture_cpr(), fixture_cpr(), &site(59.9139))
+            .expect("valid");
+        let lst = Lst::from_hours(21.5).expect("valid");
+        let scale = geometry.dec_scale();
+        // Half a degree from home on the normal branch: declination 89.5.
+        let start = AxisCounts {
+            ra: Counts::HOME,
+            dec: scale.counts_at(AxisAngle::from_degrees(0.5).expect("valid")),
+        };
+        // Loose against 89.5 because a counter is quantised — half a degree is not a whole
+        // number of counts at this CPR, and pinning the rounding would be testing the fixture.
+        let before = geometry.position(start, lst).coords.dec.degrees();
+        assert!((before - 89.5).abs() < 1e-3, "started at {before}");
+
+        // One degree further toward home and past it: 0.5 − 1.0 = −0.5, the other branch.
+        let after = geometry
+            .after_motion(start, Axis::Dec, MotionDirection::Backward, 1.0, lst)
+            .coords
+            .dec
+            .degrees();
+        // The claim is the mirror, not the number: one degree of travel from 0.5° past home ends
+        // 0.5° short of it on the other branch, at the *same* declination. A model that carried
+        // the starting branch across the step would report 90.5 — off the sky altogether.
+        // 1e-3 rather than an epsilon, for the quantisation reason above; the failure this guards
+        // against is a whole degree wide (90.5 instead of 89.5), so the tolerance is not load
+        // bearing.
+        assert!(
+            (after - before).abs() < 1e-3,
+            "crossing the pole should mirror the declination: {before} -> {after}"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.31.0
+**Version:** 1.31.1
 **Author:** Artiom
 **Date:** 2026-08-02
 **Status:** Draft
@@ -288,6 +288,8 @@ only from the last status the node could read, since by definition it cannot rea
 
 **Change note (1.30.0):** §5.2.3's mech↔sky map is corrected by six hours (M3-T06). The section
 **Change note (1.31.0):** **§5.4.1–§5.4.3 added — the celestial and body frames, and which frame each limit belongs to (ADR-14).** §5.4 specified *what* is enforced and was silent on *in which frame*, so `SafeMount::lookahead` predicted motion celestially and assumed `north ⇒ declination increases` — true on the normal branch only. The home pose is the pole, so a declination move crosses branches on its first step and the check then permits unconditionally; measured on hardware 2026-08-02 with the tube ending 60° below the horizon. §5.4.1 states the rule (advance body state, project; never invert), §5.4.2 specifies Layer 1 (axis angles and branch, making the long-unimplemented `pier_side` of §5.2.3 truthful) and shows the fix is one sign on one axis, and §5.4.3 defers Layer 2 (rig geometry, collision) while fixing the four interface points that stop the two layers from growing contradictory answers. Records that 180° of RA at the home pose is zero celestial change and a half-turn of counterweight — a hazard class no celestial predicate can express.
+**Change note (1.31.1):** §5.4.2 corrected twice by M3-T08, which implemented it. The branch alone is **not sufficient** — it can change inside a single look-ahead step, and at the home pose it does, so a wrapper flipping a sign from the branch-at-current-position reproduces the very defect; the forward step must re-derive the branch at the advanced angle, which puts it behind a new `MountDevice::motion_lookahead` because the safety crate may not depend on a driver. And the `None` fallback is the celestial look-ahead, not the positional check: the devices that answer `None` have no mechanical model, so their motion really is celestially monotonic and a positional fallback would trap them for nothing. The right-ascension half of the derivation survived and is now pinned by a test.
+
 
 gave `HA = s·h`, making both counters at `0x800000` the meridian; the home pose is six hours west
 of it, because the counterweight shaft *is* the declination axis and hangs in the meridian plane,
@@ -1203,40 +1205,63 @@ possible and neither exposes axis counters. Layer 1 adds the branch on the same 
 frame remains the HAL's lingua franca — `position()` still returns `RaDec` — and body state stays an
 optional capability alongside it, per ADR-14.
 
-**What the safety wrapper does with it, and how little that is.** Differentiating §5.2.3's map:
+**Two corrections, found by implementing this (M3-T08).**
+
+**1. The branch is necessary and not sufficient, and "one sign in one place" was wrong.** This
+section first said the wrapper could take the branch from the driver and flip a sign itself.
+Differentiating §5.2.3's map gives the appeal of that:
 
 ```
 ∂dec/∂d  =  −s  (normal branch)      +s  (flipped branch)     ← sign inverts
 ∂HA/∂h   =   s  (both branches)                               ← the flip adds 180°, not a sign
 ```
 
-So the **right-ascension axis needs nothing from Layer 1** — its direction mapping is
-branch-invariant, and the RA arms of `lookahead` are correct as written. Only the **declination
-axis** needs the branch, and it needs one bit of it. That bounds the change to a sign, applied in
-one place, rather than a rewrite of the prediction path — and it is a falsifiable claim, not a
-convenience: if the RA arms ever need the branch, this derivation is wrong.
+The right-ascension half holds and is load-bearing: the RA axis needs nothing from Layer 1, which
+is why this task is small, and a test now pins it. The declination half does not, because **the
+branch can change inside a single look-ahead step**. Home is `d = 0`, which is `Branch::Normal` by
+the `d ≥ 0` rule — but declination is at its maximum there, so *both* mechanical senses lower it and
+one of them lands on `d < 0` immediately. A wrapper applying the branch-at-the-current-position
+would conclude that one of the two directions climbs, because that is what `Normal` says, and would
+permit it forever. That is the original defect, reproduced by the proposed fix for it.
 
-**`pier_side` is the live defect.** §5.2.3 already specifies the derivation (`d < 0` implies the
-flipped state) and §5.4 obligation 3 already records that no Phase 1 driver performs it, so
-`mount.position` reports `unknown` — as it does on hardware today. Layer 1 is that derivation being
-done and reported. No new event topic and no new field: `mount.position.pier_side` exists and
-becomes truthful.
+So the forward step must advance the mechanical angle and re-derive the branch *at the advanced
+point* — `MountGeometry::after_motion` — and that computation cannot live in the safety wrapper,
+which may not depend on a driver crate (ADD §5.6 rule 1). The HAL surface is therefore
+`MountDevice::motion_lookahead(axis, dir, degrees) -> Option<RaDec>`: the driver advances its own
+body state and projects. On M3-T07's terms — synchronous, cached, `Option` for the INDI/Alpaca and
+simulator case, alongside `axis_travel()` rather than replacing it.
 
-**Degradation, stated rather than papered over.** A driver that reports no body state cannot be
-given a directional declination guarantee — that is a property of the frame, not of the
-implementation. The wrapper falls back to the positional reading of MNT-15 (refuse while below the
-limit), which is safe but can trap an axis beneath its own horizon limit: precisely the failure
-obligation 5 introduced the directional check to avoid. The limitation is accepted in the manner of
-obligation 3's meridian fallback, and it is a contract for future adapters rather than a live
-degradation, because Phase 1's only real mount driver derives the branch from a counter it already
-reads.
+This is **one** predictor, not two: it replaces the wrapper's celestial look-ahead for any driver
+that answers, rather than joining it. A moving axis is projected along the mechanical sense it is
+*actually running*, not the sense the direction label would resolve to now — the two differ after a
+crossing, which is exactly when a held slew most needs checking, so the driver records the sense a
+slew resolved to. §5.4.3's point 2 binds a future Layer 2 to the same primitive.
+
+**2. The fallback is the celestial model, not the positional check.** This section first said a
+driver reporting no body state would fall back to refusing while below the limit, accepting that
+this can trap an axis under its own horizon. Implementing it showed the trade is neither available
+nor needed. The population answering `None` is devices with *no mechanical model at all* — the
+simulator holds an `RaDec` and moves it — and for those the celestial assumption is not an
+approximation but the device's actual behaviour, so trapping them buys nothing while breaking the
+recovery obligation 5 exists for. The fallback is therefore the celestial look-ahead, unchanged.
+
+What is genuinely unprotected is narrower than the first draft claimed and is worth naming exactly:
+a **German equatorial behind a driver that will not say which way its metal turns**. No Phase 1
+driver is in that position. A future INDI or Alpaca adapter would be, and the answer is for it to
+implement `motion_lookahead` — ASCOM's `SideOfPier` and `DestinationSideOfPier` exist for this —
+not for the wrapper to guess on its behalf.
+
+The descent guard itself needed no change, which is the cleanest evidence that the frame was the
+defect rather than the rule: "permit anything that climbs" is sound exactly when the prediction is
+sound. A first draft made the guard conditional on the prediction's provenance; that was
+unnecessary and would have trapped every simulator-driven session.
 
 *Alternative considered — observing the sense instead of deriving it.* The 2 Hz watch holds
 consecutive positions and could measure which way declination is actually moving, needing no branch
 at all. Rejected as the primary mechanism because it protects nothing until two polls of motion have
 elapsed (up to 1 s of unchecked slew) and the pre-flight check has no motion history whatsoever. It
-remains the natural way to back the fallback above for a bodiless driver, and is recorded here so
-that it is chosen deliberately if it ever is.
+remains the natural way to protect a bodiless driver on real hardware, and is recorded here so that
+it is chosen deliberately if it ever is.
 
 #### 5.4.3 Layer 2 — body geometry (deferred; its interface fixed here)
 

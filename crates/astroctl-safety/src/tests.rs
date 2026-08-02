@@ -19,7 +19,7 @@ use astroctl_hal::mount::MountDevice;
 use chrono::{DateTime, Utc};
 
 use crate::horizontal::{horizontal, Site};
-use crate::test_double::RecordingMount;
+use crate::test_double::{LookaheadModel, RecordingMount};
 use crate::SafeMount;
 
 /// The example config's site (`config/field-node.example.yaml`): Oslo.
@@ -955,4 +955,165 @@ async fn the_alt_az_the_operator_reads_is_the_one_the_limit_used() {
         EXAMPLE_LIMITS.min_altitude_degrees
     );
     assert!(safe.goto(target).await.is_err());
+}
+
+// ---------------------------------------------------------------------------------------------
+// M3-T08 — the altitude limit on a mount that has crossed the pole (SDD §5.4.1, §5.4.2)
+// ---------------------------------------------------------------------------------------------
+
+/// The defect, as a test: past the pole, `north` is the direction that descends.
+///
+/// This is the shape of the 2026-08-02 hardware finding. Before M3-T08 the wrapper predicted
+/// motion by adding a delta to the sky coordinate and assuming north raises declination, so on
+/// this mount it reported the tube climbing while it descended — and because the descent guard
+/// then saw no descent, it permitted the motion *unconditionally*, for a full 180° of travel.
+///
+/// The mount here differs from the one above in exactly one respect: it answers
+/// `motion_lookahead`, i.e. it is willing to say which way its metal turns.
+#[tokio::test]
+async fn a_declination_slew_that_descends_past_the_pole_is_refused() {
+    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+        .with_lookahead(LookaheadModel::flipped_branch(1.0))
+        .shared();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    let error = safe
+        .slew_for(
+            Axis::Dec,
+            Direction::North,
+            SlewSpeed::Medium,
+            Duration::from_millis(500),
+        )
+        .await
+        .expect_err("north descends on this branch and must be refused");
+    assert!(matches!(
+        error,
+        DeviceError::LimitViolation {
+            limit: Limit::Altitude,
+            ..
+        }
+    ));
+    assert!(
+        !device.log().contains(&"slew".to_owned()),
+        "the axis was commanded: {:?}",
+        device.log()
+    );
+}
+
+/// And the converse, so the fix is not simply "refuse declination slews".
+///
+/// On the same mount at the same position, the *other* declination command climbs, and must be
+/// allowed. A test that only asserted the refusal above would pass against a wrapper that had
+/// stopped moving the declination axis at all.
+#[tokio::test]
+async fn the_climbing_declination_direction_is_still_permitted_past_the_pole() {
+    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+        .with_lookahead(LookaheadModel::flipped_branch(1.0))
+        .shared();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    safe.slew_for(
+        Axis::Dec,
+        Direction::South,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("south climbs on this branch and must be allowed");
+    assert!(device.log().contains(&"slew".to_owned()));
+}
+
+/// Obligation 5's guarantee has to survive the fix, on the branch it was never tested on.
+///
+/// An axis below the limit must still be drivable back up. `a_mount_below_the_limit_can_still_be
+/// _driven_back_up` asserts this for a mount with no mechanical state; this asserts it for one
+/// past the pole, where the direction that recovers is the opposite of the one that does there.
+#[tokio::test]
+async fn a_mount_below_the_limit_past_the_pole_can_still_be_driven_back_up() {
+    let device = RecordingMount::at(target_at_altitude(OSLO, -20.0, Utc::now()))
+        .with_lookahead(LookaheadModel::flipped_branch(1.0))
+        .shared();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+
+    safe.slew_for(
+        Axis::Dec,
+        Direction::South,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("climbing out of the limit must be allowed on either branch");
+    assert!(device.log().contains(&"slew".to_owned()));
+}
+
+/// The right-ascension axis takes the same answer from either branch.
+///
+/// SDD §5.4.2 derives that `∂HA/∂h` carries the hemisphere sign on *both* branches — the flip adds
+/// a constant 180°, which has no derivative — so only declination needed the branch. That claim
+/// bounded the change, so it is pinned here rather than left as reasoning: an east slew from a
+/// position near the western horizon is refused identically whichever branch the mount reports.
+#[tokio::test]
+async fn the_right_ascension_axis_is_unaffected_by_the_branch() {
+    let at = Utc::now();
+    let mut verdicts = Vec::new();
+    for model in [
+        LookaheadModel::normal_branch(1.0),
+        LookaheadModel::flipped_branch(1.0),
+    ] {
+        let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, at))
+            .with_lookahead(model)
+            .shared();
+        let safe = wrap(&device, EXAMPLE_LIMITS, &EventBus::new());
+        for dir in [Direction::East, Direction::West] {
+            let allowed = safe
+                .slew_for(Axis::Ra, dir, SlewSpeed::Medium, Duration::from_millis(500))
+                .await
+                .is_ok();
+            verdicts.push(allowed);
+            safe.stop_slew(Axis::Ra).await.expect("stop");
+        }
+    }
+    assert_eq!(
+        verdicts[..2],
+        verdicts[2..],
+        "the branch changed a right-ascension verdict, so §5.4.2's derivation is wrong"
+    );
+}
+
+/// A held slew that crosses the pole: nothing the operator did changed, and the button inverted.
+///
+/// The load-bearing case, and the one the pre-flight check structurally cannot catch. Both slew
+/// paths short-circuit an identical renewal, so the check made at the press never runs again while
+/// the thumb is down — and a declination hold from near the home pose crosses the branch *during*
+/// that hold, turning the direction that was climbing into the one that descends. Only the watch
+/// sees it.
+#[tokio::test]
+async fn a_held_declination_slew_is_stopped_when_crossing_the_pole_turns_it_downward() {
+    let device = RecordingMount::at(target_at_altitude(OSLO, 15.5, Utc::now()))
+        .with_lookahead(LookaheadModel::normal_branch(1.0))
+        .shared();
+    let bus = EventBus::new();
+    let mut events = bus.subscribe();
+    let safe = wrap(&device, EXAMPLE_LIMITS, &bus);
+
+    // North climbs on the branch the mount is on at the press, so this is allowed — correctly.
+    safe.slew_for(
+        Axis::Dec,
+        Direction::North,
+        SlewSpeed::Medium,
+        Duration::from_millis(2_000),
+    )
+    .await
+    .expect("north climbs on this branch at the moment of the press");
+    assert!(device.is_slewing(Axis::Dec), "the slew started");
+
+    // The axis crosses the pole. The operator is still holding north; the metal is now descending.
+    device.set_lookahead(LookaheadModel::flipped_branch(1.0));
+
+    let alert = next_alert(&mut events).await.expect("an alert");
+    assert_eq!(alert.0, ErrorCode::LimitAltitude.as_str());
+    assert!(
+        !device.is_slewing(Axis::Dec),
+        "the axis kept descending under a held button"
+    );
 }

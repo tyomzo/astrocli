@@ -48,6 +48,53 @@ struct State {
     generation: u64,
     /// What `axis_travel` answers. `None` is a mount with no home reference (M3-T07).
     travel: Option<MountTravel>,
+    /// What `motion_lookahead` answers, as a per-direction step (M3-T08). `None` models a driver
+    /// with no mechanical state — the INDI/Alpaca and simulator case — and exercises the wrapper's
+    /// documented fallback rather than its branch-aware path.
+    lookahead: Option<LookaheadModel>,
+}
+
+/// How the double answers `motion_lookahead`, as the change one step of each direction makes.
+///
+/// Deltas rather than absolute coordinates so a test states the thing that matters — *which way
+/// declination goes* — instead of arithmetic. [`Self::flipped_branch`] is the case that had no
+/// representation before M3-T08 and no test could therefore express: a mount where commanding
+/// north **lowers** declination, which is every pose past the pole.
+#[derive(Debug, Clone, Copy)]
+pub struct LookaheadModel {
+    /// Degrees of declination a north command produces. Negative models the flipped branch.
+    pub north_dec: f64,
+    /// Degrees of declination a south command produces.
+    pub south_dec: f64,
+    /// Hours of right ascension an east command produces.
+    pub east_ra: f64,
+    /// Hours of right ascension a west command produces.
+    pub west_ra: f64,
+}
+
+impl LookaheadModel {
+    /// The normal branch: north raises declination, east raises right ascension.
+    #[must_use]
+    pub const fn normal_branch(step_degrees: f64) -> Self {
+        Self {
+            north_dec: step_degrees,
+            south_dec: -step_degrees,
+            east_ra: step_degrees / 15.0,
+            west_ra: -step_degrees / 15.0,
+        }
+    }
+
+    /// Past the pole: **both** declination commands lower declination is not the case — the axis
+    /// still has two senses — but the one the operator calls north is now the descending one.
+    #[must_use]
+    pub const fn flipped_branch(step_degrees: f64) -> Self {
+        Self {
+            north_dec: -step_degrees,
+            south_dec: step_degrees,
+            east_ra: step_degrees / 15.0,
+            west_ra: -step_degrees / 15.0,
+        }
+    }
 }
 
 impl RecordingMount {
@@ -62,6 +109,7 @@ impl RecordingMount {
                 tracking: None,
                 generation: 0,
                 travel: None,
+                lookahead: None,
             }),
             goto_duration: Duration::from_secs(2),
             slew_duration: Duration::ZERO,
@@ -93,6 +141,21 @@ impl RecordingMount {
             },
         });
         self
+    }
+
+    /// Answer `motion_lookahead` with `model` — i.e. be a driver that holds mechanical state.
+    #[must_use]
+    pub fn with_lookahead(self, model: LookaheadModel) -> Self {
+        self.locked().lookahead = Some(model);
+        self
+    }
+
+    /// Flip which declination command descends, while the mount is running.
+    ///
+    /// This is a pole crossing under a held slew: nothing the operator did changed, and the sky
+    /// meaning of the button they are holding inverted.
+    pub fn set_lookahead(&self, model: LookaheadModel) {
+        self.locked().lookahead = Some(model);
     }
 
     /// Move the reported travel while the mount is running — what an axis winding under a held
@@ -291,6 +354,37 @@ impl MountDevice for RecordingMount {
 
     fn axis_travel(&self) -> Option<MountTravel> {
         self.locked().travel
+    }
+
+    fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {
+        let state = self.locked();
+        let model = state.lookahead?;
+        let here = state.position;
+        drop(state);
+
+        // The scale factor keeps a caller's step size meaningful: the model is stated for one
+        // degree and the wrapper asks for whatever `LOOKAHEAD_DEGREES` is.
+        let (ra, dec) = match (axis, dir) {
+            (Axis::Dec, Direction::North) => (
+                here.ra.hours(),
+                here.dec.degrees() + model.north_dec * degrees,
+            ),
+            (Axis::Dec, Direction::South) => (
+                here.ra.hours(),
+                here.dec.degrees() + model.south_dec * degrees,
+            ),
+            (Axis::Ra, Direction::East) => (
+                here.ra.hours() + model.east_ra * degrees,
+                here.dec.degrees(),
+            ),
+            (Axis::Ra, Direction::West) => (
+                here.ra.hours() + model.west_ra * degrees,
+                here.dec.degrees(),
+            ),
+            // Not a direction on that axis — no motion to describe, as the real driver answers.
+            _ => return None,
+        };
+        RaDec::from_parts(ra.rem_euclid(24.0), dec.clamp(-90.0, 90.0)).ok()
     }
 
     fn capabilities(&self) -> MountCapabilities {

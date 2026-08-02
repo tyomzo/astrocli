@@ -273,6 +273,12 @@ struct State {
     /// built on it refuses earlier than the metal requires. Erring toward "stop winding" is the
     /// error to have.
     counts: Option<AxisCounts>,
+    /// The mechanical sense each axis's manual slew resolved to — see [`State::sense`] (M3-T08).
+    ra_sense: Option<MotionDirection>,
+    /// Likewise for the declination axis. This is the one that matters: it is the axis whose sky
+    /// direction inverts at the pole, so it is the one where "what the operator asked for" and
+    /// "which way the metal is turning" stop agreeing.
+    dec_sense: Option<MotionDirection>,
     /// Bumped by everything that takes the axes away from someone. A goto that wakes to find this
     /// changed knows it was overridden — and, unlike a cancellation token, this survives the
     /// caller's future being dropped.
@@ -286,6 +292,19 @@ impl State {
         match axis {
             Axis::Ra => &mut self.ra,
             Axis::Dec => &mut self.dec,
+        }
+    }
+
+    /// The mechanical sense a manual slew resolved to, per axis (M3-T08).
+    ///
+    /// Read only while the axis is [`Activity::Manual`], which is why nothing clears it: a value
+    /// left behind by a finished slew is never consulted. It is kept beside `Activity` rather than
+    /// inside it because `Activity`'s equality is what makes a dead-man's-switch renewal a no-op
+    /// (see `slew`), and widening it with a field the caller does not supply would break that.
+    const fn sense(&mut self, axis: Axis) -> &mut Option<MotionDirection> {
+        match axis {
+            Axis::Ra => &mut self.ra_sense,
+            Axis::Dec => &mut self.dec_sense,
         }
     }
 
@@ -464,6 +483,8 @@ impl SkywatcherMount {
                     dec: Activity::Free,
                     branch: None,
                     counts: None,
+                    ra_sense: None,
+                    dec_sense: None,
                     generation: 0,
                     overridden_by: "nothing",
                 }),
@@ -1345,6 +1366,11 @@ impl MountDevice for SkywatcherMount {
         )?;
 
         let sense = self.shared.sense(&link, session, dir).await?;
+        // Recorded before the frames go out, so that `motion_lookahead` can never see an axis
+        // running with no sense on record (M3-T08). A slew that fails to start leaves a value
+        // behind, which is harmless: it is only read while the axis is `Manual`, and the failure
+        // path below frees it.
+        *self.shared.locked().sense(axis) = Some(sense);
         let sequence = session
             .controller(axis)
             .slew(speed, sense)
@@ -1520,6 +1546,53 @@ impl MountDevice for SkywatcherMount {
     /// `None` before the handshake or before the first read — there is no home reference until
     /// the counts per revolution are known, and inventing one would hand the safety wrapper a
     /// number it would then enforce a limit against.
+    /// Advance the mechanical state one step and project — SDD §5.4.1, §5.4.2 (M3-T08).
+    ///
+    /// The whole of this method is deciding *which mechanical sense* the step runs in, because
+    /// the projection itself already handles the branch
+    /// ([`MountGeometry::after_motion`](super::math::MountGeometry::after_motion)).
+    ///
+    /// A **moving** axis uses the sense it is actually running. Re-resolving `dir` against the
+    /// branch the mount is on now would invert the answer the moment a held slew crossed the pole,
+    /// and would invert it in the worst possible direction: the tube is descending, and the fresh
+    /// resolution says the motion that is now "north" climbs. An **idle** axis has no running
+    /// sense, so `dir` is resolved against the branch of the current declination angle, which is
+    /// what starting the motion would do.
+    fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {
+        if axis_of(dir) != axis {
+            // Not a direction on this axis. The driver refuses this in `slew` with a message about
+            // the axis; here there is simply no motion to describe.
+            return None;
+        }
+        let mut state = self.shared.locked();
+        let session = state.session?;
+        let counts = state.counts?;
+        let running = matches!(*state.activity(axis), Activity::Manual { .. });
+        let recorded = *state.sense(axis);
+        drop(state);
+
+        let hemisphere = session.geometry.hemisphere();
+        let sense = match (running, recorded) {
+            (true, Some(sense)) => sense,
+            _ => motor_direction(
+                dir,
+                // From the *counters*, not the `branch` cache: the cache is deliberately not
+                // refreshed on every counter read (see `State::branch`), and this is the one
+                // caller that needs the branch of a position rather than of a session.
+                Branch::of(session.geometry.mech(counts).dec_axis),
+                hemisphere,
+            ),
+        };
+
+        let lst = self.shared.lst().ok()?;
+        Some(
+            session
+                .geometry
+                .after_motion(counts, axis, sense, degrees, lst)
+                .coords,
+        )
+    }
+
     fn axis_travel(&self) -> Option<MountTravel> {
         let state = self.shared.locked();
         let session = state.session?;

@@ -1,7 +1,7 @@
 # M3-T08 — Body frame, Layer 1: the mount knows which branch it is on
 
 **Milestone:** M3 (post-T07 addendum) · **Depends on:** M3-T04, M3-T06, M3-T07 · **Crates:** astroctl-hal, astroctl-drivers, astroctl-safety, astroctl-core
-**Size:** S · **Status:** todo
+**Size:** S · **Status:** done (software); hardware verification pending
 **Spec:** ADD ADR-14; SDD §5.4.1 (the rule), §5.4.2 (this task), §5.2.3 (the derivation); PRD MNT-15
 
 ## Why this task exists
@@ -54,17 +54,17 @@ not in this task.
 
 ## Acceptance criteria
 
-- [ ] From the home pose, a declination slew in **either** sense is refused at the same travel angle
+- [x] From the home pose, a declination slew in **either** sense is refused at the same travel angle
       (within the look-ahead's one degree), and that angle is the altitude floor's, not the travel
       limit's. This is the whole point of the task and it must be a test, not a hardware note.
-- [ ] A declination slew that *unwinds* an axis already below the floor is still permitted, on both
+- [x] A declination slew that *unwinds* an axis already below the floor is still permitted, on both
       branches — obligation 5's guarantee must survive the fix rather than be traded for it.
-- [ ] `mount.position.pier_side` reports a real side on the skywatcher driver, on both branches, and
+- [x] `mount.position.pier_side` reports a real side on the skywatcher driver, on both branches, and
       the golden fixture moves with it if the payload does.
-- [ ] The right-ascension arms of `lookahead` are unchanged, and a test pins the branch-invariance
+- [x] The right-ascension arms of `lookahead` are unchanged, and a test pins the branch-invariance
       claim (`∂HA/∂h = s` on both branches) so that §5.4.2's derivation is falsifiable in CI rather
       than by reasoning.
-- [ ] A driver returning `None` for body state produces the documented positional fallback, and the
+- [x] A driver returning `None` for body state produces the documented positional fallback, and the
       accepted limitation is stated where a reader of the code will meet it.
 
 ## Hardware verification (operator, mount bare)

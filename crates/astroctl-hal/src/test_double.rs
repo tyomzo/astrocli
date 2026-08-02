@@ -234,6 +234,16 @@ impl MountDevice for FakeMount {
         None
     }
 
+    /// `None` — likewise, a fake with no mechanism has no branch to project a motion through.
+    fn motion_lookahead(
+        &self,
+        _axis: astroctl_core::types::Axis,
+        _dir: astroctl_core::types::Direction,
+        _degrees: f64,
+    ) -> Option<astroctl_core::types::RaDec> {
+        None
+    }
+
     fn capabilities(&self) -> MountCapabilities {
         MountCapabilities {
             has_pec: false,

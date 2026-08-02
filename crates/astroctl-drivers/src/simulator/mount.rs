@@ -1215,6 +1215,22 @@ impl MountDevice for SimulatorMount {
         None
     }
 
+    /// `None`, for the reason above (M3-T08).
+    ///
+    /// The model has no mechanical axes, so it has no branch — and a look-ahead that guessed one
+    /// would hand the safety wrapper a directional guarantee this simulator cannot honour. The
+    /// wrapper's documented fallback (SDD §5.4.2) is what runs against a simulated mount, which
+    /// also means the branch-aware path must be covered by driver and wrapper tests rather than by
+    /// anything reached through here.
+    fn motion_lookahead(
+        &self,
+        _axis: Axis,
+        _dir: Direction,
+        _degrees: f64,
+    ) -> Option<astroctl_core::types::RaDec> {
+        None
+    }
+
     fn capabilities(&self) -> MountCapabilities {
         MountCapabilities {
             // The mount can *exhibit* periodic error (see `SimulatorProfile`); it cannot correct
