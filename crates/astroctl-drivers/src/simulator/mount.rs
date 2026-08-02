@@ -2090,12 +2090,12 @@ mod tests {
         );
         assert!(mount.status().await.expect("status").slewing);
 
-        // 16× sidereal is 0.0668 deg/s after the E11 correction, so ten seconds is ~0.67 degrees,
-        // less the ramp-up. It was 64× and ~2.67 degrees until the ladder was anchored to what the
-        // mount was heard to actually do.
+        // 32× sidereal is 0.1336 deg/s — the fastest standing start the mount was heard to make
+        // (E16), which is what Medium commands since the ladder split by mechanism — so ten
+        // seconds is ~1.34 degrees, less the ramp-up.
         let travelled = moving.dec.degrees() - start.dec.degrees();
         assert!(
-            (0.62..0.70).contains(&travelled),
+            (1.28..1.35).contains(&travelled),
             "medium speed moved {travelled} deg in 10 s"
         );
 

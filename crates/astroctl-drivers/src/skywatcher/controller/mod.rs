@@ -53,7 +53,7 @@ use super::codec::{
 };
 use super::math::{AxisScale, MathError};
 
-pub use rate::{CountsPerSecond, ProgrammedRate, RateModel};
+pub use rate::{CountsPerSecond, ProgrammedRate, RateModel, SlewMethod};
 
 /// How close to the target counts an axis must be, with the drive stopped, before a goto is
 /// declared complete — SDD §5.2.3's stated default.
@@ -64,6 +64,9 @@ pub use rate::{CountsPerSecond, ProgrammedRate, RateModel};
 /// declare a stall on a perfect goto; too loose would accept a stall as an arrival, which is why
 /// [`MotorController::arrived`] tests the running bit as well and not instead.
 pub const GOTO_TOLERANCE_COUNTS: u32 = 10;
+
+/// How far one chunk of held-button manual motion travels (E16, [`MotorController::slew_chunk`]).
+pub const SLEW_CHUNK_DEGREES: f64 = 30.0;
 
 /// What a motor controller can refuse.
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
@@ -351,16 +354,43 @@ impl MotorController {
         self.motion_at(self.rates.tracking(mode)?, direction)
     }
 
-    /// Program a manual slew at a speed class.
+    /// How a manual-slew speed class is realised — see [`RateModel::slew_method`] (E16).
     ///
     /// # Errors
-    /// As [`Self::motion_at`].
-    pub fn slew(
+    /// As [`RateModel::slew_method`].
+    pub fn slew_method(&self, speed: SlewSpeed) -> Result<SlewMethod, ControllerError> {
+        self.rates.slew_method(speed)
+    }
+
+    /// One bounded chunk of held-button manual motion (E16): a goto of
+    /// [`SLEW_CHUNK_DEGREES`] in `direction`, in `class`.
+    ///
+    /// A chunk and not an unbounded slew because the goto's firmware ramp is the only working
+    /// acceleration on this mount — an unbounded start above ~32× sidereal stalls the rotor, and
+    /// the protocol refuses to re-rate a running high-speed slew. The caller chains chunks while
+    /// the operator holds the button and stops with `K` the moment they release; thirty degrees
+    /// is ~8.6 s of cruise in the high class, long enough that the between-chunk pause is rare
+    /// under a real thumb, and bounded enough that a lost stop costs a known arc (the dead-man's
+    /// switch and the safety watch both still apply on top).
+    ///
+    /// # Errors
+    /// As [`Self::goto`].
+    pub fn slew_chunk(
         &self,
-        speed: SlewSpeed,
+        from: Counts,
         direction: MotionDirection,
-    ) -> Result<MotionSequence, ControllerError> {
-        self.motion_at(self.rates.slew(speed)?, direction)
+        class: SpeedClass,
+    ) -> Result<GotoProgram, ControllerError> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "30° is under 800k counts at any real axis scale, far inside i64"
+        )]
+        let magnitude = self.scale.counts_in(SLEW_CHUNK_DEGREES).abs().round() as i64;
+        let delta = match direction {
+            MotionDirection::Forward => magnitude,
+            MotionDirection::Backward => -magnitude,
+        };
+        self.goto(from, Move::from_delta(delta)?, class)
     }
 
     /// Program a bounded goto: `G`, `I`, `H`, `M`, and the readback expectations.
@@ -790,11 +820,47 @@ mod tests {
         assert_eq!(wire(&dec.emergency_stop()), ":L2");
         assert_eq!(wire(&dec.read_position()), ":j2");
         assert_eq!(wire(&dec.read_status()), ":f2");
+        let SlewMethod::Unbounded(rate) = dec.slew_method(SlewSpeed::Medium).expect("valid")
+        else {
+            panic!("medium is an unbounded rung");
+        };
         let sequence = dec
-            .slew(SlewSpeed::Medium, MotionDirection::Forward)
+            .motion_at(rate, MotionDirection::Forward)
             .expect("valid");
         assert!(wire(&sequence.motion_mode()).starts_with(":G2"));
         assert!(wire(&sequence.step_period()).starts_with(":I2"));
         assert_eq!(wire(&sequence.start()), ":J2");
+        let chunk = dec
+            .slew_chunk(
+                Counts::new(8_388_608).expect("fits"),
+                MotionDirection::Forward,
+                SpeedClass::High,
+            )
+            .expect("valid");
+        for write in chunk.writes() {
+            assert!(
+                write.to_string().starts_with(":G2")
+                    || write.to_string().starts_with(":I2")
+                    || write.to_string().starts_with(":H2")
+                    || write.to_string().starts_with(":M2"),
+                "{write}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_slew_chunk_is_a_thirty_degree_goto_in_the_class_it_was_asked_for() {
+        // 30° at the fixture scale is 9,024,000 ÷ 12 = 752,000 counts, and the direction rides
+        // the sign of the increment rather than a mode digit this layer would have to remember.
+        let controller = controller(Axis::Ra);
+        let from = Counts::new(8_388_608).expect("fits");
+        let forward = controller
+            .slew_chunk(from, MotionDirection::Forward, SpeedClass::High)
+            .expect("valid");
+        assert_eq!(forward.destination().get(), 8_388_608 + 752_000);
+        let backward = controller
+            .slew_chunk(from, MotionDirection::Backward, SpeedClass::Low)
+            .expect("valid");
+        assert_eq!(backward.destination().get(), 8_388_608 - 752_000);
     }
 }

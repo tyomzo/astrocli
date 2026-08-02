@@ -944,16 +944,60 @@ async fn a_garbled_position_reply_mid_poll_fails_the_goto_rather_than_moving_the
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_adapter_pulled_mid_slew_becomes_a_heartbeat_loss_and_a_fault_state() {
-    // The mount keeps slewing — an unplugged adapter does not stop a telescope — and the driver's
-    // job is to say so rather than to go quiet. REL-02's watchdog is the consumer.
+async fn a_fast_rung_chains_bounded_chunks_while_held_and_a_stop_ends_the_chain() {
+    // E16: Fast and Max are chained 30° gotos — the firmware's ramp is the only acceleration
+    // this mount starts. Three properties in one sitting, because they are one mechanism: the
+    // rung starts as a *bounded* goto; a chunk that runs out under a held button is followed by
+    // the next one; and a stop both halts the axis and kills the chain, which must not re-arm.
     let mount = SyntaMount::new();
     let driver = connected(&mount, 0).await;
     driver
         .slew(
             Axis::Ra,
             astroctl_core::types::Direction::West,
-            SlewSpeed::Fast,
+            SlewSpeed::Max,
+        )
+        .await
+        .expect("slews");
+    assert!(mount.running(Axis::Ra));
+    let first_chunk = mount.counter(Axis::Ra);
+
+    // The double lands a bounded goto after `TRAVEL` (1.2 s). The chain polls at 500 ms, so by
+    // two seconds the first chunk has landed and the second must be running.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        mount.running(Axis::Ra),
+        "the chunk ran out under a held button and nothing chained the next one"
+    );
+    assert_ne!(
+        mount.counter(Axis::Ra),
+        first_chunk,
+        "a second chunk starts from where the first landed"
+    );
+
+    driver.stop_slew(Axis::Ra).await.expect("stops");
+    // Long enough for several would-be chain ticks: a chain that only *paused* would re-arm here.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !mount.running(Axis::Ra),
+        "the stop must end the chain, not merely the chunk it interrupted"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_adapter_pulled_mid_slew_becomes_a_heartbeat_loss_and_a_fault_state() {
+    // The mount keeps slewing — an unplugged adapter does not stop a telescope — and the driver's
+    // job is to say so rather than to go quiet. REL-02's watchdog is the consumer. An *unbounded*
+    // rung, deliberately: since E16 the fast rungs are chained 30° gotos, and those end
+    // themselves within one chunk when the link dies — the bounded case is the tame one, and this
+    // test exists for the scary one.
+    let mount = SyntaMount::new();
+    let driver = connected(&mount, 0).await;
+    driver
+        .slew(
+            Axis::Ra,
+            astroctl_core::types::Direction::West,
+            SlewSpeed::Medium,
         )
         .await
         .expect("slews");

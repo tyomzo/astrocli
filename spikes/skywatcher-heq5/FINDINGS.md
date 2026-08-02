@@ -448,11 +448,14 @@ for a fixed high-class period, which would pin the high-mode period semantics th
 never actually verified (E10 verified the low class only; a goto ignores the register entirely).
 Also worth one rung: 64× pinned to the **low** class, which is what EQMOD actually ran for years.
 
-**The design decision this buys:** on firmware 2.04.01 the only primitive with a working
-acceleration profile is the bounded goto — measured cruising at 835× — so fast manual motion
-should be *bounded, firmware-ramped moves issued while the button is held and stopped with `K` on
-release*, not bigger numbers on the unbounded ladder. The ladder stays 1/8/16/24/32: every rung a
-rate this mount was heard to start.
+**The design decision this buys — built the same evening:** on firmware 2.04.01 the only
+primitive with a working acceleration profile is the bounded goto — measured cruising at 835× —
+so fast manual motion is *bounded, firmware-ramped 30° chunks chained while the button is held
+and stopped with `K` on release* (`MotorController::slew_chunk`, the chain watcher in the
+driver's `slew`). The ladder splits by mechanism: 1/8/32× unbounded — every rung a rate this
+mount was heard to start — and Fast/Max chunked in the low and high class, cruising at the
+firmware's ≈51×/≈835× because a goto ignores the step-period register and those are the only two
+rates on offer.
 
 ## E14 · `h`, `i`, `m` are readback registers — a pre-motion check the design lacks
 

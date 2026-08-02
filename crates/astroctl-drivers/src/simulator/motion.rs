@@ -54,18 +54,21 @@ pub fn tracking_rate(mode: TrackingMode) -> f64 {
 
 /// Axis rate for a manual-slew speed class, in degrees per second.
 ///
-/// **Not measured.** FINDINGS.md's experiment E11 — the per-class slew table — was never run,
-/// so this ladder is EQMOD's conventional one. Only its top matches hardware: `SlewSpeed::Max`
-/// is PRD §4.2's stated 800× maximum, against a measured goto cruise of 835×. If E11 is ever
-/// run, this function is the one place that changes.
+/// The split is the real driver's (E11, E16 — `skywatcher::controller::rate::slew_method`, and
+/// `tests/position_math.rs` asserts the two agree): 1×, 8× and 32× are unbounded slews, the
+/// rates the HEQ5 was heard to start from standstill; Fast and Max are chained bounded gotos
+/// whose cruise the firmware fixes — ≈51× sidereal in the low class and ≈835× in the high, both
+/// measured (5,350 and 87,486 counts/s at the fixture scale). This simulator holds the cruise
+/// continuously rather than modelling the pause between 30° chunks: the gap is the workaround's,
+/// not a mount's.
 #[must_use]
 pub fn slew_rate(speed: SlewSpeed) -> f64 {
     let times_sidereal = match speed {
         SlewSpeed::Guide => 1.0,
         SlewSpeed::Slow => 8.0,
-        SlewSpeed::Medium => 16.0,
-        SlewSpeed::Fast => 24.0,
-        SlewSpeed::Max => 32.0,
+        SlewSpeed::Medium => 32.0,
+        SlewSpeed::Fast => 51.0,
+        SlewSpeed::Max => 835.0,
     };
     times_sidereal * SIDEREAL_DEG_PER_SEC
 }
@@ -693,9 +696,11 @@ mod tests {
         for pair in speeds.windows(2) {
             assert!(slew_rate(pair[0]) < slew_rate(pair[1]), "{pair:?}");
         }
-        // PRD §4.2's 800x, which is also `MountCapabilities::max_slew_speed_x_sidereal`.
+        // The measured high-class goto cruise, which is what a chunked Max actually does. PRD
+        // §4.2's 800x remains `MountCapabilities::max_slew_speed_x_sidereal` — the capability —
+        // and the firmware's cruise overshoots it slightly.
         let ratio = slew_rate(SlewSpeed::Max) / SIDEREAL_DEG_PER_SEC;
-        assert!((ratio - 32.0).abs() < 1e-9, "max is {ratio}x sidereal");
+        assert!((ratio - 835.0).abs() < 1e-9, "max is {ratio}x sidereal");
     }
 
     #[test]

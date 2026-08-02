@@ -263,19 +263,20 @@ function NudgeButton({
  * What each level actually commands, in multiples of the sidereal rate.
  *
  * Unlabelled dots are a rate control that cannot be reasoned about: an operator who hears a stall
- * needs to know whether the next rung down is a little slower or eight times slower. This is the
- * ladder of rates this mount was *heard to start*: E16 (2026-08-02) measured that it will not
- * begin an unbounded slew above the rotor's standing-start limit — 32× turns, 39× jams, and a
- * driver-side ramp of the running axis is refused by the motor controller — under any speed
- * class. Faster manual motion is coming back as firmware-ramped bounded moves (the goto
- * mechanism, measured cruising at 835×), not as bigger numbers on this ladder.
+ * needs to know whether the next rung down is a little slower or eight times slower. The ladder
+ * splits by mechanism at the standing-start limit E16 measured (32× turns, 39× jams, no software
+ * ramp allowed by the protocol): 1/8/32 are unbounded slews at rates this mount was heard to
+ * start, and the top two rungs are chained 30° firmware-ramped gotos whose cruise the firmware
+ * fixes — ≈51× in the low class, ≈835× in the high, both measured on this mount. The `~` is
+ * honest: those two rates are the mount's, not the slider's, and a brief pause every 30° is the
+ * chain re-arming.
  */
 const SPEED_LABEL: Record<SlewSpeed, string> = {
   1: '1×',
   2: '8×',
-  3: '16×',
-  4: '24×',
-  5: '32×',
+  3: '32×',
+  4: '~50×',
+  5: '~800×',
 };
 
 /**

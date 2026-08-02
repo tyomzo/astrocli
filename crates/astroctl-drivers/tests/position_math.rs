@@ -50,7 +50,7 @@ use astroctl_drivers::skywatcher::codec::{
     Counts, CountsPerRev, HighSpeedRatio, MotionDirection, SpeedClass, TimerFrequency, U24,
 };
 use astroctl_drivers::skywatcher::controller::{
-    AxisParams, MotorController, RateModel, GOTO_TOLERANCE_COUNTS,
+    AxisParams, MotorController, RateModel, SlewMethod, GOTO_TOLERANCE_COUNTS,
 };
 use astroctl_drivers::skywatcher::math::{
     mech_to_sky, motor_direction, sky_to_mech, tracking_direction, wrap_signed, AxisAngle,
@@ -1092,22 +1092,38 @@ fn the_tracking_rates_agree() {
 }
 
 fn the_slew_ladder_agrees() {
-    // The unmeasured ladder (E11 was never run) has two copies, so the one thing worth enforcing
-    // is that they are the *same* unmeasured ladder — otherwise a manual slew moves at one speed
-    // against the simulator and another against the mount, and every timing built on the first is
-    // wrong against the second.
-    for speed in [
-        SlewSpeed::Guide,
-        SlewSpeed::Slow,
-        SlewSpeed::Medium,
-        SlewSpeed::Fast,
-        SlewSpeed::Max,
-    ] {
+    // The ladder has two copies, so the one thing worth enforcing is that they are the *same*
+    // ladder — otherwise a manual slew moves at one speed against the simulator and another
+    // against the mount, and every timing built on the first is wrong against the second. Since
+    // E16 the ladder splits by mechanism: the unbounded rungs must agree on the rate, and the
+    // chunked rungs must agree that the cruise is the firmware's measured one per class (5,350
+    // and 87,486 counts/s ÷ 104.7304 ≈ 51× and 835× at the fixture scale — the simulator states
+    // the multiple, the driver states only the class, and this is where the two are tied).
+    for speed in [SlewSpeed::Guide, SlewSpeed::Slow, SlewSpeed::Medium] {
+        let SlewMethod::Unbounded(rate) = rates().slew_method(speed).expect("valid") else {
+            panic!("{speed:?} must be an unbounded rung");
+        };
         let simulator = slew_rate(speed);
-        let driver = rates().slew(speed).expect("valid").get() * scale().degrees_per_count();
+        let driver = rate.get() * scale().degrees_per_count();
         assert!(
             (simulator - driver).abs() < 1e-12,
             "{speed:?}: simulator {simulator} deg/s, driver {driver} deg/s"
+        );
+    }
+    for (speed, class, cruise_x_sidereal) in [
+        (SlewSpeed::Fast, SpeedClass::Low, 51.0),
+        (SlewSpeed::Max, SpeedClass::High, 835.0),
+    ] {
+        assert_eq!(
+            rates().slew_method(speed).expect("valid"),
+            SlewMethod::Chunked(class),
+            "{speed:?}"
+        );
+        let simulator = slew_rate(speed) / SIDEREAL_DEG_PER_SEC;
+        assert!(
+            (simulator - cruise_x_sidereal).abs() < 1e-9,
+            "{speed:?}: simulator says {simulator}× sidereal, the measured cruise is \
+             {cruise_x_sidereal}×"
         );
     }
 }

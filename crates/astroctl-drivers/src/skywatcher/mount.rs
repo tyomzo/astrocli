@@ -57,7 +57,7 @@ use super::codec::{
     AxisStatus, Command, Counts, FirmwareVersion, GotoProgram, MotionDirection, Move, SpeedClass,
 };
 use super::controller::exchange::{handshake, run_goto, Exchange as ExchangeSeam, SequenceError};
-use super::controller::{AxisParams, ControllerError, MotorController};
+use super::controller::{AxisParams, ControllerError, MotorController, SlewMethod};
 use super::math::{
     dec_axis_hour_angle, motor_direction, tracking_direction, AxisCounts, Branch, Lst,
     MountGeometry,
@@ -97,6 +97,13 @@ const GUIDE_POLL: Duration = Duration::from_millis(50);
 fn guide_deadline(requested: Duration) -> Duration {
     (requested * 10).max(Duration::from_secs(2))
 }
+
+/// How often the chunk chain checks whether its bounded goto has run out (E16).
+///
+/// Half a second against a 30° chunk that cruises for ~8.6 s in the high class: the chain wakes
+/// seventeen times per chunk, cheap on a link whose exchanges cost ~16 ms, and the pause an
+/// operator feels between chunks is bounded by one tick plus the goto's own wind-up.
+const CHUNK_POLL: Duration = Duration::from_millis(500);
 
 /// PRD §4.2's stated maximum manual-slew class, in multiples of sidereal.
 ///
@@ -1393,23 +1400,95 @@ impl MountDevice for SkywatcherMount {
         // behind, which is harmless: it is only read while the axis is `Manual`, and the failure
         // path below frees it.
         *self.shared.locked().sense(axis) = Some(sense);
-        let sequence = session
+        let method = session
             .controller(axis)
-            .slew(speed, sense)
+            .slew_method(speed)
             .map_err(controller_error)?;
-        let sent = async {
-            link.send(sequence.motion_mode()).await?;
-            link.send(sequence.step_period()).await?;
-            link.send(sequence.start()).await
-        }
-        .await;
+        let sent = match method {
+            SlewMethod::Unbounded(rate) => {
+                let sequence = session
+                    .controller(axis)
+                    .motion_at(rate, sense)
+                    .map_err(controller_error)?;
+                async {
+                    link.send(sequence.motion_mode()).await?;
+                    link.send(sequence.step_period()).await?;
+                    link.send(sequence.start()).await
+                }
+                .await
+            }
+            // E16: above ~32× sidereal this mount cannot start an unbounded slew and refuses to
+            // be re-rated while running one, so a fast rung is chained bounded gotos — the one
+            // motion whose acceleration the firmware supplies. The chunk starts here; the chain
+            // lives in the spawned watcher below.
+            SlewMethod::Chunked(class) => {
+                let controller = session.controller(axis);
+                match link.send(controller.read_position()).await {
+                    Ok(from) => match controller.slew_chunk(from, sense, class) {
+                        Ok(program) => run_goto(&*link, &program).await.map_err(sequence_error),
+                        Err(error) => Err(controller_error(error)),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+        };
 
         if sent.is_err() {
             // A failed slew must not leave the axis owned, or a timeout would make the mount
             // permanently `Busy` to the operator trying again.
             self.shared.locked().release(generation);
+            return sent;
         }
-        sent
+
+        if let SlewMethod::Chunked(class) = method {
+            // The chain: while the operator holds the button, a finished chunk begets the next.
+            // Spawned so a stop is never queued behind it — the stop path seizes the axes, the
+            // generation moves, and this task sees it and dies. The one race worth naming: a `K`
+            // landing between this task's liveness check and its `J` restarts a stopped axis, so
+            // every restart is followed by a re-check that re-stops — `K` is idempotent, and the
+            // dead-man's switch above this driver bounds even the window nobody thought of.
+            let shared = Arc::clone(&self.shared);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(CHUNK_POLL).await;
+                    {
+                        let mut state = shared.locked();
+                        if state.generation != generation
+                            || *state.activity(axis) != (Activity::Manual { dir, speed })
+                        {
+                            return;
+                        }
+                    }
+                    let Ok(status) = shared.read_status(&link, session, axis).await else {
+                        return;
+                    };
+                    if status.running {
+                        continue;
+                    }
+                    // The chunk ran out under a held button: issue the next one.
+                    let controller = session.controller(axis);
+                    let Ok(from) = link.send(controller.read_position()).await else {
+                        return;
+                    };
+                    let Ok(program) = controller.slew_chunk(from, sense, class) else {
+                        return;
+                    };
+                    if run_goto(&*link, &program).await.is_err() {
+                        return;
+                    }
+                    let stale = {
+                        let mut state = shared.locked();
+                        state.generation != generation
+                            || *state.activity(axis) != (Activity::Manual { dir, speed })
+                    };
+                    if stale {
+                        let _ = link.send(controller.stop()).await;
+                        return;
+                    }
+                }
+            });
+        }
+        Ok(())
     }
 
     async fn stop_slew(&self, axis: Axis) -> Result<(), DeviceError> {
@@ -2184,7 +2263,7 @@ mod tests {
         port.clear_writes();
 
         mount
-            .slew(Axis::Ra, Direction::West, SlewSpeed::Medium)
+            .slew(Axis::Ra, Direction::West, SlewSpeed::Slow)
             .await
             .expect("slews");
         let first = frames(&port).len();
@@ -2194,7 +2273,7 @@ mod tests {
         // ramp and make the mount stutter under the operator's thumb.
         for _ in 0..4 {
             mount
-                .slew(Axis::Ra, Direction::West, SlewSpeed::Medium)
+                .slew(Axis::Ra, Direction::West, SlewSpeed::Slow)
                 .await
                 .expect("renews");
         }
@@ -2204,9 +2283,11 @@ mod tests {
             "a renewal is a no-op at the device"
         );
 
-        // A different speed is a slider move, not a conflict.
+        // A different speed is a slider move, not a conflict. Medium rather than Fast, because
+        // Fast is a chunked rung since E16 and its goto readbacks want a scripted mount — the
+        // slider-move rule is the thing under test here, and two unbounded rungs exercise it.
         mount
-            .slew(Axis::Ra, Direction::West, SlewSpeed::Fast)
+            .slew(Axis::Ra, Direction::West, SlewSpeed::Medium)
             .await
             .expect("changes speed");
         assert!(frames(&port).len() > first);
