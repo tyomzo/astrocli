@@ -371,6 +371,27 @@ pub fn mech_to_sky(mech: MechPosition, lst: Lst, hemisphere: Hemisphere) -> SkyP
     }
 }
 
+/// The hour angle of the declination axis's saddle direction (SDD §5.4.3, the singular case).
+///
+/// The declination axis's direction in space is set by the right-ascension counter *alone* — the
+/// declination counter turns the tube about that axis without moving it — so this is defined at
+/// every pose including the pole, where the pointing is not. It is the one number that restores
+/// the mechanical pose to a layer that holds only a pointing: at the pole every right-ascension
+/// angle produces the same sky coordinate and a different place for the metal, and this is which.
+///
+/// # Derivation, from the same four-line model as [`mech_to_sky`]
+///
+/// At home the counterweight hangs down, so the saddle direction points up from the polar axis in
+/// the meridian plane — the equator's meridian crossing, hour angle 0, in either hemisphere. A
+/// right-ascension axis rotation advances every attached direction's hour angle by the same
+/// `A = s·P` the tube's bracket uses. So the bearing is `s·h`, with no branch term: a declination
+/// rotation cannot move its own axis, which is why the two branches — `±180°` apart in the tube's
+/// hour angle — collapse to the same bearing.
+#[must_use]
+pub fn dec_axis_hour_angle(mech: MechPosition, hemisphere: Hemisphere) -> f64 {
+    HourAngle::wrapped(hemisphere.sign() * mech.ra_axis.degrees()).degrees()
+}
+
 /// Sky coordinates + a chosen branch → mechanical axis angles (SDD §5.2.3).
 ///
 /// The exact inverse of [`mech_to_sky`] for the branch given. Infallible for the same reason:
@@ -509,6 +530,59 @@ mod tests {
                 "{hemisphere:?} home pointed at {}",
                 sky.coords.dec.degrees()
             );
+        }
+    }
+
+    #[test]
+    fn the_dec_axis_bearing_is_zero_at_home_and_ignores_the_branch() {
+        // At home the counterweight hangs down in either hemisphere, so the saddle direction is
+        // the equator's meridian crossing: hour angle zero. And a declination rotation cannot
+        // move its own axis, so the bearing must not care which branch the tube is on.
+        for hemisphere in BOTH {
+            assert!(
+                dec_axis_hour_angle(MechPosition::HOME, hemisphere).abs() < 1e-9,
+                "{hemisphere:?} home bearing was not the meridian"
+            );
+            for h in [-150.0, -90.0, 0.0, 45.0, 120.0] {
+                let same_ra = |d| MechPosition {
+                    ra_axis: axis(h),
+                    dec_axis: axis(d),
+                };
+                assert!(
+                    (dec_axis_hour_angle(same_ra(30.0), hemisphere)
+                        - dec_axis_hour_angle(same_ra(-30.0), hemisphere))
+                    .abs()
+                        < 1e-9,
+                    "{hemisphere:?}: the branch moved the bearing at h = {h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dec_axis_bearing_sits_a_quarter_turn_from_the_tube_hour_angle() {
+        // The declination axis is perpendicular to the tube's hour circle: `b = HA − s·90°` on
+        // the normal branch, and a further half-turn off past the pole — the same 180° that
+        // separates the branches in `mech_to_sky`. This ties the bearing to the model the
+        // hardware verified, rather than leaving it a second opinion.
+        let at = lst(6.0);
+        for hemisphere in BOTH {
+            let sign = hemisphere.sign();
+            for h in [-150.0, -60.0, 0.0, 45.0, 120.0] {
+                for (d, half_turn) in [(35.0, 0.0), (-35.0, 180.0)] {
+                    let mech = MechPosition {
+                        ra_axis: axis(h),
+                        dec_axis: axis(d),
+                    };
+                    let tube_ha = HourAngle::of(at, mech_to_sky(mech, at, hemisphere).coords.ra);
+                    let expected = tube_ha.degrees() - sign * 90.0 - half_turn;
+                    let bearing = dec_axis_hour_angle(mech, hemisphere);
+                    assert!(
+                        wrap_signed(bearing - expected).abs() < 1e-9,
+                        "{hemisphere:?} h={h} d={d}: bearing {bearing}, expected {expected}"
+                    );
+                }
+            }
         }
     }
 

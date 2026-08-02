@@ -102,7 +102,15 @@ pub struct RigModel {
     geometry: RigGeometry,
     /// The polar axis, pointing at the elevated celestial pole.
     polar: Vec3,
+    /// The equator's meridian crossing — the direction at hour angle 0, declination 0. With
+    /// [`WEST`] it spans the plane perpendicular to the polar axis, which is where a declination
+    /// axis bearing lives. `(0, −sin φ, cos φ)` is correct in both hemispheres: below the equator
+    /// the crossing is due north and high, and the signed latitude puts it there.
+    equator: Vec3,
 }
+
+/// The direction at hour angle +90°, declination 0: setting due west, at every latitude.
+const WEST: Vec3 = Vec3::new(-1.0, 0.0, 0.0);
 
 /// Why a pose was refused, in the terms the operator has to act in.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -138,7 +146,12 @@ impl RigModel {
             1.0
         };
         let polar = Vec3::new(0.0, s * phi.cos(), s * phi.sin());
-        Some(Self { geometry, polar })
+        let equator = Vec3::new(0.0, -phi.sin(), phi.cos());
+        Some(Self {
+            geometry,
+            polar,
+            equator,
+        })
     }
 
     /// Whether the rig, pointing along `tube`, would be inside the tripod or the ground.
@@ -181,6 +194,34 @@ impl RigModel {
             .iter()
             .filter_map(|&sign| self.capsule_collides(dec_axis.scale(sign), t))
             .max_by(|a, b| a.depth_mm.total_cmp(&b.depth_mm))
+    }
+
+    /// Like [`collides`](Self::collides), with the declination axis's actual bearing supplied by
+    /// a driver that holds mechanical state (SDD §5.4.3, the singular case resolved).
+    ///
+    /// `dec_axis_hour_angle_degrees` is the hour angle of the saddle direction — 0 at home,
+    /// counterweight down. It is the one number the pointing cannot supply, and it dissolves both
+    /// of `collides`' conservatisms at once: at the pole the model tests the pose the mount is
+    /// actually in instead of every pose sharing the pointing, and everywhere else the bearing
+    /// *is* the declination axis, so no pier-side sign has to be guessed or doubled.
+    ///
+    /// # The caller owes this a current bearing
+    ///
+    /// The bearing describes the mount *now*; the pointing under test is a lookahead a fraction
+    /// of a second ahead. The mismatch is bounded by the lookahead window — ≲0.3° at manual
+    /// rates, a few degrees at goto cruise, i.e. millimetres at this rig's lever arms — and the
+    /// 2 Hz watch re-reads both on every tick, so a stale bearing cannot outlive the window that
+    /// made it. Testing a *distant* target with today's bearing would be exactly the frame-mixing
+    /// ADR-14 forbids; the callers of this method are the near-current lookahead paths only.
+    #[must_use]
+    pub fn collides_with_dec_axis(
+        &self,
+        tube: Horizontal,
+        dec_axis_hour_angle_degrees: f64,
+    ) -> Option<Collision> {
+        let (sin_b, cos_b) = dec_axis_hour_angle_degrees.to_radians().sin_cos();
+        let dec_axis = self.equator.scale(cos_b).add(WEST.scale(sin_b));
+        self.capsule_collides(dec_axis, tube.unit())
     }
 
     /// The worst verdict over a full turn of the right-ascension axis (the singular case above).

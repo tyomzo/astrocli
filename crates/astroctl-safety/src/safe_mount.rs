@@ -333,13 +333,20 @@ impl Shared {
     fn collides_at(&self, target: RaDec, at: DateTime<Utc>) -> Option<Collision> {
         let rig = self.rig?;
         let altaz = self.horizontal_at(target, at);
-        rig.collides(
-            Horizontal {
-                altitude_degrees: altaz.alt.degrees(),
-                azimuth_degrees: altaz.az.degrees(),
-            },
-            self.inner.pier_side(),
-        )
+        let tube = Horizontal {
+            altitude_degrees: altaz.alt.degrees(),
+            azimuth_degrees: altaz.az.degrees(),
+        };
+        // A driver that knows where its declination axis is lets the model test the actual pose.
+        // Without it, the conservative path: the pier side's sign, both signs when that is
+        // unknown, and the all-RA sweep at the pole — which is what made home a prison on
+        // 2026-08-02, every motion refused because the singular pointing was judged by its worst
+        // pose instead of its real one. `target` is always a near-current lookahead here (both
+        // callers), which is the currency `collides_with_dec_axis` requires of the bearing.
+        match self.inner.dec_axis_hour_angle_degrees() {
+            Some(bearing) => rig.collides_with_dec_axis(tube, bearing),
+            None => rig.collides(tube, self.inner.pier_side()),
+        }
     }
 
     /// Publish an alert for something this wrapper did on its own.
@@ -1073,6 +1080,10 @@ impl MountDevice for SafeMount {
     /// Forwarded unchanged — the wrapper holds no mechanical state of its own.
     fn pier_side(&self) -> Option<PierSide> {
         self.shared.inner.pier_side()
+    }
+
+    fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
+        self.shared.inner.dec_axis_hour_angle_degrees()
     }
 
     /// Forwarded unchanged: the wrapper adds no mechanical knowledge, it only consumes the

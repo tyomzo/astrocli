@@ -1220,6 +1220,11 @@ impl MountDevice for SimulatorMount {
         None
     }
 
+    /// `None` — no mechanical axes, so no axis bearing, on the same terms as `pier_side`.
+    fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
+        None
+    }
+
     /// `None`, for the reason above (M3-T08).
     ///
     /// The model has no mechanical axes, so it has no branch — and a look-ahead that guessed one

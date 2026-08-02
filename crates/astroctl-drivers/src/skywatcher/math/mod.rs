@@ -38,8 +38,8 @@ pub use angle::{
     DEGREES_PER_HOUR, DEGREES_PER_TURN,
 };
 pub use mech::{
-    drifted_right_ascension, mech_to_sky, motor_direction, sky_to_mech, tracking_direction, Branch,
-    Hemisphere, MechPosition, SkyPosition,
+    dec_axis_hour_angle, drifted_right_ascension, mech_to_sky, motor_direction, sky_to_mech,
+    tracking_direction, Branch, Hemisphere, MechPosition, SkyPosition,
 };
 pub use target::{goto_solution, AxisCounts, GotoSolution};
 

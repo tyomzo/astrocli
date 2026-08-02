@@ -220,6 +220,82 @@ fn a_counterweight_long_enough_to_reach_the_ground_is_refused() {
     );
 }
 
+/// A pointing built from equatorial coordinates, so a test can state an hour angle and get the
+/// alt/az the model consumes — the inverse arithmetic shares nothing with the code under test.
+fn pointing_from_equatorial(ha_degrees: f64, dec_degrees: f64, site: Site) -> Horizontal {
+    let (sin_ha, cos_ha) = ha_degrees.to_radians().sin_cos();
+    let (sin_dec, cos_dec) = dec_degrees.to_radians().sin_cos();
+    let (sin_lat, cos_lat) = site.latitude_degrees.to_radians().sin_cos();
+    let altitude = (sin_dec * sin_lat + cos_dec * cos_lat * cos_ha)
+        .clamp(-1.0, 1.0)
+        .asin()
+        .to_degrees();
+    let azimuth = (-cos_dec * sin_ha)
+        .atan2(sin_dec * cos_lat - cos_dec * sin_lat * cos_ha)
+        .to_degrees()
+        .rem_euclid(360.0);
+    Horizontal {
+        altitude_degrees: altitude,
+        azimuth_degrees: azimuth,
+    }
+}
+
+#[test]
+fn a_known_dec_axis_agrees_with_the_pier_side_it_implies() {
+    // Away from the pole the bearing and the pier side carry the same fact in different units:
+    // the declination axis sits a quarter-turn from the tube's hour circle, on the side the
+    // branch names — `b = HA − 90°` on the normal branch (pier west), `HA + 90°` past the pole
+    // (northern hemisphere). If the two paths ever disagree, one of the sign conventions is
+    // inverted, which is exactly the class of defect ADR-14 exists to keep out.
+    let m = model();
+    for ha_step in 0..12 {
+        let ha = f64::from(ha_step) * 30.0 - 180.0;
+        for dec in [-40.0, 0.0, 30.0, 60.0, 85.0] {
+            let p = pointing_from_equatorial(ha, dec, VILNIUS);
+            for (pier, bearing) in [
+                (PierSide::West, ha - 90.0),
+                (PierSide::East, ha + 90.0),
+            ] {
+                assert_eq!(
+                    m.collides(p, Some(pier)).is_some(),
+                    m.collides_with_dec_axis(p, bearing).is_some(),
+                    "pier {pier:?} and its bearing disagreed at HA {ha}°, dec {dec}°"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn at_the_pole_the_reported_axis_replaces_the_sweep() {
+    // The hardware fact of 2026-08-02: with only a pointing, home is judged by the worst of
+    // every pose sharing it, and the mount cannot move. The bearing is the missing fact. A tube
+    // long enough that the sweep refuses the pole must be *clear* at bearing 0 — counterweight
+    // down, the pose the mount actually parks in — and still refused at bearing 180°, saddle
+    // down, because knowing the pose removes the guess and not the protection.
+    let long = RigModel::new(
+        Some(RigGeometry {
+            tube_half_length_mm: 1_000.0,
+            ..RIG
+        }),
+        VILNIUS,
+    )
+    .expect("geometry");
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    assert!(
+        long.collides(pole, None).is_some(),
+        "the sweep must refuse a tube this long at the pole"
+    );
+    assert!(
+        long.collides_with_dec_axis(pole, 0.0).is_none(),
+        "the home pose, counterweight down, is clear — refusing it is the 2026-08-02 prison"
+    );
+    assert!(
+        long.collides_with_dec_axis(pole, 180.0).is_some(),
+        "saddle down at the pole hangs this tube into the legs and must still be refused"
+    );
+}
+
 #[test]
 fn the_southern_hemisphere_polar_axis_points_south_and_up() {
     // `s·(0, cos φ, sin φ)` has to right *both* components below the equator. If it did not, the

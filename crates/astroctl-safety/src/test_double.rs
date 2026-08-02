@@ -54,6 +54,9 @@ struct State {
     lookahead: Option<LookaheadModel>,
     /// What `pier_side` answers (M3-T08).
     pier_side: Option<PierSide>,
+    /// What `dec_axis_hour_angle_degrees` answers. `None` models a driver with no mechanical
+    /// state; a value is a driver that knows where its declination axis is, pole included.
+    dec_axis_hour_angle: Option<f64>,
 }
 
 /// How the double answers `motion_lookahead`, as the change one step of each direction makes.
@@ -113,6 +116,7 @@ impl RecordingMount {
                 travel: None,
                 lookahead: None,
                 pier_side: None,
+                dec_axis_hour_angle: None,
             }),
             goto_duration: Duration::from_secs(2),
             slew_duration: Duration::ZERO,
@@ -150,6 +154,14 @@ impl RecordingMount {
     #[must_use]
     pub fn with_pier_side(self, side: PierSide) -> Self {
         self.locked().pier_side = Some(side);
+        self
+    }
+
+    /// Report the declination axis's bearing, as a driver holding mechanical state does.
+    /// Zero is the home pose: saddle toward the meridian's zenith side, counterweight down.
+    #[must_use]
+    pub fn with_dec_axis_hour_angle(self, degrees: f64) -> Self {
+        self.locked().dec_axis_hour_angle = Some(degrees);
         self
     }
 
@@ -368,6 +380,10 @@ impl MountDevice for RecordingMount {
 
     fn pier_side(&self) -> Option<PierSide> {
         self.locked().pier_side
+    }
+
+    fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
+        self.locked().dec_axis_hour_angle
     }
 
     fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {

@@ -1268,3 +1268,82 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         measured.log()
     );
 }
+
+/// Home is not a prison once the driver says where the declination axis is (SDD §5.4.3).
+///
+/// Measured on hardware 2026-08-02: with geometry configured, every slew from home came back 403,
+/// because the pole pointing was judged by the worst of all poses sharing it. The pair below is
+/// that day in miniature: the same mount, the same command, and the only difference is whether
+/// the driver reports its declination axis's bearing.
+#[tokio::test]
+async fn a_slew_from_home_is_permitted_once_the_driver_reports_its_dec_axis() {
+    use astroctl_core::config::RigGeometry;
+
+    // A rig long enough that the all-RA sweep at the pole refuses — the operator's situation,
+    // where *some* right-ascension angle grazes the legs even though the parked pose is clear.
+    let geometry = RigGeometry {
+        dec_axis_offset_mm: 180.0,
+        tube_half_length_mm: 1_000.0,
+        tube_radius_mm: 120.0,
+        saddle_offset_mm: 180.0,
+        head_height_mm: 1_250.0,
+        mount_body_height_mm: 250.0,
+        top_radius_mm: 80.0,
+        base_radius_mm: 650.0,
+        counterweight: None,
+    };
+    // Pointing at the pole: the home pointing, and the singular one. Declination 90 is the pole
+    // at any right ascension, which is the singularity in one sentence.
+    let home = RaDec::from_parts(0.0, 90.0).expect("the pole is a coordinate");
+
+    let blind = RecordingMount::at(home)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .shared();
+    let error = SafeMount::with_geometry(
+        Arc::clone(&blind) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    )
+    .slew_for(
+        Axis::Ra,
+        Direction::East,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect_err("without a bearing the singular pointing is judged by its worst pose");
+    assert!(matches!(
+        error,
+        DeviceError::LimitViolation {
+            limit: Limit::Collision,
+            ..
+        }
+    ));
+
+    let knowing = RecordingMount::at(home)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .with_dec_axis_hour_angle(0.0)
+        .shared();
+    SafeMount::with_geometry(
+        Arc::clone(&knowing) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    )
+    .slew_for(
+        Axis::Ra,
+        Direction::East,
+        SlewSpeed::Medium,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("counterweight down at home is clear, and the driver just said so");
+    assert!(
+        knowing.log().contains(&"slew".to_owned()),
+        "the permitted slew never reached the device: {:?}",
+        knowing.log()
+    );
+}

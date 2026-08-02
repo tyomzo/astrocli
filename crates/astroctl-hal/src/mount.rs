@@ -292,6 +292,27 @@ pub trait MountDevice: Debug + Send + Sync {
     /// the meridian limit's eventual comparison (SDD §5.4, obligation 3).
     fn pier_side(&self) -> Option<PierSide>;
 
+    /// The hour angle of the declination axis's saddle direction, as of the driver's last counter
+    /// read (SDD §5.4.3, the singular case).
+    ///
+    /// The declination axis's direction in space is set by the right-ascension counter alone, so
+    /// unlike a pointing it is defined at every pose *including the pole* — where one sky
+    /// coordinate is a whole family of mechanical poses, and this is the number that says which.
+    /// Zero is the equator's meridian crossing: the home pose, counterweight down, in either
+    /// hemisphere.
+    ///
+    /// This is what lets the collision limit (SDD §5.4.3) test the pose the mount is actually in
+    /// rather than the worst of all poses that share the pointing. Without it the limit is
+    /// conservative twice over — every right-ascension angle at the pole, both saddle signs when
+    /// the pier side is unknown — which was measured on hardware 2026-08-02 refusing *every*
+    /// motion from home.
+    ///
+    /// `None` on the same terms as [`axis_travel`](Self::axis_travel) and
+    /// [`pier_side`](Self::pier_side): a device with no mechanical state has no bearing to
+    /// report, and the limit falls back to the conservative answer rather than a guessed one.
+    /// Synchronous and cached on the same argument as both.
+    fn dec_axis_hour_angle_degrees(&self) -> Option<f64>;
+
     /// Where the tube would point after `degrees` more of the motion `dir` on `axis` (M3-T08).
     ///
     /// **The one question the safety wrapper cannot answer for itself**, and SDD §5.4.1 is the

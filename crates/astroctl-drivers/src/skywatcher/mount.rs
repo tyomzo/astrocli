@@ -58,7 +58,10 @@ use super::codec::{
 };
 use super::controller::exchange::{handshake, run_goto, Exchange as ExchangeSeam, SequenceError};
 use super::controller::{AxisParams, ControllerError, MotorController};
-use super::math::{motor_direction, tracking_direction, AxisCounts, Branch, Lst, MountGeometry};
+use super::math::{
+    dec_axis_hour_angle, motor_direction, tracking_direction, AxisCounts, Branch, Lst,
+    MountGeometry,
+};
 use super::port::{WireFactory, WriteGate};
 use super::serial::{watchdog_channel, SerialLink, SerialTimings, WatchdogSink, WatchdogSource};
 
@@ -529,6 +532,25 @@ impl SkywatcherMount {
             .ok()
             .and_then(|state| state.branch)
             .map(Branch::pier_side)
+    }
+
+    /// The saddle direction's hour angle, from the cached counters (SDD §5.4.3).
+    ///
+    /// From `counts` rather than the `branch` cache, like `motion_lookahead`: this is the bearing
+    /// of a *position*, and the whole point of the number is the pose the mount is in right now.
+    /// A stalled axis's phantom counts can skew it (E11), but only toward a bearing the metal has
+    /// not reached — the collision limit then refuses a pose the rig is not yet in, which is the
+    /// error to have.
+    #[must_use]
+    pub fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
+        let state = self.shared.state.lock().ok()?;
+        let session = state.session?;
+        let counts = state.counts?;
+        drop(state);
+        Some(dec_axis_hour_angle(
+            session.geometry.mech(counts),
+            session.geometry.hemisphere(),
+        ))
     }
 }
 
@@ -1555,6 +1577,10 @@ impl MountDevice for SkywatcherMount {
     /// outstanding since M1-T05.
     fn pier_side(&self) -> Option<PierSide> {
         Self::pier_side(self)
+    }
+
+    fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
+        Self::dec_axis_hour_angle_degrees(self)
     }
 
     /// Advance the mechanical state one step and project — SDD §5.4.1, §5.4.2 (M3-T08).
