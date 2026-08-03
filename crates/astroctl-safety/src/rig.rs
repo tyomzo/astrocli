@@ -345,7 +345,11 @@ impl RigModel {
         // tube, because a swept ring covers 360° of orientations this stack occupies exactly one
         // of, and the difference was a third of the RA turn refused at dec-home.
         let camera_hit = self.geometry.camera.and_then(|cam| {
-            let root = centre.add(tube.scale(cam.along_tube_mm));
+            // Rooted on the tube's *surface*, not its axis — the focuser sits on top of the
+            // tube (the operator's F), so the stack's reach is measured from the skin outward.
+            let root = centre
+                .add(tube.scale(cam.along_tube_mm))
+                .add(dec_axis.scale(self.geometry.tube_radius_mm));
             (0..=SAMPLES)
                 .filter_map(|i| {
                     #[expect(clippy::cast_precision_loss, reason = "i is bounded by SAMPLES = 64")]

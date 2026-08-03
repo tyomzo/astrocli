@@ -897,8 +897,9 @@ pub struct CameraGeometry {
     /// Where the focuser sits along the tube, measured from the declination axis along the
     /// optical axis — positive toward the front (sky) end.
     pub along_tube_mm: f64,
-    /// How far the stack reaches from the optical axis, along the declination-axis direction,
-    /// away from the mount.
+    /// How far the stack reaches from the tube's *surface*, along the declination-axis
+    /// direction, away from the mount — the focuser sits on top of the tube, not on its axis,
+    /// so "sticks out another 300 mm" is measured from the skin.
     pub reach_mm: f64,
     /// The stack's radius — half the camera body's widest span.
     pub radius_mm: f64,

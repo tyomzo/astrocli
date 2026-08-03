@@ -235,7 +235,8 @@ function draw() {
   const { dhat, t, centre } = pose(b, d);
   const tubeA = add(centre, scl(t, -G.tubeHalf)), tubeB = add(centre, scl(t, G.tubeHalf));
   const cwEnd = scl(dhat, -G.cwLen);
-  const camA = add(centre, scl(t, G.camAlong)), camB = add(camA, scl(dhat, G.camReach));
+  const camA = add(add(centre, scl(t, G.camAlong)), scl(dhat, G.bareTubeR)),
+        camB = add(camA, scl(dhat, G.camReach)); // F sits on the tube's skin, not its axis
   const tube = capsuleTest(tubeA, tubeB, r), cw = capsuleTest([0,0,0], cwEnd, G.cwR);
   const cam = capsuleTest(camA, camB, G.camR);
   const hit = [tube.hit, cw.hit, cam.hit].filter(Boolean).sort((x,y)=>y.pen-x.pen)[0] || null;
