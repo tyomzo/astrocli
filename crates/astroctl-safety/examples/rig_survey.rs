@@ -138,9 +138,9 @@ fn main() {
     // because the raw foot-to-foot figure was not recorded.
     let measured = RigGeometry {
         dec_axis_offset_mm: 70.0,
-        tube_half_length_mm: 250.0,
-        tube_radius_mm: 70.0,
-        saddle_offset_mm: 160.0,
+        tube_half_length_mm: 185.0,
+        tube_radius_mm: 57.0,
+        saddle_offset_mm: 203.0,
         head_height_mm: 1100.0,
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,
@@ -193,10 +193,10 @@ fn main() {
     // What the model refuses at dec-home as the RA axis turns — with the full configured rig,
     // without the counterweight, and with the bare tube radius, so a refusal names its culprit.
     let configured = RigGeometry {
-        tube_radius_mm: 160.0,
+        tube_radius_mm: 65.0,
         ..measured
     };
-    pole_bearing_sweep("configured rig (r 160, counterweight on)", configured, site);
+    pole_bearing_sweep("configured rig (r 65, counterweight on)", configured, site);
     pole_bearing_sweep(
         "counterweight removed",
         RigGeometry {
@@ -206,9 +206,9 @@ fn main() {
         site,
     );
     pole_bearing_sweep(
-        "bare tube (r 70), counterweight on",
+        "bare tube (r 57), counterweight on",
         RigGeometry {
-            tube_radius_mm: 70.0,
+            tube_radius_mm: 57.0,
             ..measured
         },
         site,

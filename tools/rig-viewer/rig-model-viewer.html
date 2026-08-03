@@ -106,9 +106,9 @@
   </div>
   <div class="row">
     <label for="tuber">safety margin around the tube (capsule radius)</label>
-    <span class="val" id="tuberv">160</span>
-    <input type="range" id="tuber" min="60" max="250" value="80" step="5">
-    <small>the config runs 80 mm (bare tube 70 + margin) — the camera is its own capsule now,
+    <span class="val" id="tuberv">65</span>
+    <input type="range" id="tuber" min="40" max="250" value="65" step="5">
+    <small>the config runs 65 mm (bare tube 57, ø114, + margin) — the camera is its own capsule,
     not a swept ring baked into this number.</small>
   </div>
   <div class="row">
@@ -171,9 +171,10 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 <script>
 "use strict";
 // The eight measurements (dev-field-tls.yaml) + the proposed camera, display only.
-const G = { decOffset: 70, saddle: 160, tubeHalf: 250, bareTubeR: 70,
-            // A→G re-measured 2026-08-03: 160 to the saddle tip (was modelled 255) — so the
-            // dec shaft is 70 to the joint, then the same 90 stack + 70 radius to the tube.
+const G = { decOffset: 70, saddle: 203, tubeHalf: 185, bareTubeR: 57,
+            // A→G re-measured 2026-08-03: 160 to the saddle tip — dec shaft 70 + 90 stack.
+            // The tube (370 long, ø114) does NOT lie on the saddle: its plate/rings are 56
+            // tall (height 170 − ø114), so the centreline is 113 past G — 273 from A.
             topR: 80, baseR: 630, axisOff: 160,
             groundA: 1100,       // A → ground, measured directly with the tape
             cwLen: 180, cwR: 75, // I — shaft tip: G→I taped 340, so 340 − 160 = 180 from A
@@ -186,11 +187,11 @@ let KNOB = null;         // H's segment [from, to], set in draw(); part of the v
 let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
                          // plate and ground stay bolted to the mount, not to the crossing
 document.getElementById("dims").textContent =
-  "The numbers in play: A\u2192G (saddle tip) 160, tube centreline at 230 (the tube lies straight " +
-  "on the saddle: 160 + 70 radius); G\u2192I (counterweight shaft tip) 340, so I is 180 from A; " +
-  "tube 500 mm long, 140 mm across; weights 75 mm; axes cross 1100 mm above the ground and " +
-  "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; " +
-  "head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0; plumb from A: 30 mm north of the bolt.";
+  "The numbers in play: A\u2192G (saddle tip) 160; tube centreline at 273 (the plate/ring stack " +
+  "under the tube is 56 tall \u2014 height 170 \u2212 \u00f8114 \u2014 then 57 radius); tube 370 long, \u00f8114; " +
+  "G\u2192I (counterweight shaft tip) 340, so I is 180 from A; weights 75 mm; axes cross 1100 mm " +
+  "above the ground and 250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 " +
+  "out; head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0; plumb from A: 30 mm north.";
 
 const LAT = 54.687 * Math.PI / 180;
 const P = [0, Math.cos(LAT), Math.sin(LAT)];       // RA (polar) shaft direction, toward the pole
@@ -427,7 +428,7 @@ function draw() {
   joint("B", A3, "RA housing joins the second boss", 130, -28, "left");
   joint("C", chain.C, "the joint (bearing centre)", 30, 22, "left");
   joint("D", chain.D, "boss foot — tripod centreline", 44, 26, "left");
-  joint("E", centre, "tube centre on the saddle", -120, -32, "right");
+  joint("E", centre, "tube centreline (56 plate stack over G)", -120, -32, "right");
   joint("G", scl(dhat, G.decOffset + 90), "tip of the saddle (clamp surface)", -130, 26, "right");
   joint("H", chain.H, "alt knob — 70 mm off the boss", -120, 34, "right");
   joint("F", camA, "focuser / camera root", 30, -16, "left");
