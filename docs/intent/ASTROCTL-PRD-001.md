@@ -1,7 +1,7 @@
 # AstroCtl — Product Requirements Document
 
 **Document ID:** ASTROCTL-PRD-001  
-**Version:** 1.19.0  
+**Version:** 1.20.0  
 **Author:** Artiom  
 **Date:** 2026-07-28  
 **Status:** Draft
@@ -39,6 +39,8 @@
 **Change note (1.17.0):** **§8.1 gains the `server.tls` block**, landed by M0-T09 together with the config struct and the shipped example — the three artefacts 1.16.0 said would move in one change set, and did. `cert_path`, `key_path`, `warn_days_before_expiry`. It ships **commented out**, because absence has to mean plain HTTP: `localhost` development is already a secure context to a browser, and the two-container harness of M0-T08 has no name to certify. A block that is present but unreadable is a startup failure naming the path, never a silent downgrade. SEC-07's expiry now appears in `/api/system/health` as `cert_expires_at`/`cert_days_remaining`, with `status` degrading to `warn` inside the threshold and staying there past it. Operator procedure, with the traps that cost time in practice, is `docs/ops/tls-setup.md`.
 
 **Change note (1.16.0):** **TLS on the operator↔field connection promoted from a "Could" to a Must**, and the reason recorded, after testing the M0-T06 PWA on a real Android phone over the LAN. Chrome gates the Screen Wake Lock API, service-worker registration and `beforeinstallprompt` behind a *secure context*, so USB-09 and USB-10 were unreachable over plain HTTP at any address other than `localhost` — and a VPN does not substitute, because the browser judges the origin and a tunnelled `http://` origin is still insecure. SEC-05 previously called TLS optional while ADD §4 already drew `HTTPS/WSS` on that link; the two now agree. New: SEC-06 (issuance must not require inbound exposure — DNS-01 or an externally issued certificate, so SEC-01 holds), SEC-07 (certificate expiry in `/api/system/health`, because an expired certificate revokes the secure context exactly as a missing one does), SEC-08 (the hostname must resolve through the VPN's DNS, or the UI becomes unreachable precisely when the field node runs standalone — defeating ARC-06). Inter-node TLS stays optional as SEC-09; no browser is involved on that path. §8.1 deliberately does **not** yet carry the `server.tls` block: a drift test holds the PRD schema, the shipped example and the config struct identical, and the config denies unknown fields, so the schema moves in M0-T09 with the implementation rather than ahead of it. An absent block will mean plain HTTP; an unreadable one a startup failure, never a silent downgrade.
+
+**Change note (1.20.0):** **MNT-17 added and §8.1 gains the `mount.geometry` block** — the Layer 2 collision model (SDD §5.4.3) implemented and hardened on hardware 2026-08-02/03, entering the PRD after the fact because its deferral note said "no requirement calls for it" and that stopped being true the day it refused its first real strike. The requirement records the two properties the traps taught: every refusal names its obstacle, and a pose inside a limit always keeps an escape motion — positional checks without an escape rule bricked the mount twice in one day. The schema ships **commented out** (the `server.tls` precedent): geometry is a set of measurements of one specific rig, so absence must mean no collision limit, never someone else's tripod. The block's worked example is the operator's mount, measured letter by letter (A–I) against `tools/rig-viewer` — the measuring procedure itself is part of the method: six of the day-one tape figures fell to it, and `a_north_of_plate_mm` exists because a hung plumb line contradicted the head chain's trigonometry and won (measured overrides derived; the chain stays as a logged cross-check). Acceptance held on survey: 0 % of the sky hard-blocked, 3.2 % refused with the pier side unknown, zenith clear.
 
 **Change note (1.19.0):** **§8.1's `camera` block gains `live_view_fps`**, landed by M2-T04 together with the config struct and the shipped example — the three artefacts a drift test holds identical, so they move in one change set. It exists because PRF-02 and USB-11 pull in opposite directions and the hardware settled the argument: M2-T01 measured the R10 sustaining **58.5 fps** of live view, against a requirement of *at least 5*, and M2-T04 measured the frames at **193 KB** each — so an unpaced preview is roughly 11 MB/s of USB and of link for something no operator can see. USB-11 asks for the opposite (graceful degradation on a thin VPN), so the driver paces itself down and this is the knob. Defaulted rather than required, because `camera` denies unknown fields and every deployed `field-node.yaml` predates the key; validated 1..=60, where the ceiling is the measured hardware rate because a number above it can only mean "as fast as possible", which is what the key exists to prevent being asked for by accident.
 
@@ -312,6 +314,7 @@ Planned drivers implementing `GuideCamera`:
 | MNT-14 | Multi-star alignment routine (2-star, 3-star) | Could |
 | MNT-15 | Slew limits: configurable minimum altitude (horizon limit) — goto/slew targets below the limit are rejected at the mount-control layer for all callers (UI, REST API, LLM agent) | Must |
 | MNT-16 | Meridian/RA-axis limits to prevent pier or tripod collision: configurable track-past-meridian limit with automatic tracking stop when reached | Should |
+| MNT-17 | Body-geometry collision limit: an optional measured rig model (`mount.geometry` — tube, counterweight and camera capsules against the tripod shell, the ground and mount-fixed obstacles) refuses motions and goto destinations that would strike, at the mount-control layer for all callers. Every refusal names the obstacle, and a pose inside a limit always retains a permitted escape motion (strictly shallower, non-descending). Absent geometry means no collision limit — the model is a set of measurements of one specific rig, never a default | Should |
 
 ### 5.2 Camera Control
 
@@ -1131,6 +1134,40 @@ mount:
                                        #   your cabling: lower it if your leads are short.
     slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
     slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
+  # geometry:                   # Layer 2 collision model (MNT-17): measurements of YOUR rig,
+  #                             #   taken letter by letter against the drawing in
+  #                             #   tools/rig-viewer (points A–I). Absent = no collision limit.
+  #                             #   Ships commented out because these are measurements of one
+  #                             #   rig, never defaults; the values below are the mount measured
+  #                             #   2026-08-03, kept as a worked example.
+  #   dec_axis_offset_mm: 70        # A (RA∩DEC) → dec joint, along the dec shaft
+  #   saddle_offset_mm: 203         # joint → tube centreline E: 90 to the saddle tip G,
+  #                                 #   + the plate/ring stack under the tube, + tube radius
+  #   tube_half_length_mm: 185      # half the OTA length, tube centred on the saddle
+  #   tube_radius_mm: 65            # bare tube radius + handling margin
+  #   head_height_mm: 1100          # axes crossing A above the ground
+  #   mount_body_height_mm: 250     # tripod top plate below A (cross-checks the head chain)
+  #   top_radius_mm: 80             # plate centre → outer face of a leg at its pivot
+  #   base_radius_mm: 630           # plate centre → a foot on the ground
+  #   head:                         # the head casting, letter by letter: A→B down the RA
+  #     a_to_b_mm: 160              #   shaft, B→C perpendicular to it toward the pole side,
+  #     b_to_c_mm: 80               #   C sitting c_above_plate_mm over the plate, main boss
+  #     c_above_plate_mm: 80        #   C→D at c_d_angle_degrees to the base plane
+  #     c_d_angle_degrees: 60
+  #     a_north_of_plate_mm: 30     # plumb line hung from A: lands this far NORTH of the
+  #                                 #   plate's centre bolt. When present the measurement
+  #                                 #   places the tripod and the chain becomes a logged
+  #                                 #   cross-check — a plumb line outranks trigonometry
+  #     alt_knob:                   # H — the altitude knob, poking into the under-pier passage
+  #       reach_mm: 70
+  #       radius_mm: 25
+  #   counterweight:                # capsule from A to the shaft tip I
+  #     length_mm: 180
+  #     radius_mm: 75
+  #   camera:                       # capsule rooted on the tube's SKIN at F
+  #     along_tube_mm: 140          # tube centre → F, along the tube
+  #     reach_mm: 300               # F → stack tip, along the dec axis away from the mount
+  #     radius_mm: 50
   # indi_device: "EQMod Mount"    # if driver=indi
   # ascom_host: "http://..."      # if driver=ascom_alpaca
 

@@ -25,6 +25,40 @@ mount:
                                        #   your cabling: lower it if your leads are short.
     slew_ttl_default_ms: 500    # manual-slew dead-man's switch: default authorization window
     slew_ttl_max_ms: 2000       # server-side clamp on a client-requested TTL
+  # geometry:                   # Layer 2 collision model (MNT-17): measurements of YOUR rig,
+  #                             #   taken letter by letter against the drawing in
+  #                             #   tools/rig-viewer (points A–I). Absent = no collision limit.
+  #                             #   Ships commented out because these are measurements of one
+  #                             #   rig, never defaults; the values below are the mount measured
+  #                             #   2026-08-03, kept as a worked example.
+  #   dec_axis_offset_mm: 70        # A (RA∩DEC) → dec joint, along the dec shaft
+  #   saddle_offset_mm: 203         # joint → tube centreline E: 90 to the saddle tip G,
+  #                                 #   + the plate/ring stack under the tube, + tube radius
+  #   tube_half_length_mm: 185      # half the OTA length, tube centred on the saddle
+  #   tube_radius_mm: 65            # bare tube radius + handling margin
+  #   head_height_mm: 1100          # axes crossing A above the ground
+  #   mount_body_height_mm: 250     # tripod top plate below A (cross-checks the head chain)
+  #   top_radius_mm: 80             # plate centre → outer face of a leg at its pivot
+  #   base_radius_mm: 630           # plate centre → a foot on the ground
+  #   head:                         # the head casting, letter by letter: A→B down the RA
+  #     a_to_b_mm: 160              #   shaft, B→C perpendicular to it toward the pole side,
+  #     b_to_c_mm: 80               #   C sitting c_above_plate_mm over the plate, main boss
+  #     c_above_plate_mm: 80        #   C→D at c_d_angle_degrees to the base plane
+  #     c_d_angle_degrees: 60
+  #     a_north_of_plate_mm: 30     # plumb line hung from A: lands this far NORTH of the
+  #                                 #   plate's centre bolt. When present the measurement
+  #                                 #   places the tripod and the chain becomes a logged
+  #                                 #   cross-check — a plumb line outranks trigonometry
+  #     alt_knob:                   # H — the altitude knob, poking into the under-pier passage
+  #       reach_mm: 70
+  #       radius_mm: 25
+  #   counterweight:                # capsule from A to the shaft tip I
+  #     length_mm: 180
+  #     radius_mm: 75
+  #   camera:                       # capsule rooted on the tube's SKIN at F
+  #     along_tube_mm: 140          # tube centre → F, along the tube
+  #     reach_mm: 300               # F → stack tip, along the dec axis away from the mount
+  #     radius_mm: 50
   # indi_device: "EQMod Mount"    # if driver=indi
   # ascom_host: "http://..."      # if driver=ascom_alpaca
 

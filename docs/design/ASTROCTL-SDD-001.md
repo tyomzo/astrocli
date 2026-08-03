@@ -1,7 +1,7 @@
 # AstroCtl — Software Design Description
 
 **Document ID:** ASTROCTL-SDD-001
-**Version:** 1.31.2
+**Version:** 1.32.0
 **Author:** Artiom
 **Date:** 2026-08-02
 **Status:** Draft
@@ -288,6 +288,31 @@ only from the last status the node could read, since by definition it cannot rea
 
 **Change note (1.30.0):** §5.2.3's mech↔sky map is corrected by six hours (M3-T06). The section
 **Change note (1.31.0):** **§5.4.1–§5.4.3 added — the celestial and body frames, and which frame each limit belongs to (ADR-14).** §5.4 specified *what* is enforced and was silent on *in which frame*, so `SafeMount::lookahead` predicted motion celestially and assumed `north ⇒ declination increases` — true on the normal branch only. The home pose is the pole, so a declination move crosses branches on its first step and the check then permits unconditionally; measured on hardware 2026-08-02 with the tube ending 60° below the horizon. §5.4.1 states the rule (advance body state, project; never invert), §5.4.2 specifies Layer 1 (axis angles and branch, making the long-unimplemented `pier_side` of §5.2.3 truthful) and shows the fix is one sign on one axis, and §5.4.3 defers Layer 2 (rig geometry, collision) while fixing the four interface points that stop the two layers from growing contradictory answers. Records that 180° of RA at the home pose is zero celestial change and a half-turn of counterweight — a hazard class no celestial predicate can express.
+**Change note (1.32.0):** Layer 2 measured against the metal and hardened by two more hardware
+traps (2026-08-03; PRD 1.20.0 records it as MNT-17). Four things changed. **(1) The schema grew
+the parts the operator's mount actually has:** `mount.geometry.head` — the head casting as a
+lettered chain (A RA∩DEC → B → C → D, the tripod's centreline; the letters are the project's
+measuring vocabulary, drawn in `tools/rig-viewer`), with the altitude knob H as a mount-fixed
+obstacle (already struck once by hand) and the camera stack as a capsule rooted on the tube's
+skin at F. **(2) Measured overrides derived:** `head.a_north_of_plate_mm` carries a plumb-line
+measurement from A to the plate's centre bolt; when present it *places* the tripod and the
+chain's trigonometry demotes to a logged cross-check. The plumb line contradicted the chain by
+5 cm on the first hang — welded castings are not drawings, and six of the day-one tape figures
+fell the same way (far-side runs, wrong anchors). **(3) The collision predicate earned an escape
+semantics:** a positional check with no way out bricked the mount twice in one day (an
+altitude-floor overshoot at 13°, a watch overshoot parked 2° inside the refused band). A pose
+inside a limit now permits exactly the motions that are *strictly shallower without descending*,
+the lookahead's dec-axis bearing advances with the RA command it is judging (east and west
+differ even at the pole), and the lookahead distance scales with the speed class (1°/2°/6° —
+Max moves 2–3° per press and was punching through the floor before this). **(4) Gotos are
+checked at the arrival pose:** a second Layer 1 reporting surface,
+`MountDevice::destination_bearing_degrees`, exposes the bearing of the same `goto_solution` the
+goto will run, and `check_goto_target` evaluates the collision predicate at that destination —
+no escape clause, a goto is not an escape. This is the first stone of the motion planner
+(HANDOVER-2026-08-03 §4) and it kept §5.4.3's contract: one producer of body state, predicates
+only, geometry never in the HAL. Survey acceptance after the full re-tape: 0 % of the sky
+hard-blocked, 3.2 % pier-unknown, zenith clear, every refusal with a verified escape direction.
+
 **Change note (1.31.2):** §5.4.3 implemented (Layer 2: capsule rig, truncated-cone tripod, optional
 counterweight capsule, all under `mount.geometry`), and corrected once by hardware the same day:
 a limit that consumes only a *pointing* judges the pole — the home pointing — by the worst of the
@@ -1284,6 +1309,12 @@ it is chosen deliberately if it ever is.
 > Layer 1 body state, the way `pier_side` does; the *geometry* still never touches the HAL. The
 > section's original text is kept — the deferral reasoning is the record of why the interface
 > looks the way it does.
+>
+> **Measured and hardened 2026-08-03** (change note 1.32.0, PRD MNT-17): head chain + alt knob +
+> camera capsule in the schema, the plumb-line override (measured beats derived), escape
+> semantics on the predicate, and goto destinations checked at the arrival pose via the second
+> reporting surface, `MountDevice::destination_bearing_degrees`. The deferral paragraph below —
+> "no requirement calls for it" — is the one statement time falsified: MNT-17 now does.
 
 What it would model: the optical tube's length and its offset from the declination axis, the
 counterweight shaft, the tripod or pier envelope, and cable anchor points. What it would protect:
