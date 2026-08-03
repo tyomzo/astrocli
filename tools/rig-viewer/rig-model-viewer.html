@@ -53,6 +53,15 @@
             text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
   .cell span { font: 600 0.95rem ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   .note { color: var(--muted); font-size: 0.8rem; margin-top: 12px; max-width: 70ch; }
+  /* Large screens: row one is the three drawings side by side, row two the controls —
+     the canvases stay square-ish and the operator sees every projection at once. */
+  @media (min-width: 1280px) {
+    body { max-width: 1720px; }
+    .views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: start; }
+    .view { margin-top: 10px; }
+    .controls { grid-template-columns: repeat(3, 1fr); gap: 12px 24px; align-items: start; }
+    .controls .buttons, .controls > .toggle { grid-column: 1 / -1; }
+  }
 </style>
 
 <header>
@@ -64,19 +73,21 @@
   <span id="verdict" class="clear">CLEAR</span>
 </header>
 
-<div class="view">
-  <h2>Seen from the east side — north is to the right, sky is up</h2>
-  <canvas id="side" width="840" height="700"></canvas>
-</div>
+<div class="views">
+  <div class="view">
+    <h2>Seen from the east side — north is to the right, sky is up</h2>
+    <canvas id="side" width="840" height="700"></canvas>
+  </div>
 
-<div class="view">
-  <h2>Seen from behind the mount — looking north at the ★; east is to the right</h2>
-  <canvas id="behind" width="840" height="620"></canvas>
-</div>
+  <div class="view">
+    <h2>Seen from behind the mount — looking north at the ★; east is to the right</h2>
+    <canvas id="behind" width="840" height="620"></canvas>
+  </div>
 
-<div class="view">
-  <h2>Seen from straight above — the RA swing is visible here as rotation</h2>
-  <canvas id="top" width="840" height="560"></canvas>
+  <div class="view">
+    <h2>Seen from straight above — the RA swing is visible here as rotation</h2>
+    <canvas id="top" width="840" height="560"></canvas>
+  </div>
 </div>
 
 <div class="controls">
