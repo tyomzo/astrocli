@@ -314,13 +314,13 @@ function draw() {
     line3(Jv, [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // main boss: C → D
     label("main boss — " + bossang.value + "°", [0, (Jv[1]+AZN)/2, (Jv[2]-BH)/2], -140, 30, "right");
     // The altitude knob: mid-way down the main boss, 70 mm out perpendicular to it, on the
-    // back (south) side — the latitude-adjustment bolt the operator's hand knows.
+    // NORTH side — poking toward the under-pier passage the tube and weights swing through.
     const D3 = [0, AZN, -BH];
     const mid = scl(add(Jv, D3), 0.5);
     const bd = add(D3, scl(Jv, -1));                     // C→D direction (as a vector)
     const bl = Math.hypot(bd[1], bd[2]) || 1;
     let perp = [0, -bd[2]/bl, bd[1]/bl];                 // ⊥ in the meridian plane
-    if (perp[1] > 0) perp = scl(perp, -1);               // pick the southward side
+    if (perp[1] < 0) perp = scl(perp, -1);               // the north side, operator-confirmed
     const knob = add(mid, scl(perp, 70));
     line3(mid, knob, 24, css("--steel"), [], 0.95, "butt");
     chain = { C: Jv, D: D3, H: knob };
