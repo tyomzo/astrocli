@@ -140,7 +140,7 @@ fn main() {
         dec_axis_offset_mm: 165.0,
         tube_half_length_mm: 250.0,
         tube_radius_mm: 70.0,
-        saddle_offset_mm: 230.0,
+        saddle_offset_mm: 160.0,
         head_height_mm: 1100.0,
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,

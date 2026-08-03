@@ -143,7 +143,7 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 <script>
 "use strict";
 // The eight measurements (dev-field-tls.yaml) + the proposed camera, display only.
-const G = { decOffset: 165, saddle: 230, tubeHalf: 250, bareTubeR: 70,
+const G = { decOffset: 165, saddle: 160, tubeHalf: 250, bareTubeR: 70,
             topR: 80, baseR: 630, axisOff: 160,
             groundA: 1100,       // A → ground, measured directly with the tape
             cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140,
@@ -154,7 +154,7 @@ let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed
                          // plate and ground stay bolted to the mount, not to the crossing
 document.getElementById("dims").textContent =
   "The numbers in play: saddle sits 165 mm out from the RA shaft, tube centreline another " +
-  "230 mm further; tube 500 mm long, 140 mm across; axes cross 1100 mm above the ground and " +
+  "160 mm further (the tube lies straight on the saddle: 90 stack + 70 radius); tube 500 mm long, 140 mm across; axes cross 1100 mm above the ground and " +
   "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; counterweight " +
   "shaft 350 mm with 75 mm weights; head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0.";
 
@@ -361,6 +361,7 @@ function draw() {
   joint("C", chain.C, "the joint (bearing centre)", 30, 22, "left");
   joint("D", chain.D, "boss foot — tripod centreline", 44, 26, "left");
   joint("E", centre, "tube centre on the saddle", -120, -32, "right");
+  joint("G", scl(dhat, G.decOffset + 90), "tip of the saddle (clamp surface)", -130, 26, "right");
   joint("F", camA, "focuser / camera root", 30, -16, "left");
 
   drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam);
