@@ -559,6 +559,22 @@ impl SkywatcherMount {
             session.geometry.hemisphere(),
         ))
     }
+
+    /// The bearing at a goto's arrival pose — the same `goto_solution` the goto itself will
+    /// run, so the pre-flight tests the pose the mount will actually visit (SDD §5.4.3).
+    #[must_use]
+    pub fn destination_bearing_degrees(&self, target: RaDec) -> Option<f64> {
+        let state = self.shared.state.lock().ok()?;
+        let session = state.session?;
+        let counts = state.counts?;
+        drop(state);
+        let lst = self.shared.lst().ok()?;
+        let solution = session.geometry.goto(counts, target, lst).ok()?;
+        Some(dec_axis_hour_angle(
+            session.geometry.mech(solution.destination()),
+            session.geometry.hemisphere(),
+        ))
+    }
 }
 
 impl Shared {
@@ -1660,6 +1676,10 @@ impl MountDevice for SkywatcherMount {
 
     fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
         Self::dec_axis_hour_angle_degrees(self)
+    }
+
+    fn destination_bearing_degrees(&self, target: RaDec) -> Option<f64> {
+        Self::destination_bearing_degrees(self, target)
     }
 
     /// Advance the mechanical state one step and project — SDD §5.4.1, §5.4.2 (M3-T08).

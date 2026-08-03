@@ -1225,6 +1225,11 @@ impl MountDevice for SimulatorMount {
         None
     }
 
+    /// `None` — likewise: no mechanical destination pose to report.
+    fn destination_bearing_degrees(&self, _target: astroctl_core::types::RaDec) -> Option<f64> {
+        None
+    }
+
     /// `None`, for the reason above (M3-T08).
     ///
     /// The model has no mechanical axes, so it has no branch — and a look-ahead that guessed one

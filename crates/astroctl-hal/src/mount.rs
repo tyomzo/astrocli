@@ -313,6 +313,19 @@ pub trait MountDevice: Debug + Send + Sync {
     /// Synchronous and cached on the same argument as both.
     fn dec_axis_hour_angle_degrees(&self) -> Option<f64>;
 
+    /// The declination axis's bearing at the pose a goto to `target` would arrive in
+    /// (SDD §5.4.3, the goto pre-flight and the motion planner's first stone).
+    ///
+    /// A driver that executes gotos mechanically computes the destination's axis angles before
+    /// any byte moves, so the arrival pose is knowable *now* — and with it, the collision limit
+    /// can test the pose the mount would end in rather than letting an altitude-only check aim
+    /// the tube at the pier. Must be computed by the same branch rules the eventual goto will
+    /// follow, or the check tests a pose the mount never visits.
+    ///
+    /// `None` on the same terms as [`dec_axis_hour_angle_degrees`](Self::dec_axis_hour_angle_degrees):
+    /// no mechanical state, no destination pose, no pose check. Synchronous, from cached state.
+    fn destination_bearing_degrees(&self, target: RaDec) -> Option<f64>;
+
     /// Where the tube would point after `degrees` more of the motion `dir` on `axis` (M3-T08).
     ///
     /// **The one question the safety wrapper cannot answer for itself**, and SDD §5.4.1 is the

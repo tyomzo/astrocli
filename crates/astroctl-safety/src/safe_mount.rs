@@ -266,6 +266,30 @@ impl Shared {
         Ok(())
     }
 
+    /// The whole goto pre-flight: altitude, then the *arrival pose* against the rig model.
+    ///
+    /// The collision half exists since 2026-08-03 and is the first stone of the motion planner:
+    /// until it did, a goto was only altitude-checked and could be aimed straight into the
+    /// refused band or the altitude knob, with only the 2 Hz watch to catch it mid-flight. The
+    /// driver knows the destination's exact mechanical pose — [`GotoSolution`] is computed
+    /// before any byte moves — so it reports the arrival bearing and the model tests the pose
+    /// the mount would actually end in, no conservatism required. A driver with no mechanical
+    /// state reports no bearing and keeps today's altitude-only behaviour: a device whose
+    /// destination pose nobody can know gets no pose check rather than a guessed one.
+    ///
+    /// No escape clause here on purpose, unlike [`Self::collision_worsens`]: escapes are for a
+    /// mount already inside the model inching out, and a *goto into* a colliding pose is never
+    /// that.
+    fn check_goto_target(&self, target: RaDec, at: DateTime<Utc>) -> Result<(), DeviceError> {
+        self.check_altitude(target, at)?;
+        if let Some(bearing) = self.inner.destination_bearing_degrees(target) {
+            if let Some(hit) = self.collides_at_with(target, Some(bearing), at) {
+                return Err(collision_violation(hit));
+            }
+        }
+        Ok(())
+    }
+
     /// The altitude one lookahead step along, when that step would descend below the limit.
     ///
     /// `None` means the motion is allowed: either it climbs, or it stays above the limit, or the
@@ -580,7 +604,7 @@ impl SafeMount {
     /// # Errors
     /// [`DeviceError::LimitViolation`] if the target is below `min_altitude_degrees`.
     pub fn check_goto(&self, target: RaDec) -> Result<(), DeviceError> {
-        self.shared.check_altitude(target, Utc::now())
+        self.shared.check_goto_target(target, Utc::now())
     }
 
     /// Resolve a client's requested slew TTL against the configuration (SDD §5.8.1).
@@ -1050,7 +1074,7 @@ impl MountDevice for SafeMount {
 
     /// Refuses a target below the horizon limit **before the driver is called** (MNT-15).
     async fn goto(&self, target: RaDec) -> Result<(), DeviceError> {
-        self.shared.check_altitude(target, Utc::now())?;
+        self.shared.check_goto_target(target, Utc::now())?;
         self.shared.inner.goto(target).await
     }
 
@@ -1151,6 +1175,10 @@ impl MountDevice for SafeMount {
 
     fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
         self.shared.inner.dec_axis_hour_angle_degrees()
+    }
+
+    fn destination_bearing_degrees(&self, target: RaDec) -> Option<f64> {
+        self.shared.inner.destination_bearing_degrees(target)
     }
 
     /// Forwarded unchanged: the wrapper adds no mechanical knowledge, it only consumes the

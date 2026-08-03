@@ -57,6 +57,9 @@ struct State {
     /// What `dec_axis_hour_angle_degrees` answers. `None` models a driver with no mechanical
     /// state; a value is a driver that knows where its declination axis is, pole included.
     dec_axis_hour_angle: Option<f64>,
+    /// What `destination_bearing_degrees` answers for every target. `None` models a driver
+    /// that cannot know its arrival pose.
+    destination_bearing: Option<f64>,
 }
 
 /// How the double answers `motion_lookahead`, as the change one step of each direction makes.
@@ -117,6 +120,7 @@ impl RecordingMount {
                 lookahead: None,
                 pier_side: None,
                 dec_axis_hour_angle: None,
+                destination_bearing: None,
             }),
             goto_duration: Duration::from_secs(2),
             slew_duration: Duration::ZERO,
@@ -162,6 +166,13 @@ impl RecordingMount {
     #[must_use]
     pub fn with_dec_axis_hour_angle(self, degrees: f64) -> Self {
         self.locked().dec_axis_hour_angle = Some(degrees);
+        self
+    }
+
+    /// Report this bearing as every goto destination's arrival pose.
+    #[must_use]
+    pub fn with_destination_bearing(self, degrees: f64) -> Self {
+        self.locked().destination_bearing = Some(degrees);
         self
     }
 
@@ -384,6 +395,10 @@ impl MountDevice for RecordingMount {
 
     fn dec_axis_hour_angle_degrees(&self) -> Option<f64> {
         self.locked().dec_axis_hour_angle
+    }
+
+    fn destination_bearing_degrees(&self, _target: RaDec) -> Option<f64> {
+        self.locked().destination_bearing
     }
 
     fn motion_lookahead(&self, axis: Axis, dir: Direction, degrees: f64) -> Option<RaDec> {

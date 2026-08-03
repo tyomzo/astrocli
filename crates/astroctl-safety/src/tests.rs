@@ -1463,6 +1463,77 @@ async fn an_axis_parked_inside_the_bearing_band_can_drive_back_out() {
     ));
 }
 
+/// A goto aimed into the refused band is refused before the driver is commanded (SDD §5.4.3).
+///
+/// The motion planner's first stone, 2026-08-03: until the driver reported destination bearings,
+/// a goto was only altitude-checked — the collision model never saw the target, and a goto could
+/// be aimed straight at the pier with only the 2 Hz watch to catch it mid-flight. The pair below:
+/// the same target, one arrival pose inside the band and one clear, and only the bearing differs.
+#[tokio::test]
+async fn a_goto_whose_arrival_pose_collides_is_refused_up_front() {
+    use astroctl_core::config::RigGeometry;
+
+    let geometry = RigGeometry {
+        dec_axis_offset_mm: 180.0,
+        tube_half_length_mm: 1_000.0,
+        tube_radius_mm: 120.0,
+        saddle_offset_mm: 180.0,
+        head_height_mm: 1_250.0,
+        mount_body_height_mm: 250.0,
+        top_radius_mm: 80.0,
+        base_radius_mm: 650.0,
+        mount_axis_offset_mm: 0.0,
+        head_axis_angle_degrees: 90.0,
+        head: None,
+        counterweight: None,
+        camera: None,
+    };
+    // The pole pointing is inside this rig's bearing band at 180° and clear at 0° — the
+    // home-prison tests established both.
+    let target = RaDec::from_parts(0.0, 90.0).expect("the pole is a coordinate");
+
+    let into_the_band = RecordingMount::at(target)
+        .with_destination_bearing(180.0)
+        .shared();
+    let error = SafeMount::with_geometry(
+        Arc::clone(&into_the_band) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    )
+    .goto(target)
+    .await
+    .expect_err("an arrival pose inside the band must be refused");
+    assert!(matches!(
+        error,
+        DeviceError::LimitViolation {
+            limit: Limit::Collision,
+            ..
+        }
+    ));
+    assert!(
+        !into_the_band.log().contains(&"goto".to_owned()),
+        "the driver was commanded despite the refusal: {:?}",
+        into_the_band.log()
+    );
+
+    let clear = RecordingMount::at(target)
+        .with_destination_bearing(0.0)
+        .shared();
+    SafeMount::with_geometry(
+        Arc::clone(&clear) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    )
+    .goto(target)
+    .await
+    .expect("the same target with a clear arrival pose goes through");
+    assert!(clear.log().contains(&"goto".to_owned()));
+}
+
 /// Home is not a prison once the driver says where the declination axis is (SDD §5.4.3).
 ///
 /// Measured on hardware 2026-08-02: with geometry configured, every slew from home came back 403,

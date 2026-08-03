@@ -244,6 +244,10 @@ impl MountDevice for FakeMount {
         None
     }
 
+    fn destination_bearing_degrees(&self, _target: RaDec) -> Option<f64> {
+        None
+    }
+
     /// `None` — likewise, a fake with no mechanism has no branch to project a motion through.
     fn motion_lookahead(
         &self,
