@@ -403,13 +403,12 @@ fn the_tripod_stands_on_the_azimuth_axis_and_not_on_the_crossing() {
 
 #[test]
 fn a_leaning_head_boss_carries_the_tripod_out_from_under_the_crossing() {
-    // The head's boss axis leans toward the pole side, so the base it reaches — and the tripod
-    // standing under it — sits further from under the crossing than a plumb line says. On a rig
-    // whose tube stays on the crossing's side of the cone (a short tube — the operator's shape),
-    // that must open room at the under-the-pier pose. Deliberately *not* asserted for a tube
-    // long enough to span both sides of the cone: the lean brings the far arm closer, and the
-    // first draft of this test found that out. 90° must reproduce the old plumb-line model
-    // exactly (every other test here runs at 90).
+    // The head's boss descends toward the pole side ("60 degrees other direction" — the
+    // operator corrected the first guess), so its foot — and the tripod standing under it —
+    // lands poleward of the crossing, *toward* where a short tube swings at the under-the-pier
+    // pose. On the operator-shaped rig the lean therefore CLOSES room there; 90° must reproduce
+    // the old plumb-line model exactly (every other test here runs at 90). Not asserted for a
+    // tube spanning both sides of the cone, where the arms trade places.
     let short_rig = RigGeometry {
         dec_axis_offset_mm: 165.0,
         saddle_offset_mm: 230.0,
@@ -434,10 +433,11 @@ fn a_leaning_head_boss_carries_the_tripod_out_from_under_the_crossing() {
         .expect("the short rig collides under the pier when the boss is taken as vertical");
     let leaning = at(60.0)
         .collides_with_dec_axis(pole, 180.0)
-        .map_or(0.0, |hit| hit.penetration_mm);
+        .expect("with the tripod's foot poleward the tube is deeper in, not clear");
     assert!(
-        leaning < plumb.penetration_mm,
-        "leaning the boss ({leaning} mm) did not open room vs plumb ({} mm)",
+        leaning.penetration_mm > plumb.penetration_mm,
+        "the poleward lean ({} mm) did not close room vs plumb ({} mm)",
+        leaning.penetration_mm,
         plumb.penetration_mm
     );
 }

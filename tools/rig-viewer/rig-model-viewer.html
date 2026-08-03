@@ -216,9 +216,9 @@ function draw() {
   platebv.textContent = pb; bossangv.textContent = bossang.value + "°";
   BH = pb + ao * Math.sin(LAT);          // crossing → plate, derived: changes with the offset…
   HH = G.groundBelowA + ao * Math.sin(LAT); // …so plate and ground stay fixed to the mount
-  // The tripod's centreline: down the boss slope from ⊕₂ to the plate, then plumb. The slope
-  // leans the way the RA shaft rises, so the run heads south of ⊕₂.
-  AZN = -ao * Math.cos(LAT) - pb / Math.tan(th);
+  // The tripod's centreline: down the boss slope from ⊕₂ to the plate, then plumb. The boss
+  // descends toward the pole side ("60 degrees other direction"), so the foot lands north of ⊕₂.
+  AZN = -ao * Math.cos(LAT) + pb / Math.tan(th);
   bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
   axoffv.textContent = ao;
   const { dhat, t, centre } = pose(b, d);
