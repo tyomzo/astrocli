@@ -23,6 +23,7 @@ const RIG: RigGeometry = RigGeometry {
     top_radius_mm: 80.0,
     base_radius_mm: 650.0,
     mount_axis_offset_mm: 0.0,
+    head_axis_angle_degrees: 90.0,
     counterweight: None,
     camera: None,
 };
@@ -397,6 +398,47 @@ fn the_tripod_stands_on_the_azimuth_axis_and_not_on_the_crossing() {
         offset < centred.penetration_mm,
         "moving the column back {offset} vs {} did not open room on the crossing's side",
         centred.penetration_mm
+    );
+}
+
+#[test]
+fn a_leaning_head_boss_carries_the_tripod_out_from_under_the_crossing() {
+    // The head's boss axis leans toward the pole side, so the base it reaches — and the tripod
+    // standing under it — sits further from under the crossing than a plumb line says. On a rig
+    // whose tube stays on the crossing's side of the cone (a short tube — the operator's shape),
+    // that must open room at the under-the-pier pose. Deliberately *not* asserted for a tube
+    // long enough to span both sides of the cone: the lean brings the far arm closer, and the
+    // first draft of this test found that out. 90° must reproduce the old plumb-line model
+    // exactly (every other test here runs at 90).
+    let short_rig = RigGeometry {
+        dec_axis_offset_mm: 165.0,
+        saddle_offset_mm: 230.0,
+        tube_half_length_mm: 250.0,
+        tube_radius_mm: 80.0,
+        mount_axis_offset_mm: 60.0,
+        ..RIG
+    };
+    let at = |angle: f64| {
+        RigModel::new(
+            Some(RigGeometry {
+                head_axis_angle_degrees: angle,
+                ..short_rig
+            }),
+            VILNIUS,
+        )
+        .expect("geometry")
+    };
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    let plumb = at(90.0)
+        .collides_with_dec_axis(pole, 180.0)
+        .expect("the short rig collides under the pier when the boss is taken as vertical");
+    let leaning = at(60.0)
+        .collides_with_dec_axis(pole, 180.0)
+        .map_or(0.0, |hit| hit.penetration_mm);
+    assert!(
+        leaning < plumb.penetration_mm,
+        "leaning the boss ({leaning} mm) did not open room vs plumb ({} mm)",
+        plumb.penetration_mm
     );
 }
 

@@ -1222,6 +1222,7 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
         mount_axis_offset_mm: 0.0,
+        head_axis_angle_degrees: 90.0,
         counterweight: None,
         camera: None,
     };
@@ -1306,6 +1307,7 @@ async fn a_pose_inside_the_model_permits_the_motion_that_backs_out() {
         top_radius_mm: 1.0,
         base_radius_mm: 2.0,
         mount_axis_offset_mm: 0.0,
+        head_axis_angle_degrees: 90.0,
         counterweight: None,
         camera: None,
     };
@@ -1371,6 +1373,7 @@ async fn an_axis_parked_inside_the_bearing_band_can_drive_back_out() {
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
         mount_axis_offset_mm: 0.0,
+        head_axis_angle_degrees: 90.0,
         counterweight: None,
         camera: None,
     };
@@ -1479,6 +1482,7 @@ async fn a_slew_from_home_is_permitted_once_the_driver_reports_its_dec_axis() {
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
         mount_axis_offset_mm: 0.0,
+        head_axis_angle_degrees: 90.0,
         counterweight: None,
         camera: None,
     };

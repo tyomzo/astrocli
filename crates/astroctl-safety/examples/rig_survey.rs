@@ -146,6 +146,7 @@ fn main() {
         top_radius_mm: 80.0,
         base_radius_mm: 630.0,
         mount_axis_offset_mm: 60.0,
+        head_axis_angle_degrees: 60.0,
         camera: Some(CameraGeometry {
             along_tube_mm: 140.0,
             reach_mm: 300.0,

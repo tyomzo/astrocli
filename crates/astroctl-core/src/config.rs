@@ -825,6 +825,15 @@ pub struct RigGeometry {
     /// real one at this latitude and skews every north–south clearance by that much.
     #[serde(default)]
     pub mount_axis_offset_mm: f64,
+    /// The angle of the head's boss axis — the casting the RA housing is bolted to — measured
+    /// from the base plane, in degrees. 90 (the default) is a vertical column.
+    ///
+    /// The tripod stands under the point where this axis reaches the base, not under a plumb
+    /// line from the RA∩head-axis crossing: on the operator's mount the boss leans at 60°, which
+    /// carries the base — and the whole tripod cone — a further ~116 mm away from under the
+    /// crossing (2026-08-03, read off the rig-model viewer against the metal).
+    #[serde(default = "vertical_head_axis")]
+    pub head_axis_angle_degrees: f64,
     /// The counterweight shaft and weights, absent until measured — the same rule as the rig
     /// itself: an unmeasured part gets no limit rather than a guessed one.
     #[serde(default)]
@@ -838,6 +847,11 @@ pub struct RigGeometry {
     /// (2026-08-02/03, the E16 aftermath and the rig-viewer session).
     #[serde(default)]
     pub camera: Option<CameraGeometry>,
+}
+
+/// The default head-boss angle: a vertical column, which is also the pre-2026-08-03 model.
+fn vertical_head_axis() -> f64 {
+    90.0
 }
 
 /// The camera stack, as a capsule off the tube's side (SDD §5.4.3).
@@ -907,6 +921,14 @@ impl RigGeometry {
         // column is expressible, though nobody has met one. Bounded to something a mount head
         // can physically be.
         c.range_f64("mount_axis_offset_mm", self.mount_axis_offset_mm, -500.0, 500.0);
+        // Below ~10° the boss is nearly lying on the plate and the base-reach arithmetic
+        // divides by almost nothing; no real casting is built that flat.
+        c.range_f64(
+            "head_axis_angle_degrees",
+            self.head_axis_angle_degrees,
+            10.0,
+            90.0,
+        );
         if let Some(cam) = self.camera {
             // `along_tube_mm` is signed — a focuser can sit either side of the dec axis — but it
             // must sit *on* the tube, or the number describes a different rig than the tube does.

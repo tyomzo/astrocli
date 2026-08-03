@@ -103,6 +103,13 @@
     drag this; only the DEC assembly (and everything riding it) slides along the shaft.</small>
   </div>
   <div class="row">
+    <label for="bossang">head boss angle — the casting the RA housing bolts to, from the base</label>
+    <span class="val" id="bossangv">60°</span>
+    <input type="range" id="bossang" min="30" max="90" value="60" step="1">
+    <small>90° would be a vertical column. Your head leans 60°, so the tripod stands where the
+    slope reaches the plate — watch it slide out from under the head as you lower this.</small>
+  </div>
+  <div class="row">
     <label for="plateb">⊕₂ height above the top plate — fixed property of the head</label>
     <span class="val" id="platebv">201</span>
     <input type="range" id="plateb" min="120" max="320" value="201" step="1">
@@ -202,13 +209,16 @@ function label(text, p3, dx, dy, anchor = "left") {
 
 function draw() {
   const b = +bearing.value, d = +decang.value, r = +tuber.value, ao = +axoff.value;
-  AZN = -ao * Math.cos(LAT);
   SHIFT = scl(P, ao);   // pin the mount; the crossing (model origin) rides up the shaft
   const A3 = scl(P, -ao);  // the RA∩head-axis point: every mount-fixed part anchors here
   const pb = +plateb.value;              // ⊕₂ → top plate, a fixed property of the head casting
-  platebv.textContent = pb;
+  const th = +bossang.value * Math.PI / 180;
+  platebv.textContent = pb; bossangv.textContent = bossang.value + "°";
   BH = pb + ao * Math.sin(LAT);          // crossing → plate, derived: changes with the offset…
   HH = G.groundBelowA + ao * Math.sin(LAT); // …so plate and ground stay fixed to the mount
+  // The tripod's centreline: down the boss slope from ⊕₂ to the plate, then plumb. The slope
+  // leans the way the RA shaft rises, so the run heads south of ⊕₂.
+  AZN = -ao * Math.cos(LAT) - pb / Math.tan(th);
   bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
   axoffv.textContent = ao;
   const { dhat, t, centre } = pose(b, d);
@@ -248,8 +258,8 @@ function draw() {
   // — the mount azimuth axis: vertical, perpendicular to the top plate. This is the third
   //   axis of the real mount (the polar-alignment rotation) and the line the model's tripod
   //   cone is centred on. The model ASSUMES the RA∩DEC crossing sits exactly on it.
-  line3([0,AZN,120], [0,AZN,-HH], 4, css("--accent"), [3,6], 0.55, "butt");
-  label("vertical head axis ⊥ top plate", [0,AZN,90], 14, -6);
+  line3([0,AZN,-BH+60], [0,AZN,-HH], 4, css("--accent"), [3,6], 0.55, "butt");
+  label("tripod centreline (plumb from where the boss meets the plate)", [0,AZN,-BH+40], 14, -14);
 
   // — the two crossing points the offset slider talks about —
   const mark = (p3, text, dx, dy, anchor) => {
@@ -281,7 +291,8 @@ function draw() {
   }
 
   // — the mount head: pedestal up from the plate, then the tilted RA shaft —
-  line3([0,AZN,-BH], add(A3,[0,0,30]), 60, css("--steel"), [], 0.9, "butt");
+  line3(add(A3,[0,0,0]), [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // the boss strut
+  label("head boss — " + bossang.value + "° to the base", add(A3, [0, (AZN - (-(+axoff.value)*Math.cos(LAT)))/2, -(BH - (+axoff.value)*Math.sin(LAT))/2]), -150, 26, "right");
   line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
   line3(add(A3,scl(P,300)), add(A3,scl(P,560)), 10, css("--steel"), [2,4], 0.7, "butt");
   label("RA shaft — aims at the ★", add(A3, scl(P, 440)), -160, -14, "right");
@@ -339,7 +350,7 @@ function draw() {
   v.className = hit ? "hit" : "clear";
 }
 
-for (const id of ["bearing","decang","tuber","axoff","plateb"]) document.getElementById(id).addEventListener("input", draw);
+for (const id of ["bearing","decang","tuber","axoff","plateb","bossang"]) document.getElementById(id).addEventListener("input", draw);
 modelon.addEventListener("change", draw); 
 function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam) {
   const ct = document.getElementById("top"), gt = ct.getContext("2d");

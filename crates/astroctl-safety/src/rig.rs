@@ -163,9 +163,18 @@ impl RigModel {
         };
         let polar = Vec3::new(0.0, s * phi.cos(), s * phi.sin());
         let equator = Vec3::new(0.0, -phi.sin(), phi.cos());
-        // The column sits `offset` back down the RA shaft from the crossing this frame is
-        // centred on: A = −offset·p̂, whose only horizontal component is northing.
-        let cone_axis_n = -geometry.mount_axis_offset_mm * polar.n;
+        // The tripod stands under where the head reaches its base, and the head is two moves
+        // from this frame's origin: `offset` back down the RA shaft to the RA∩head-axis
+        // crossing (A = −offset·p̂), then down the head's boss axis — leaning
+        // `head_axis_angle_degrees` from the base plane, toward the same side the polar axis
+        // rises — until it meets the plate. The slope run is the crossing's height above the
+        // plate over the tangent; a vertical boss (90°, the default) runs nowhere and this
+        // collapses to the plumb line the model used before the operator measured the lean.
+        let above_plate = geometry.mount_body_height_mm - geometry.mount_axis_offset_mm * polar.u;
+        let theta = geometry.head_axis_angle_degrees.to_radians();
+        let slope_run = above_plate * theta.cos() / theta.sin();
+        let cone_axis_n =
+            -geometry.mount_axis_offset_mm * polar.n - polar.n.signum() * slope_run;
         Some(Self {
             geometry,
             polar,
