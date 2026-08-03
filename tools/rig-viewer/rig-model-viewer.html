@@ -354,9 +354,12 @@ function draw() {
   // — the counterweight: shaft + two discs —
   line3([0,0,0], cwEnd, 16, css("--cw"), [], 0.95, "butt");
   for (const at of [0.72, 0.92]) {
-    const p = scl(dhat, -G.cwLen*at);
-    const across = scl(t, 1); // disc drawn as short thick bar ⊥ shaft
-    line3(add(p, scl(across, -20)), add(p, scl(across, 20)), 2*G.cwR, css("--cw"), [], 0.95, "butt");
+    // Each weight is a plate perpendicular to the shaft: edge-on it is a thin slab — its
+    // diameter (2·cwR) runs ⊥ the shaft, its thickness (~30 mm) along it.
+    const pw = scl(dhat, -G.cwLen*at);
+    // The diameter is drawn along p̂, which is always in the plate's plane: the dec axis is
+    // perpendicular to the polar axis by construction, so the shaft (−d̂) is too.
+    line3(add(pw, scl(P, -G.cwR)), add(pw, scl(P, G.cwR)), 30, css("--cw"), [], 0.95, "butt");
   }
   label("counterweights", cwEnd, 26, 22);
 
