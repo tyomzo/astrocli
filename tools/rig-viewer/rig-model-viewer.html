@@ -313,7 +313,17 @@ function draw() {
     line3(A3, Jv, 40, css("--steel"), [], 0.95, "butt");            // second boss: B → C
     line3(Jv, [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // main boss: C → D
     label("main boss — " + bossang.value + "°", [0, (Jv[1]+AZN)/2, (Jv[2]-BH)/2], -140, 30, "right");
-    chain = { C: Jv, D: [0, AZN, -BH] };
+    // The altitude knob: mid-way down the main boss, 70 mm out perpendicular to it, on the
+    // back (south) side — the latitude-adjustment bolt the operator's hand knows.
+    const D3 = [0, AZN, -BH];
+    const mid = scl(add(Jv, D3), 0.5);
+    const bd = add(D3, scl(Jv, -1));                     // C→D direction (as a vector)
+    const bl = Math.hypot(bd[1], bd[2]) || 1;
+    let perp = [0, -bd[2]/bl, bd[1]/bl];                 // ⊥ in the meridian plane
+    if (perp[1] > 0) perp = scl(perp, -1);               // pick the southward side
+    const knob = add(mid, scl(perp, 70));
+    line3(mid, knob, 24, css("--steel"), [], 0.95, "butt");
+    chain = { C: Jv, D: D3, H: knob };
   }
   line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
   line3(add(A3,scl(P,300)), add(A3,scl(P,560)), 10, css("--steel"), [2,4], 0.7, "butt");
@@ -368,6 +378,7 @@ function draw() {
   joint("D", chain.D, "boss foot — tripod centreline", 44, 26, "left");
   joint("E", centre, "tube centre on the saddle", -120, -32, "right");
   joint("G", scl(dhat, G.decOffset + 90), "tip of the saddle (clamp surface)", -130, 26, "right");
+  joint("H", chain.H, "alt knob — 70 mm off the boss", -120, 34, "right");
   joint("F", camA, "focuser / camera root", 30, -16, "left");
 
   drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam, chain);
@@ -437,6 +448,7 @@ function drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, c
   };
   badge("A", [0,0,0]); badge("B", A3v); badge("C", chain.C); badge("D", chain.D);
   badge("E", centre); badge("F", camA); badge("G", scl(dhat, G.decOffset + 90));
+  if (chain.H) badge("H", chain.H);
 }
 
 function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam) {
