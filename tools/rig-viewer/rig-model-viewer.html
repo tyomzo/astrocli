@@ -70,6 +70,11 @@
 </div>
 
 <div class="view">
+  <h2>Seen from behind the mount — looking north at the ★; east is to the right</h2>
+  <canvas id="behind" width="840" height="620"></canvas>
+</div>
+
+<div class="view">
   <h2>Seen from straight above — the RA swing is visible here as rotation</h2>
   <canvas id="top" width="840" height="560"></canvas>
 </div>
@@ -365,6 +370,7 @@ function draw() {
   joint("G", scl(dhat, G.decOffset + 90), "tip of the saddle (clamp surface)", -130, 26, "right");
   joint("F", camA, "focuser / camera root", 30, -16, "left");
 
+  drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam, chain);
   drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam);
 
   const alt = Math.asin(t[2])*180/Math.PI, az = (Math.atan2(t[0],t[1])*180/Math.PI+360)%360;
@@ -379,6 +385,60 @@ function draw() {
 
 for (const id of ["bearing","decang","tuber","axoff","bossang","boss2len","bossh"]) document.getElementById(id).addEventListener("input", draw);
 modelon.addEventListener("change", draw); 
+function drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam, chain) {
+  const cb = document.getElementById("behind"), gb = cb.getContext("2d");
+  gb.clearRect(0, 0, cb.width, cb.height);
+  const OX2 = cb.width/2, OY2 = 230;
+  // Looking north: east to the viewer's right, sky up. Pinned to the mount like the others.
+  const q = v => [OX2 + v[0]*MM, OY2 - (v[2]+SHIFT[2])*MM];
+  const seg = (a,b,wmm,color,dash=[],alpha=1) => {
+    const A=q(a), B=q(b);
+    gb.strokeStyle=color; gb.lineCap="butt"; gb.globalAlpha=alpha; gb.setLineDash(dash);
+    gb.lineWidth=Math.max(1.5, wmm*MM);
+    gb.beginPath(); gb.moveTo(A[0],A[1]); gb.lineTo(B[0],B[1]); gb.stroke();
+    gb.globalAlpha=1; gb.setLineDash([]);
+  };
+  // ground
+  const gY = q([0,0,-HH])[1];
+  gb.fillStyle = css("--ground"); gb.fillRect(0, gY, cb.width, cb.height - gY);
+  gb.fillStyle = css("--muted"); gb.font = "600 12px ui-monospace, monospace"; gb.textAlign = "left";
+  gb.fillText("ground", 10, gY + 16); gb.fillText("east →", cb.width - 78, gY + 16);
+  gb.fillText("↑ zenith · ★ behind the head", 10, 20);
+  // tripod legs (two side legs visible, north leg hidden behind the head)
+  for (const az of [0, 120, 240]) {
+    const a = az*Math.PI/180;
+    seg([G.topR*Math.sin(a), AZN + G.topR*Math.cos(a), -BH],
+        [G.baseR*Math.sin(a), AZN + G.baseR*Math.cos(a), -HH], 30, css("--steel"), az===0?[7,6]:[], az===0?0.4:0.85);
+  }
+  seg([-G.topR, AZN, -BH], [G.topR, AZN, -BH], 16, css("--steel"));   // plate edge
+  // head chain: B→C→D project onto the meridian plane = a vertical-ish line here
+  const A3v = scl(P, -(+axoff.value));
+  seg(A3v, chain.C, 40, css("--steel"), [], 0.95);
+  seg(chain.C, chain.D, 64, css("--steel"), [], 0.95);
+  // RA shaft: toward the pole = into the page, drawn as its projection with the star at top
+  seg(add(A3v, scl(P,-140)), add(A3v, scl(P,560)), 42, css("--steel"), [], 0.9);
+  // the dec assembly — this is the view where RA turns like a clock face
+  seg([0,0,0], scl(dhat, G.decOffset + G.saddle), 24, css("--steel"), [], 0.9);
+  seg(tubeA, tubeB, 2*G.bareTubeR, tube.hit ? css("--hit") : css("--tube"), [], 0.95);
+  seg([0,0,0], cwEnd, 2*G.cwR*0.6, cw.hit ? css("--hit") : css("--cw"), [], 0.95);
+  seg(camA, camB, 2*G.camR, cam.hit ? css("--hit") : css("--cam"), [], 0.95);
+  if (modelon.checked) {
+    seg(tubeA, tubeB, 2*r, css("--model"), [], 0.2);
+    seg([0,0,0], cwEnd, 2*G.cwR, css("--model"), [], 0.2);
+  }
+  // letters
+  const badge = (L, p3) => {
+    const A = q(p3);
+    gb.strokeStyle = css("--accent"); gb.lineWidth = 2; gb.setLineDash([]);
+    gb.fillStyle = css("--bg");
+    gb.beginPath(); gb.arc(A[0], A[1], 9, 0, 7); gb.fill(); gb.stroke();
+    gb.fillStyle = css("--accent"); gb.font = "700 11px ui-monospace, monospace"; gb.textAlign = "center";
+    gb.fillText(L, A[0], A[1]+4);
+  };
+  badge("A", [0,0,0]); badge("B", A3v); badge("C", chain.C); badge("D", chain.D);
+  badge("E", centre); badge("F", camA); badge("G", scl(dhat, G.decOffset + 90));
+}
+
 function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam) {
   const ct = document.getElementById("top"), gt = ct.getContext("2d");
   gt.clearRect(0, 0, ct.width, ct.height);
