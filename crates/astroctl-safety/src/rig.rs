@@ -188,7 +188,26 @@ impl RigModel {
             let b_n = -head.a_to_b_mm * polar.n;
             let c_n = b_n + head.b_to_c_mm * perp_n;
             let theta = head.c_d_angle_degrees.to_radians();
-            let d_n = c_n + s_n * head.c_above_plate_mm * theta.cos() / theta.sin();
+            let chain_d_n = c_n + s_n * head.c_above_plate_mm * theta.cos() / theta.sin();
+            // The plumb line outranks the chain: the operator hung a line from A to the plate
+            // and measured how far north of the centre bolt it landed. D's northing in this
+            // frame (A at the origin) is that measurement negated. The chain stays as the
+            // drawing and as a cross-check on the tape, not as the cone's position.
+            let d_n = match head.a_north_of_plate_mm {
+                Some(a_n) => {
+                    let measured = -a_n;
+                    if (measured - chain_d_n).abs() > 30.0 {
+                        tracing::info!(
+                            plumb_mm = measured,
+                            chain_mm = chain_d_n,
+                            "D's northing: the plumb line and the head chain disagree — \
+                             the plumb line wins; the chain's joints are drawn simplified"
+                        );
+                    }
+                    measured
+                }
+                None => chain_d_n,
+            };
             // The chain also predicts the plate's depth below A; if it disagrees with the
             // measured mount_body_height by more than a sloppy tape, one of the two is wrong
             // and the operator should hear it rather than the cone silently splitting the

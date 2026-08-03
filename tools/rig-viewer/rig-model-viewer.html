@@ -125,6 +125,14 @@
     <small>the plate's position is DERIVED from the chain: with A→B = 160 it lands ~257 mm below A,
     agreeing with the day-one tape's 250 — the letters resolved the contradiction.</small>
   </div>
+  <div class="row">
+    <label for="plumb">plumb from A — lands this far NORTH of the plate's centre bolt</label>
+    <span class="val" id="plumbv">30</span>
+    <input type="range" id="plumb" min="-100" max="100" value="30" step="5">
+    <small>measured 2026-08-03: 3 cm north. When the box below is ticked this measurement PLACES
+    the tripod, exactly as it does in the service; the chain becomes a cross-check.</small>
+    <label class="toggle"><input type="checkbox" id="plumbon" checked> the plumb line overrides the chain</label>
+  </div>
   <div class="buttons">
     <button data-pose="0,0">home</button>
     <button data-pose="180,0">the refused RA pose</button>
@@ -251,7 +259,11 @@ function draw() {
   const J = add(A3v, scl(PERP, b2));                 // the joint / bearing centre
   BH = -(J[2] - bh);                                 // crossing → plate, via the chain
   HH = G.groundA;
-  AZN = J[1] + bh / Math.tan(th);                    // the main boss's foot: tripod centreline
+  const chainAZN = J[1] + bh / Math.tan(th);         // the main boss's foot per the chain
+  // The plumb line outranks the chain (mirrors rig.rs): the measurement is where A hangs
+  // relative to the plate's centre bolt, so D's northing in this A-centred frame is its negation.
+  AZN = plumbon.checked ? -(+plumb.value) : chainAZN;
+  plumbv.textContent = plumb.value;
   bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
   axoffv.textContent = ao;
   const { dhat, t, centre } = pose(b, d);
@@ -410,14 +422,17 @@ function draw() {
   lowend.textContent = `${(-Math.min(tubeA[2], tubeB[2])).toFixed(0)} mm below the axes`;
   clearance.textContent = hit ? "—" : `${Math.min(tube.room, cw.room).toFixed(0)} mm`;
   pen.textContent = hit ? `${hit.pen.toFixed(0)} mm into the ${hit.what}` : "none";
-  dnorth.textContent = `${AZN.toFixed(0)} mm — check with a plumb line and tape`;
+  dnorth.textContent = plumbon.checked
+    ? `${AZN.toFixed(0)} mm — plumb-measured (the chain alone would derive ${chainAZN.toFixed(0)})`
+    : `${AZN.toFixed(0)} mm — chain-derived; tick the plumb box to use the measurement`;
   const v = document.getElementById("verdict");
   v.textContent = hit ? `THE MODEL WOULD REFUSE THIS POSE — ${hit.what.toUpperCase()}` : "THE MODEL CALLS THIS POSE CLEAR";
   v.className = hit ? "hit" : "clear";
 }
 
-for (const id of ["bearing","decang","tuber","axoff","bossang","boss2len","bossh"]) document.getElementById(id).addEventListener("input", draw);
-modelon.addEventListener("change", draw); 
+for (const id of ["bearing","decang","tuber","axoff","bossang","boss2len","bossh","plumb"]) document.getElementById(id).addEventListener("input", draw);
+modelon.addEventListener("change", draw);
+plumbon.addEventListener("change", draw);
 function drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam, chain) {
   const cb = document.getElementById("behind"), gb = cb.getContext("2d");
   gb.clearRect(0, 0, cb.width, cb.height);

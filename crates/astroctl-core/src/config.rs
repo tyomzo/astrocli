@@ -884,6 +884,12 @@ pub struct HeadChain {
     /// through. Absent means not modelled, the usual rule.
     #[serde(default)]
     pub alt_knob: Option<AltKnob>,
+    /// The plumb-line measurement: how far *north* of the tripod plate's centre bolt the
+    /// RA∩DEC crossing (A) hangs, in millimetres. Negative means south of it. When present it
+    /// overrides the chain's derived D — a plumb line and a tape beat trigonometry over welded
+    /// castings every time (measured 2026-08-03: +30, where the chain derived roughly −20).
+    #[serde(default)]
+    pub a_north_of_plate_mm: Option<f64>,
 }
 
 /// The altitude-adjustment knob (H in the rig viewer), a mount-fixed obstacle.
@@ -902,6 +908,9 @@ impl HeadChain {
         c.range_f64("head.b_to_c_mm", self.b_to_c_mm, 0.0, 500.0);
         c.range_f64("head.c_above_plate_mm", self.c_above_plate_mm, 0.0, 1000.0);
         c.range_f64("head.c_d_angle_degrees", self.c_d_angle_degrees, 10.0, 90.0);
+        if let Some(a_n) = self.a_north_of_plate_mm {
+            c.range_f64("head.a_north_of_plate_mm", a_n, -500.0, 500.0);
+        }
         if let Some(knob) = self.alt_knob {
             c.range_f64("head.alt_knob.reach_mm", knob.reach_mm, 0.0, 500.0);
             c.range_f64("head.alt_knob.radius_mm", knob.radius_mm, 0.0, 200.0);

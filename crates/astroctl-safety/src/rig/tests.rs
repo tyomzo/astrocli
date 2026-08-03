@@ -454,6 +454,7 @@ fn the_alt_knob_is_metal_the_model_can_name() {
         c_above_plate_mm: 80.0,
         c_d_angle_degrees: 60.0,
         alt_knob: knob,
+        a_north_of_plate_mm: None,
     };
     let rig = |knob| {
         RigModel::new(
@@ -481,6 +482,51 @@ fn the_alt_knob_is_metal_the_model_can_name() {
     assert!(
         without.is_none_or(|hit| hit.what != Obstacle::AltKnob),
         "an unmeasured knob must not exist"
+    );
+}
+
+#[test]
+fn the_plumb_line_outranks_the_chain_for_where_the_tripod_stands() {
+    // `a_north_of_plate_mm` is a plumb line hung from A to the plate: positive means A hangs
+    // north of the centre bolt, i.e. the tripod stands *south* of the crossing. When present it
+    // must place the cone — the chain is only the drawing. The property is the lean test's,
+    // driven from the measurement instead: a cone standing poleward of A closes room in the
+    // under-pier passage, one standing away opens it, and the chain's own derivation sits
+    // wherever it sits between them.
+    let rig = |a_n: Option<f64>| {
+        RigModel::new(
+            Some(RigGeometry {
+                head: Some(HeadChain {
+                    a_to_b_mm: 160.0,
+                    b_to_c_mm: 80.0,
+                    c_above_plate_mm: 80.0,
+                    c_d_angle_degrees: 60.0,
+                    alt_knob: None,
+                    a_north_of_plate_mm: a_n,
+                }),
+                ..RIG
+            }),
+            VILNIUS,
+        )
+        .expect("geometry")
+    };
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    let poleward = rig(Some(-150.0))
+        .collides_with_dec_axis(pole, 180.0)
+        .expect("with the plate 150 mm north the fat test tube meets the cone under the pier");
+    let derived = rig(None)
+        .collides_with_dec_axis(pole, 180.0)
+        .expect("the chain-derived cone meets the fat test tube under the pier");
+    let away = rig(Some(150.0)).collides_with_dec_axis(pole, 180.0);
+    assert!(
+        poleward.penetration_mm > derived.penetration_mm,
+        "a plumb line placing the plate poleward must close room vs the chain ({} vs {} mm)",
+        poleward.penetration_mm,
+        derived.penetration_mm
+    );
+    assert!(
+        away.is_none_or(|hit| hit.penetration_mm < derived.penetration_mm),
+        "a plumb line placing the plate away from the pole must open room vs the chain"
     );
 }
 

@@ -156,6 +156,7 @@ fn main() {
                 reach_mm: 70.0,
                 radius_mm: 25.0,
             }),
+            a_north_of_plate_mm: Some(30.0),
         }),
         camera: Some(CameraGeometry {
             along_tube_mm: 140.0,
