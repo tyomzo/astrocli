@@ -53,14 +53,13 @@
             text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
   .cell span { font: 600 0.95rem ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   .note { color: var(--muted); font-size: 0.8rem; margin-top: 12px; max-width: 70ch; }
-  /* Large screens: row one is the three drawings side by side, row two the controls —
-     the canvases stay square-ish and the operator sees every projection at once. */
+  /* Large screens: two columns — the drawings on the left, the controls (sticky, so they
+     never scroll away while comparing poses) with the readout on the right. */
   @media (min-width: 1280px) {
-    body { max-width: 1720px; }
-    .views { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: start; }
-    .view { margin-top: 10px; }
-    .controls { grid-template-columns: repeat(3, 1fr); gap: 12px 24px; align-items: start; }
-    .controls .buttons, .controls > .toggle { grid-column: 1 / -1; }
+    body { max-width: 1460px; }
+    .main { display: grid; grid-template-columns: minmax(0, 1fr) 480px; gap: 16px; align-items: start; }
+    .aside { position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow-y: auto; }
+    .aside .controls, .aside .readout { margin-top: 10px; }
   }
 </style>
 
@@ -73,6 +72,7 @@
   <span id="verdict" class="clear">CLEAR</span>
 </header>
 
+<div class="main">
 <div class="views">
   <div class="view">
     <h2>Seen from the east side — north is to the right, sky is up</h2>
@@ -90,6 +90,7 @@
   </div>
 </div>
 
+<aside class="aside">
 <div class="controls">
   <div class="row">
     <label for="bearing">RA — turn the whole head around the tilted shaft</label>
@@ -164,6 +165,8 @@
 <p class="note" id="dims"></p>
 <p class="note">Compare against the metal at the <b>home</b> pose first. Then tell me the single
 most wrong thing — or photograph the mount from its east side and send it.</p>
+</aside>
+</div>
 
 <script>
 "use strict";
