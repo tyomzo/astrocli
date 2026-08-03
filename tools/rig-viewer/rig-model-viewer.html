@@ -1,0 +1,398 @@
+<title>AstroCtl — rig model viewer</title>
+<style>
+  :root {
+    --bg: #101216; --panel: #171a20; --edge: #262b34; --fg: #d5d9e0; --muted: #8b92a0;
+    --accent: #e0a24a; --clear: #6fbf8f; --hit: #e05d5d;
+    --steel: #9aa4b2; --tube: #7aa0c4; --cw: #b0a4cc; --cam: #c4b27a;
+    --model: #e0a24a; --ground: #2c313b; --label: #aeb6c2;
+  }
+  :root[data-theme="light"] {
+    --bg: #f2f1ee; --panel: #ffffff; --edge: #d8d6d0; --fg: #23262c; --muted: #6b7078;
+    --accent: #a86d1f; --clear: #2e7d4f; --hit: #bb3535;
+    --steel: #5a6472; --tube: #3d6a96; --cw: #6b549a; --cam: #8a7a3a;
+    --model: #a86d1f; --ground: #d8d5cd; --label: #4a5058;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f2f1ee; --panel: #ffffff; --edge: #d8d6d0; --fg: #23262c; --muted: #6b7078;
+      --accent: #a86d1f; --clear: #2e7d4f; --hit: #bb3535;
+      --steel: #5a6472; --tube: #3d6a96; --cw: #6b549a; --cam: #8a7a3a;
+      --model: #a86d1f; --ground: #d8d5cd; --label: #4a5058;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; padding: 12px; max-width: 860px; }
+  h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  .sub { color: var(--muted); font-size: 0.82rem; max-width: 66ch; margin-top: 2px; }
+  header { margin-bottom: 10px; }
+  #verdict { font: 600 0.85rem/1 ui-monospace, monospace; padding: 7px 12px; border-radius: 999px;
+             border: 1px solid var(--edge); letter-spacing: 0.03em; display: inline-block; margin-top: 8px; }
+  #verdict.clear { color: var(--clear); border-color: var(--clear); }
+  #verdict.hit { color: var(--hit); border-color: var(--hit); }
+  .view { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 8px; margin-top: 10px; }
+  .view h2 { font: 600 0.7rem/1 ui-monospace, monospace; color: var(--muted); margin: 0 0 6px 2px;
+             text-transform: uppercase; letter-spacing: 0.08em; }
+  canvas { width: 100%; height: auto; display: block; }
+  .controls { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px;
+              padding: 12px; margin-top: 10px; display: grid; gap: 12px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; }
+  .row label { font-size: 0.85rem; }
+  .row small { grid-column: 1 / -1; color: var(--muted); font-size: 0.75rem; margin-top: -2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .val { font: 600 0.9rem ui-monospace, monospace; min-width: 5ch; text-align: right;
+         font-variant-numeric: tabular-nums; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: 600 0.75rem ui-monospace, monospace; color: var(--fg); background: none;
+           border: 1px solid var(--edge); border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  button:hover, button:focus-visible { border-color: var(--accent); color: var(--accent); outline: none; }
+  .toggle { font-size: 0.82rem; display: flex; align-items: center; gap: 8px; }
+  .readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin-top: 10px; }
+  .cell { background: var(--panel); border: 1px solid var(--edge); border-radius: 8px; padding: 8px 10px; }
+  .cell b { display: block; font: 600 0.65rem ui-monospace, monospace; color: var(--muted);
+            text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 2px; }
+  .cell span { font: 600 0.95rem ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .note { color: var(--muted); font-size: 0.8rem; margin-top: 12px; max-width: 70ch; }
+</style>
+
+<header>
+  <h1>Rig model viewer</h1>
+  <p class="sub">A side drawing of your mount <em>as the collision software believes it to be</em>,
+  built from the eight numbers you measured. Blue tube, purple counterweight, grey tripod — the
+  translucent amber shapes are what the safety model actually checks. If the drawing doesn't look
+  like your mount, the model doesn't either: that difference is the bug.</p>
+  <span id="verdict" class="clear">CLEAR</span>
+</header>
+
+<div class="view">
+  <h2>Seen from the east side — north is to the right, sky is up</h2>
+  <canvas id="side" width="840" height="700"></canvas>
+</div>
+
+<div class="view">
+  <h2>Seen from straight above — the RA swing is visible here as rotation</h2>
+  <canvas id="top" width="840" height="560"></canvas>
+</div>
+
+<div class="controls">
+  <div class="row">
+    <label for="bearing">RA — turn the whole head around the tilted shaft</label>
+    <span class="val" id="bearingv">0°</span>
+    <input type="range" id="bearing" min="0" max="360" value="0" step="1">
+    <small>0° = home: counterweight hangs down. 180° = saddle side swung underneath.</small>
+  </div>
+  <div class="row">
+    <label for="decang">DEC — tip the tube about the dec shaft</label>
+    <span class="val" id="decangv">0°</span>
+    <input type="range" id="decang" min="-180" max="180" value="0" step="1">
+    <small>0° = home: tube looks at the celestial pole (the ★).</small>
+  </div>
+  <div class="row">
+    <label for="tuber">safety margin around the tube (capsule radius)</label>
+    <span class="val" id="tuberv">160</span>
+    <input type="range" id="tuber" min="60" max="250" value="160" step="5">
+    <small>the config runs 160 mm; your bare tube is 70. Watch the amber sleeve grow.</small>
+  </div>
+  <div class="row">
+    <label for="axoff">distance between the two crossing points (the ⊕ marks on the drawing)</label>
+    <span class="val" id="axoffv">60</span>
+    <input type="range" id="axoff" min="0" max="150" value="60" step="5">
+    <small>⊕ where RA meets DEC, and ⊕ where RA meets the vertical head axis — on your mount the
+    first sits ~60 mm further up the RA shaft. The mount, column and RA shaft stay put when you
+    drag this; only the DEC assembly (and everything riding it) slides along the shaft.</small>
+  </div>
+  <div class="row">
+    <label for="plateb">⊕₂ height above the top plate — fixed property of the head</label>
+    <span class="val" id="platebv">201</span>
+    <input type="range" id="plateb" min="120" max="320" value="201" step="1">
+    <small>marked on the drawing with the double arrow; it must not change when other sliders
+    move. 201 = your 250 mm (tape mark → plate) minus the 60 mm offset's vertical share.</small>
+  </div>
+  <div class="buttons">
+    <button data-pose="0,0">home</button>
+    <button data-pose="180,0">the refused RA pose</button>
+    <button data-pose="90,0">RA quarter turn</button>
+    <button data-pose="0,-90">tube tipped 90°</button>
+  </div>
+  <label class="toggle"><input type="checkbox" id="modelon" checked> show the safety model's shapes (amber)</label>
+  <label class="toggle"><input type="checkbox" id="camon" checked> draw the camera (not in the safety model yet)</label>
+</div>
+
+<div class="readout">
+  <div class="cell"><b>tube points at</b><span id="point">—</span></div>
+  <div class="cell"><b>tube's low end</b><span id="lowend">—</span></div>
+  <div class="cell"><b>room to the tripod</b><span id="clearance">—</span></div>
+  <div class="cell"><b>overlap</b><span id="pen">—</span></div>
+</div>
+
+<p class="note" id="dims"></p>
+<p class="note">Compare against the metal at the <b>home</b> pose first. Then tell me the single
+most wrong thing — or photograph the mount from its east side and send it.</p>
+
+<script>
+"use strict";
+// The eight measurements (dev-field-tls.yaml) + the proposed camera, display only.
+const G = { decOffset: 165, saddle: 230, tubeHalf: 250, bareTubeR: 70,
+            topR: 80, baseR: 630, axisOff: 60,
+            groundBelowA: 1051,  // ⊕₂ → ground, fixed to the mount+legs (1100 − 60·sin φ)
+            cwLen: 350, cwR: 75, camReach: 300, camR: 45, camAlong: 140 };
+let AZN = 0;             // northing of the azimuth column in the crossing-centred frame
+let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
+                         // plate and ground stay bolted to the mount, not to the crossing
+document.getElementById("dims").textContent =
+  "The numbers in play: saddle sits 165 mm out from the RA shaft, tube centreline another " +
+  "230 mm further; tube 500 mm long, 140 mm across; axes cross 1100 mm above the ground and " +
+  "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; counterweight " +
+  "shaft 350 mm with 75 mm weights; RA∩DEC crossing 60 mm up the shaft from the azimuth column.";
+
+const LAT = 54.687 * Math.PI / 180;
+const P = [0, Math.cos(LAT), Math.sin(LAT)];       // RA (polar) shaft direction, toward the pole
+const X = [0, -Math.sin(LAT), Math.cos(LAT)];
+const W = [-1, 0, 0];
+const add = (a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const scl = (a,k)=>[a[0]*k,a[1]*k,a[2]*k];
+const cross = (a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+
+function pose(bDeg, dDeg) {
+  const b = bDeg*Math.PI/180, d = dDeg*Math.PI/180;
+  const dhat = add(scl(X, Math.cos(b)), scl(W, Math.sin(b)));   // dec shaft, toward the saddle
+  const e = cross(P, dhat);
+  const t = add(scl(P, Math.cos(d)), scl(e, Math.sin(d)));      // where the tube looks
+  return { dhat, t, centre: scl(dhat, G.decOffset + G.saddle) };
+}
+function pointTest(p, r) {   // mirrors rig.rs::point_collides
+  if (p[2] - r <= -HH) return { pen: r - p[2] - HH, what: "ground" };
+  const rho = Math.hypot(p[0], p[1] - AZN), z = p[2];
+  const ax = G.topR, az = -BH, dx = G.baseR-ax, dz = -HH-az;
+  const t = Math.max(0, Math.min(1, ((rho-ax)*dx + (z-az)*dz) / (dx*dx + dz*dz)));
+  const dist = Math.hypot(rho-(ax+dx*t), z-(az+dz*t));
+  return dist < r ? { pen: r-dist, what: "tripod" } : { pen: dist-r, what: null };
+}
+function capsuleTest(a, b, r) {
+  let worst = { pen: -1, what: null }, room = Infinity;
+  for (let i = 0; i <= 64; i++) {
+    const v = pointTest(add(a, scl(add(b, scl(a,-1)), i/64)), r);
+    if (v.what) { if (v.pen > worst.pen) worst = v; } else room = Math.min(room, v.pen);
+  }
+  return { hit: worst.what ? worst : null, room };
+}
+
+const c = document.getElementById("side"), g = c.getContext("2d");
+const MM = 0.30, OX = 430, OY = 250;   // px per mm; the canvas is pinned to the MOUNT, not the
+let SHIFT = [0,0,0];                   // crossing: the RA∩head-axis point always draws at (OX,OY),
+                                       // so the tripod, column and RA shaft never move on screen —
+                                       // the offset slider slides the DEC assembly up the shaft.
+const px = v => [OX + (v[1]+SHIFT[1])*MM, OY - (v[2]+SHIFT[2])*MM];
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function line3(a, b, wmm, color, dash = [], alpha = 1, cap = "round") {
+  const A = px(a), B = px(b);
+  g.strokeStyle = color; g.lineCap = cap; g.globalAlpha = alpha;
+  g.setLineDash(dash); g.lineWidth = Math.max(1.5, wmm*MM);
+  g.beginPath(); g.moveTo(A[0], A[1]); g.lineTo(B[0], B[1]); g.stroke();
+  g.globalAlpha = 1; g.setLineDash([]);
+}
+function label(text, p3, dx, dy, anchor = "left") {
+  const A = px(p3), tx = A[0] + dx, ty = A[1] + dy;
+  g.strokeStyle = css("--edge"); g.lineWidth = 1; g.setLineDash([]);
+  g.beginPath(); g.moveTo(A[0], A[1]); g.lineTo(tx - (anchor === "left" ? 4 : -4), ty - 4); g.stroke();
+  g.fillStyle = css("--label"); g.font = "600 12px ui-monospace, monospace";
+  g.textAlign = anchor; g.fillText(text, tx, ty);
+}
+
+function draw() {
+  const b = +bearing.value, d = +decang.value, r = +tuber.value, ao = +axoff.value;
+  AZN = -ao * Math.cos(LAT);
+  SHIFT = scl(P, ao);   // pin the mount; the crossing (model origin) rides up the shaft
+  const A3 = scl(P, -ao);  // the RA∩head-axis point: every mount-fixed part anchors here
+  const pb = +plateb.value;              // ⊕₂ → top plate, a fixed property of the head casting
+  platebv.textContent = pb;
+  BH = pb + ao * Math.sin(LAT);          // crossing → plate, derived: changes with the offset…
+  HH = G.groundBelowA + ao * Math.sin(LAT); // …so plate and ground stay fixed to the mount
+  bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
+  axoffv.textContent = ao;
+  const { dhat, t, centre } = pose(b, d);
+  const tubeA = add(centre, scl(t, -G.tubeHalf)), tubeB = add(centre, scl(t, G.tubeHalf));
+  const cwEnd = scl(dhat, -G.cwLen);
+  const camA = add(centre, scl(t, G.camAlong)), camB = add(camA, scl(dhat, G.camReach));
+  const tube = capsuleTest(tubeA, tubeB, r), cw = capsuleTest([0,0,0], cwEnd, G.cwR);
+  const hit = [tube.hit, cw.hit].filter(Boolean).sort((x,y)=>y.pen-x.pen)[0] || null;
+
+  g.clearRect(0, 0, c.width, c.height);
+
+  // — the world: ground and sky markers —
+  const gy = OY + HH*MM;
+  g.fillStyle = css("--ground"); g.fillRect(0, gy, c.width, c.height - gy);
+  g.fillStyle = css("--muted"); g.font = "600 12px ui-monospace, monospace"; g.textAlign = "left";
+  g.fillText("ground", 10, gy + 16);
+  g.fillText("north →", c.width - 78, gy + 16);
+  g.fillText("↑ zenith", 10, 20);
+  // celestial pole star along the RA shaft
+  const star = px(add(scl(P, -(+axoff.value)), scl(P, 1150)));
+  g.fillStyle = css("--accent"); g.font = "16px system-ui"; g.textAlign = "center";
+  g.fillText("★", star[0], star[1]);
+  g.fillStyle = css("--muted"); g.font = "600 11px ui-monospace, monospace";
+  g.fillText("celestial pole", star[0], star[1] + 14);
+
+  // — the tripod: two side legs + the north leg, drawn as real legs (example azimuths) —
+  for (const az of [0, 120, 240]) {
+    const a = az*Math.PI/180, top = [G.topR*Math.sin(a), AZN + G.topR*Math.cos(a), -BH];
+    const foot = [G.baseR*Math.sin(a), AZN + G.baseR*Math.cos(a), -HH];
+    line3(top, foot, 30, css("--steel"), az === 240 ? [7,6] : [], az === 240 ? 0.5 : 0.9, "butt");
+  }
+  line3([0,AZN-G.topR,-BH], [0,AZN+G.topR,-BH], 16, css("--steel"), [], 1, "butt");
+  label("tripod top plate", [0, AZN + G.topR, -BH], 60, 26);
+  label("tripod leg", [0, AZN + G.baseR*0.62, -HH+320], 70, 10);
+
+  // — the mount azimuth axis: vertical, perpendicular to the top plate. This is the third
+  //   axis of the real mount (the polar-alignment rotation) and the line the model's tripod
+  //   cone is centred on. The model ASSUMES the RA∩DEC crossing sits exactly on it.
+  line3([0,AZN,120], [0,AZN,-HH], 4, css("--accent"), [3,6], 0.55, "butt");
+  label("vertical head axis ⊥ top plate", [0,AZN,90], 14, -6);
+
+  // — the two crossing points the offset slider talks about —
+  const mark = (p3, text, dx, dy, anchor) => {
+    const A = px(p3);
+    g.strokeStyle = css("--accent"); g.lineWidth = 2; g.setLineDash([]);
+    g.beginPath(); g.arc(A[0], A[1], 7, 0, 7); g.stroke();
+    g.beginPath(); g.moveTo(A[0]-7, A[1]); g.lineTo(A[0]+7, A[1]);
+    g.moveTo(A[0], A[1]-7); g.lineTo(A[0], A[1]+7); g.stroke();
+    label(text, p3, dx, dy, anchor);
+  };
+  const headCross = scl(P, -(+axoff.value));   // where the RA shaft meets the vertical head axis
+  mark([0,0,0], "RA meets DEC here", -120, -46, "right");
+  mark(headCross, "RA meets the head axis here", -130, 40, "right");
+
+  // — the fixed head height: ⊕₂ down to the top-plate plane, marked as a dimension —
+  {
+    const top = px(A3), bot = px([0, AZN, -BH]);
+    const dx = -170;
+    g.strokeStyle = css("--label"); g.lineWidth = 1; g.setLineDash([]);
+    g.beginPath();
+    g.moveTo(top[0]+dx, top[1]); g.lineTo(top[0]+dx, bot[1]);
+    g.moveTo(top[0]+dx-4, top[1]+7); g.lineTo(top[0]+dx, top[1]); g.lineTo(top[0]+dx+4, top[1]+7);
+    g.moveTo(top[0]+dx-4, bot[1]-7); g.lineTo(top[0]+dx, bot[1]); g.lineTo(top[0]+dx+4, bot[1]-7);
+    g.moveTo(top[0]+dx, top[1]); g.lineTo(top[0]-8, top[1]);
+    g.moveTo(top[0]+dx, bot[1]); g.lineTo(top[0]-8, bot[1]);
+    g.stroke();
+    g.fillStyle = css("--label"); g.font = "600 12px ui-monospace, monospace"; g.textAlign = "right";
+    g.fillText(pb + " mm fixed", top[0]+dx-6, (top[1]+bot[1])/2);
+  }
+
+  // — the mount head: pedestal up from the plate, then the tilted RA shaft —
+  line3([0,AZN,-BH], add(A3,[0,0,30]), 60, css("--steel"), [], 0.9, "butt");
+  line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
+  line3(add(A3,scl(P,300)), add(A3,scl(P,560)), 10, css("--steel"), [2,4], 0.7, "butt");
+  label("RA shaft — aims at the ★", add(A3, scl(P, 440)), -160, -14, "right");
+
+  // — the dec shaft and saddle stack, along d̂ —
+  line3([0,0,0], scl(dhat, G.decOffset), 44, css("--steel"), [], 1, "butt");
+  line3(scl(dhat, G.decOffset), centre, 18, css("--steel"), [], 0.9, "butt");
+  label("dec shaft + saddle", scl(dhat, G.decOffset*0.9), 90, -30);
+
+  // — the counterweight: shaft + two discs —
+  line3([0,0,0], cwEnd, 16, css("--cw"), [], 0.95, "butt");
+  for (const at of [0.72, 0.92]) {
+    const p = scl(dhat, -G.cwLen*at);
+    const across = scl(t, 1); // disc drawn as short thick bar ⊥ shaft
+    line3(add(p, scl(across, -20)), add(p, scl(across, 20)), 2*G.cwR, css("--cw"), [], 0.95, "butt");
+  }
+  label("counterweights", cwEnd, 26, 22);
+
+  // — the tube (bare size), with its front marked —
+  const hitCol = tube.hit ? css("--hit") : css("--tube");
+  line3(tubeA, tubeB, 2*G.bareTubeR, hitCol, [], 0.95, "butt");
+  const front = add(centre, scl(t, G.tubeHalf + 26));
+  g.fillStyle = css("--label"); g.font = "600 12px ui-monospace, monospace"; g.textAlign = "center";
+  const F = px(front); g.fillText("front", F[0], F[1]);
+  label("tube (OTA)", add(centre, scl(t, -G.tubeHalf*0.6)), -110, -16, "right");
+
+  // — the camera, hanging off the front along the dec-shaft direction —
+  if (camon.checked) {
+    line3(camA, camB, 2*G.camR, css("--cam"), [6,5], 0.9, "butt");
+    label("camera", camB, 20, -8);
+  }
+
+  // — the safety model overlay: cone + capsule sleeve, translucent amber —
+  if (modelon.checked) {
+    const A = px([0,AZN-G.topR,-BH]), B = px([0,AZN+G.topR,-BH]),
+          Cq = px([0,AZN+G.baseR,-HH]), D = px([0,AZN-G.baseR,-HH]);
+    g.fillStyle = css("--model"); g.globalAlpha = 0.13;
+    g.beginPath(); g.moveTo(A[0],A[1]); g.lineTo(B[0],B[1]); g.lineTo(Cq[0],Cq[1]); g.lineTo(D[0],D[1]);
+    g.closePath(); g.fill(); g.globalAlpha = 1;
+    line3(tubeA, tubeB, 2*r, hit && tube.hit ? css("--hit") : css("--model"), [], 0.22);
+    line3([0,0,0], cwEnd, 2*G.cwR, cw.hit ? css("--hit") : css("--model"), [], 0.22);
+    g.fillStyle = css("--model"); g.font = "600 11px ui-monospace, monospace"; g.textAlign = "left";
+    const M = px([0, AZN + G.baseR*0.8, -HH + 60]);
+    g.globalAlpha = 0.8; g.fillText("what the model checks", M[0]-40, M[1]); g.globalAlpha = 1;
+  }
+
+  // readouts
+  drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw);
+
+  const alt = Math.asin(t[2])*180/Math.PI, az = (Math.atan2(t[0],t[1])*180/Math.PI+360)%360;
+  point.textContent = `alt ${alt.toFixed(0)}°, az ${az.toFixed(0)}°`;
+  lowend.textContent = `${(-Math.min(tubeA[2], tubeB[2])).toFixed(0)} mm below the axes`;
+  clearance.textContent = hit ? "—" : `${Math.min(tube.room, cw.room).toFixed(0)} mm`;
+  pen.textContent = hit ? `${hit.pen.toFixed(0)} mm into the ${hit.what}` : "none";
+  const v = document.getElementById("verdict");
+  v.textContent = hit ? `THE MODEL WOULD REFUSE THIS POSE — ${hit.what.toUpperCase()}` : "THE MODEL CALLS THIS POSE CLEAR";
+  v.className = hit ? "hit" : "clear";
+}
+
+for (const id of ["bearing","decang","tuber","axoff","plateb"]) document.getElementById(id).addEventListener("input", draw);
+modelon.addEventListener("change", draw); camon.addEventListener("change", draw);
+function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw) {
+  const ct = document.getElementById("top"), gt = ct.getContext("2d");
+  gt.clearRect(0, 0, ct.width, ct.height);
+  const OX2 = ct.width/2, OY2 = ct.height/2;
+  // Pinned to the MOUNT like the side view: the column projects to the centre of this view.
+  const q = v => [OX2 + (v[0])*MM, OY2 - (v[1]+SHIFT[1])*MM];
+  const seg = (a,b,wmm,color,dash=[],alpha=1) => {
+    const A=q(a), B=q(b);
+    gt.strokeStyle=color; gt.lineCap="round"; gt.globalAlpha=alpha; gt.setLineDash(dash);
+    gt.lineWidth=Math.max(1.5, wmm*MM);
+    gt.beginPath(); gt.moveTo(A[0],A[1]); gt.lineTo(B[0],B[1]); gt.stroke();
+    gt.globalAlpha=1; gt.setLineDash([]);
+  };
+  // compass
+  gt.fillStyle = css("--muted"); gt.font = "600 12px ui-monospace, monospace"; gt.textAlign="left";
+  gt.fillText("north ↑", 10, 20); gt.fillText("east →", 10, 36);
+  // tripod: feet circle (dashed = the model's cone base), plate circle, three legs
+  const col = [0, AZN, 0];
+  for (const [rr, dash] of [[G.topR, []], [G.baseR, [6,6]]]) {
+    const C = q(col);
+    gt.strokeStyle = css(dash.length ? "--model" : "--steel"); gt.lineWidth = 2; gt.setLineDash(dash);
+    gt.globalAlpha = dash.length ? 0.6 : 1;
+    gt.beginPath(); gt.arc(C[0], C[1], rr*MM, 0, 7); gt.stroke();
+    gt.globalAlpha = 1; gt.setLineDash([]);
+  }
+  for (const az of [0, 120, 240]) {
+    const a = az*Math.PI/180;
+    seg([G.topR*Math.sin(a), AZN+G.topR*Math.cos(a), 0],
+        [G.baseR*Math.sin(a), AZN+G.baseR*Math.cos(a), 0], 30, css("--steel"), [], 0.55);
+  }
+  label2(gt, q, "tripod feet circle — the model's cone base", [G.baseR*0.7, AZN-G.baseR*0.72, 0], 12, 14);
+  // RA shaft: from the column toward the pole = due north in this view (mount-fixed)
+  seg([0, AZN, 0], [0, AZN+560, 0], 30, css("--steel"), [], 0.9);
+  label2(gt, q, "RA shaft (tilts up toward ★, due north)", [0, AZN+520, 0], 12, -8);
+  // the dec assembly, swinging with RA
+  seg([0,0,0], scl(dhat, G.decOffset+G.saddle), 24, css("--steel"), [], 0.9);
+  seg(tubeA, tubeB, 2*G.bareTubeR, tube.hit ? css("--hit") : css("--tube"), [], 0.95);
+  seg([0,0,0], cwEnd, 2*G.cwR*0.5, cw.hit ? css("--hit") : css("--cw"), [], 0.95);
+  if (camon.checked) seg(camA, camB, 2*G.camR, css("--cam"), [6,5], 0.9);
+  if (modelon.checked) seg(tubeA, tubeB, 2*r, css("--model"), [], 0.2);
+  label2(gt, q, "tube", add(centre, scl(t, G.tubeHalf*0.7)), 10, -10);
+}
+function label2(gt, q, text, p3, dx, dy) {
+  const A = q(p3);
+  gt.fillStyle = css("--label"); gt.font = "600 12px ui-monospace, monospace"; gt.textAlign = "left";
+  gt.fillText(text, A[0]+dx, A[1]+dy);
+}
+
+for (const btn of document.querySelectorAll("[data-pose]")) btn.addEventListener("click", () => {
+  const [b, d] = btn.dataset.pose.split(","); bearing.value = b; decang.value = d; draw();
+});
+new MutationObserver(draw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+draw();
+</script>
