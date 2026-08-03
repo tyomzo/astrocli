@@ -172,11 +172,41 @@ impl RigModel {
         // draft, 2026-08-03). The slope run is the crossing's height above the plate over the
         // tangent; a vertical boss (90°, the default) runs nowhere and this collapses to the
         // plumb line the model used before the operator measured the lean.
-        let above_plate = geometry.mount_body_height_mm - geometry.mount_axis_offset_mm * polar.u;
-        let theta = geometry.head_axis_angle_degrees.to_radians();
-        let slope_run = above_plate * theta.cos() / theta.sin();
-        let cone_axis_n =
-            -geometry.mount_axis_offset_mm * polar.n + polar.n.signum() * slope_run;
+        let cone_axis_n = if let Some(head) = geometry.head {
+            // The lettered chain (2026-08-03): B down the shaft from A, C down the second boss
+            // — perpendicular to the shaft in the meridian, toward the pole side — then D at
+            // the main boss's foot. The perpendicular descends: n toward the pole, u down.
+            let s_n = polar.n.signum();
+            let perp_n = s_n * polar.u.abs();
+            let b_n = -head.a_to_b_mm * polar.n;
+            let c_n = b_n + head.b_to_c_mm * perp_n;
+            let theta = head.c_d_angle_degrees.to_radians();
+            let d_n = c_n + s_n * head.c_above_plate_mm * theta.cos() / theta.sin();
+            // The chain also predicts the plate's depth below A; if it disagrees with the
+            // measured mount_body_height by more than a sloppy tape, one of the two is wrong
+            // and the operator should hear it rather than the cone silently splitting the
+            // difference.
+            let derived_plate = head.a_to_b_mm * polar.u
+                + head.b_to_c_mm * polar.n.abs()
+                + head.c_above_plate_mm;
+            if (derived_plate - geometry.mount_body_height_mm).abs() > 50.0 {
+                tracing::warn!(
+                    derived_plate_mm = derived_plate,
+                    measured_mm = geometry.mount_body_height_mm,
+                    "the head chain and mount_body_height_mm disagree about the plate — \
+                     re-measure one of them (the rig viewer shows both)"
+                );
+            }
+            d_n
+        } else {
+            // The single-boss approximation the chain superseded, kept for configs that have
+            // not measured the head joint by joint.
+            let above_plate =
+                geometry.mount_body_height_mm - geometry.mount_axis_offset_mm * polar.u;
+            let theta = geometry.head_axis_angle_degrees.to_radians();
+            -geometry.mount_axis_offset_mm * polar.n
+                + polar.n.signum() * above_plate * theta.cos() / theta.sin()
+        };
         Some(Self {
             geometry,
             polar,

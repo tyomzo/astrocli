@@ -24,6 +24,7 @@ const RIG: RigGeometry = RigGeometry {
     base_radius_mm: 650.0,
     mount_axis_offset_mm: 0.0,
     head_axis_angle_degrees: 90.0,
+    head: None,
     counterweight: None,
     camera: None,
 };

@@ -838,6 +838,12 @@ pub struct RigGeometry {
     /// itself: an unmeasured part gets no limit rather than a guessed one.
     #[serde(default)]
     pub counterweight: Option<CounterweightGeometry>,
+    /// The head casting, joint by lettered joint — the rig viewer's vocabulary (A = RA∩DEC,
+    /// B = RA∩second boss, C = the bearing joint, D = the main boss's foot, which is where the
+    /// tripod stands). When present this supersedes `mount_axis_offset_mm` and
+    /// `head_axis_angle_degrees`, which approximated the same casting with a single boss.
+    #[serde(default)]
+    pub head: Option<HeadChain>,
     /// The camera and focuser stack, absent until measured.
     ///
     /// On the operator's rig it rides the tube's sky end and points along the declination axis,
@@ -852,6 +858,36 @@ pub struct RigGeometry {
 /// The default head-boss angle: a vertical column, which is also the pre-2026-08-03 model.
 fn vertical_head_axis() -> f64 {
     90.0
+}
+
+/// The head casting as a chain of lettered joints (SDD §5.4.3; the rig viewer's letters).
+///
+/// A → B along the RA shaft; B → C down the second boss, perpendicular to the shaft in the
+/// meridian, toward the pole side; C sits a fixed height above the base plate; C → D down the
+/// main boss at its angle. D is the tripod's centreline. Measured on the operator's mount
+/// 2026-08-03, letter by letter against the drawing — and self-checking: the plate depth the
+/// chain derives (A→plate ≈ 257 mm on that mount) has to agree with the measured
+/// `mount_body_height_mm` (250), which it does to within the tape's honesty.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadChain {
+    /// A → B: from the RA∩DEC crossing down the RA shaft to where the second boss meets it.
+    pub a_to_b_mm: f64,
+    /// B → C: the second boss, perpendicular to the RA shaft, RA housing to the bearing joint.
+    pub b_to_c_mm: f64,
+    /// C's height above the base plate.
+    pub c_above_plate_mm: f64,
+    /// C → D: the main boss's angle from the base plane. 90 is a vertical column.
+    pub c_d_angle_degrees: f64,
+}
+
+impl HeadChain {
+    fn validate(&self, c: &mut Check) {
+        c.range_f64("head.a_to_b_mm", self.a_to_b_mm, -500.0, 500.0);
+        c.range_f64("head.b_to_c_mm", self.b_to_c_mm, 0.0, 500.0);
+        c.range_f64("head.c_above_plate_mm", self.c_above_plate_mm, 0.0, 1000.0);
+        c.range_f64("head.c_d_angle_degrees", self.c_d_angle_degrees, 10.0, 90.0);
+    }
 }
 
 /// The camera stack, as a capsule off the tube's side (SDD §5.4.3).
@@ -929,6 +965,9 @@ impl RigGeometry {
             10.0,
             90.0,
         );
+        if let Some(head) = self.head {
+            head.validate(c);
+        }
         if let Some(cam) = self.camera {
             // `along_tube_mm` is signed — a focuser can sit either side of the dec axis — but it
             // must sit *on* the tube, or the number describes a different rig than the tube does.

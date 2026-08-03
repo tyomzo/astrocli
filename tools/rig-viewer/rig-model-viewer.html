@@ -96,8 +96,8 @@
   </div>
   <div class="row">
     <label for="axoff">A → B — along the RA shaft, between the two crossings</label>
-    <span class="val" id="axoffv">60</span>
-    <input type="range" id="axoff" min="0" max="150" value="60" step="5">
+    <span class="val" id="axoffv">160</span>
+    <input type="range" id="axoff" min="0" max="250" value="160" step="5">
     <small>A is where RA meets DEC; B is where the second boss reaches the RA shaft. Dragging
     slides the DEC assembly along the shaft; the mount below B stays put.</small>
   </div>
@@ -117,9 +117,8 @@
     <label for="bossh">C above the plate — the joint's height over the base</label>
     <span class="val" id="bosshv">80</span>
     <input type="range" id="bossh" min="40" max="250" value="80" step="1">
-    <small>the plate's position is now DERIVED from this chain — and it lands ~175 mm below the
-    RA∩DEC crossing, while the day-one tape measure said 250. One of those is wrong; the drawing
-    shows the chain's answer.</small>
+    <small>the plate's position is DERIVED from the chain: with A→B = 160 it lands ~257 mm below A,
+    agreeing with the day-one tape's 250 — the letters resolved the contradiction.</small>
   </div>
   <div class="buttons">
     <button data-pose="0,0">home</button>
@@ -145,8 +144,8 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 "use strict";
 // The eight measurements (dev-field-tls.yaml) + the proposed camera, display only.
 const G = { decOffset: 165, saddle: 230, tubeHalf: 250, bareTubeR: 70,
-            topR: 80, baseR: 630, axisOff: 60,
-            groundBelowA: 1051,  // ⊕₂ → ground, fixed to the mount+legs (1100 − 60·sin φ)
+            topR: 80, baseR: 630, axisOff: 160,
+            groundA: 1100,       // A → ground, measured directly with the tape
             cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140,
             boss2: 80,  // second boss: RA axis → joint, perpendicular to RA, in the meridian
             bossH: 80 };// main boss: joint (bearing centre) → base plate, vertically
@@ -157,7 +156,7 @@ document.getElementById("dims").textContent =
   "The numbers in play: saddle sits 165 mm out from the RA shaft, tube centreline another " +
   "230 mm further; tube 500 mm long, 140 mm across; axes cross 1100 mm above the ground and " +
   "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; counterweight " +
-  "shaft 350 mm with 75 mm weights; RA∩DEC crossing 60 mm up the shaft from the azimuth column.";
+  "shaft 350 mm with 75 mm weights; head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0.";
 
 const LAT = 54.687 * Math.PI / 180;
 const P = [0, Math.cos(LAT), Math.sin(LAT)];       // RA (polar) shaft direction, toward the pole
@@ -229,7 +228,7 @@ function draw() {
   const A3v = scl(P, -(+axoff.value));
   const J = add(A3v, scl(PERP, b2));                 // the joint / bearing centre
   BH = -(J[2] - bh);                                 // crossing → plate, via the chain
-  HH = G.groundBelowA + ao * Math.sin(LAT);
+  HH = G.groundA;
   AZN = J[1] + bh / Math.tan(th);                    // the main boss's foot: tripod centreline
   bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
   axoffv.textContent = ao;
@@ -274,6 +273,7 @@ function draw() {
   label("tripod centreline (plumb from where the boss meets the plate)", [0,AZN,-BH+40], 14, -14);
 
   // — every joint gets a letter: the chain reads A→B→C→D down the head, E/F on the tube —
+  let chain = null;
   const joint = (letter, p3, text, dx, dy, anchor) => {
     const A = px(p3);
     g.strokeStyle = css("--accent"); g.lineWidth = 2; g.setLineDash([]);
@@ -307,12 +307,7 @@ function draw() {
     line3(A3, Jv, 40, css("--steel"), [], 0.95, "butt");            // second boss: B → C
     line3(Jv, [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // main boss: C → D
     label("main boss — " + bossang.value + "°", [0, (Jv[1]+AZN)/2, (Jv[2]-BH)/2], -140, 30, "right");
-    joint("A", [0,0,0], "RA meets DEC", -120, -46, "right");
-    joint("B", A3, "RA meets the second boss", 120, -30, "left");
-    joint("C", Jv, "the joint (bearing centre)", 30, 20, "left");
-    joint("D", [0, AZN, -BH], "boss foot — tripod centreline", 40, 26, "left");
-    joint("E", centre, "tube centre on the saddle", -120, -30, "right");
-    joint("F", camA, "focuser / camera root", 30, -14, "left");
+    chain = { C: Jv, D: [0, AZN, -BH] };
   }
   line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
   line3(add(A3,scl(P,300)), add(A3,scl(P,560)), 10, css("--steel"), [2,4], 0.7, "butt");
@@ -359,6 +354,15 @@ function draw() {
   }
 
   // readouts
+  // The letters go on last, above every stroke — an A buried under the RA housing is an A
+  // that does not exist (operator, 2026-08-03).
+  joint("A", [0,0,0], "RA meets DEC", -124, -46, "right");
+  joint("B", A3, "RA housing joins the second boss", 130, -28, "left");
+  joint("C", chain.C, "the joint (bearing centre)", 30, 22, "left");
+  joint("D", chain.D, "boss foot — tripod centreline", 44, 26, "left");
+  joint("E", centre, "tube centre on the saddle", -120, -32, "right");
+  joint("F", camA, "focuser / camera root", 30, -16, "left");
+
   drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam);
 
   const alt = Math.asin(t[2])*180/Math.PI, az = (Math.atan2(t[0],t[1])*180/Math.PI+360)%360;
