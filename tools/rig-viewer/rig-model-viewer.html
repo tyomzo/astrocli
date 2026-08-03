@@ -95,26 +95,31 @@
     not a swept ring baked into this number.</small>
   </div>
   <div class="row">
-    <label for="axoff">distance between the two crossing points (the ⊕ marks on the drawing)</label>
+    <label for="axoff">A → B — along the RA shaft, between the two crossings</label>
     <span class="val" id="axoffv">60</span>
     <input type="range" id="axoff" min="0" max="150" value="60" step="5">
-    <small>⊕ where RA meets DEC, and ⊕ where RA meets the vertical head axis — on your mount the
-    first sits ~60 mm further up the RA shaft. The mount, column and RA shaft stay put when you
-    drag this; only the DEC assembly (and everything riding it) slides along the shaft.</small>
+    <small>A is where RA meets DEC; B is where the second boss reaches the RA shaft. Dragging
+    slides the DEC assembly along the shaft; the mount below B stays put.</small>
   </div>
   <div class="row">
-    <label for="bossang">head boss angle — the casting the RA housing bolts to, from the base</label>
+    <label for="bossang">C → D angle — the main boss, from the base plane</label>
     <span class="val" id="bossangv">60°</span>
     <input type="range" id="bossang" min="30" max="90" value="60" step="1">
-    <small>90° would be a vertical column. Your head leans 60°, so the tripod stands where the
-    slope reaches the plate — watch it slide out from under the head as you lower this.</small>
+    <small>90° would be a vertical column. D — the boss foot and the tripod's centreline — slides
+    as you change this.</small>
   </div>
   <div class="row">
-    <label for="plateb">⊕₂ height above the top plate — fixed property of the head</label>
-    <span class="val" id="platebv">201</span>
-    <input type="range" id="plateb" min="120" max="320" value="201" step="1">
-    <small>marked on the drawing with the double arrow; it must not change when other sliders
-    move. 201 = your 250 mm (tape mark → plate) minus the 60 mm offset's vertical share.</small>
+    <label for="boss2len">B → C — the second boss, RA shaft down to the joint</label>
+    <span class="val" id="boss2lenv">80</span>
+    <input type="range" id="boss2len" min="30" max="160" value="80" step="1">
+  </div>
+  <div class="row">
+    <label for="bossh">C above the plate — the joint's height over the base</label>
+    <span class="val" id="bosshv">80</span>
+    <input type="range" id="bossh" min="40" max="250" value="80" step="1">
+    <small>the plate's position is now DERIVED from this chain — and it lands ~175 mm below the
+    RA∩DEC crossing, while the day-one tape measure said 250. One of those is wrong; the drawing
+    shows the chain's answer.</small>
   </div>
   <div class="buttons">
     <button data-pose="0,0">home</button>
@@ -142,7 +147,9 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 const G = { decOffset: 165, saddle: 230, tubeHalf: 250, bareTubeR: 70,
             topR: 80, baseR: 630, axisOff: 60,
             groundBelowA: 1051,  // ⊕₂ → ground, fixed to the mount+legs (1100 − 60·sin φ)
-            cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140 };
+            cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140,
+            boss2: 80,  // second boss: RA axis → joint, perpendicular to RA, in the meridian
+            bossH: 80 };// main boss: joint (bearing centre) → base plate, vertically
 let AZN = 0;             // northing of the azimuth column in the crossing-centred frame
 let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
                          // plate and ground stay bolted to the mount, not to the crossing
@@ -211,14 +218,19 @@ function draw() {
   const b = +bearing.value, d = +decang.value, r = +tuber.value, ao = +axoff.value;
   SHIFT = scl(P, ao);   // pin the mount; the crossing (model origin) rides up the shaft
   const A3 = scl(P, -ao);  // the RA∩head-axis point: every mount-fixed part anchors here
-  const pb = +plateb.value;              // ⊕₂ → top plate, a fixed property of the head casting
+  const b2 = +boss2len.value, bh = +bossh.value;
   const th = +bossang.value * Math.PI / 180;
-  platebv.textContent = pb; bossangv.textContent = bossang.value + "°";
-  BH = pb + ao * Math.sin(LAT);          // crossing → plate, derived: changes with the offset…
-  HH = G.groundBelowA + ao * Math.sin(LAT); // …so plate and ground stay fixed to the mount
-  // The tripod's centreline: down the boss slope from ⊕₂ to the plate, then plumb. The boss
-  // descends toward the pole side ("60 degrees other direction"), so the foot lands north of ⊕₂.
-  AZN = -ao * Math.cos(LAT) + pb / Math.tan(th);
+  boss2lenv.textContent = b2; bosshv.textContent = bh; bossangv.textContent = bossang.value + "°";
+  // The head chain, as the operator described the casting: from ⊕₂ the second boss drops
+  // perpendicular to the RA shaft (in the meridian, toward the pole side) to the joint; the
+  // main boss descends from the joint at its angle until the plate, whose position is DERIVED —
+  // the joint sits `bh` above it. Ground stays a direct measurement from the crossing.
+  const PERP = [0, Math.sin(LAT), -Math.cos(LAT)];   // ⊥ RA, downhill toward the pole side
+  const A3v = scl(P, -(+axoff.value));
+  const J = add(A3v, scl(PERP, b2));                 // the joint / bearing centre
+  BH = -(J[2] - bh);                                 // crossing → plate, via the chain
+  HH = G.groundBelowA + ao * Math.sin(LAT);
+  AZN = J[1] + bh / Math.tan(th);                    // the main boss's foot: tripod centreline
   bearingv.textContent = b + "°"; decangv.textContent = d + "°"; tuberv.textContent = r;
   axoffv.textContent = ao;
   const { dhat, t, centre } = pose(b, d);
@@ -261,23 +273,22 @@ function draw() {
   line3([0,AZN,-BH+60], [0,AZN,-HH], 4, css("--accent"), [3,6], 0.55, "butt");
   label("tripod centreline (plumb from where the boss meets the plate)", [0,AZN,-BH+40], 14, -14);
 
-  // — the two crossing points the offset slider talks about —
-  const mark = (p3, text, dx, dy, anchor) => {
+  // — every joint gets a letter: the chain reads A→B→C→D down the head, E/F on the tube —
+  const joint = (letter, p3, text, dx, dy, anchor) => {
     const A = px(p3);
     g.strokeStyle = css("--accent"); g.lineWidth = 2; g.setLineDash([]);
-    g.beginPath(); g.arc(A[0], A[1], 7, 0, 7); g.stroke();
-    g.beginPath(); g.moveTo(A[0]-7, A[1]); g.lineTo(A[0]+7, A[1]);
-    g.moveTo(A[0], A[1]-7); g.lineTo(A[0], A[1]+7); g.stroke();
-    label(text, p3, dx, dy, anchor);
+    g.fillStyle = css("--bg");
+    g.beginPath(); g.arc(A[0], A[1], 9, 0, 7); g.fill(); g.stroke();
+    g.fillStyle = css("--accent"); g.font = "700 11px ui-monospace, monospace"; g.textAlign = "center";
+    g.fillText(letter, A[0], A[1]+4);
+    label(letter + " — " + text, p3, dx, dy, anchor);
   };
-  const headCross = scl(P, -(+axoff.value));   // where the RA shaft meets the vertical head axis
-  mark([0,0,0], "RA meets DEC here", -120, -46, "right");
-  mark(headCross, "RA meets the head axis here", -130, 40, "right");
 
-  // — the fixed head height: ⊕₂ down to the top-plate plane, marked as a dimension —
+  // — the joint-to-plate height, marked as a dimension —
   {
-    const top = px(A3), bot = px([0, AZN, -BH]);
-    const dx = -170;
+    const Jv = add(scl(P, -(+axoff.value)), scl([0, Math.sin(LAT), -Math.cos(LAT)], +boss2len.value));
+    const top = px(Jv), bot = px([0, Jv[1], -BH]);
+    const dx = -190;
     g.strokeStyle = css("--label"); g.lineWidth = 1; g.setLineDash([]);
     g.beginPath();
     g.moveTo(top[0]+dx, top[1]); g.lineTo(top[0]+dx, bot[1]);
@@ -287,12 +298,22 @@ function draw() {
     g.moveTo(top[0]+dx, bot[1]); g.lineTo(top[0]-8, bot[1]);
     g.stroke();
     g.fillStyle = css("--label"); g.font = "600 12px ui-monospace, monospace"; g.textAlign = "right";
-    g.fillText(pb + " mm fixed", top[0]+dx-6, (top[1]+bot[1])/2);
+    g.fillText(bossh.value + " mm", top[0]+dx-6, (top[1]+bot[1])/2);
   }
 
   // — the mount head: pedestal up from the plate, then the tilted RA shaft —
-  line3(add(A3,[0,0,0]), [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // the boss strut
-  label("head boss — " + bossang.value + "° to the base", add(A3, [0, (AZN - (-(+axoff.value)*Math.cos(LAT)))/2, -(BH - (+axoff.value)*Math.sin(LAT))/2]), -150, 26, "right");
+  {
+    const Jv = add(A3, scl([0, Math.sin(LAT), -Math.cos(LAT)], +boss2len.value));
+    line3(A3, Jv, 40, css("--steel"), [], 0.95, "butt");            // second boss: B → C
+    line3(Jv, [0, AZN, -BH], 64, css("--steel"), [], 0.95, "butt"); // main boss: C → D
+    label("main boss — " + bossang.value + "°", [0, (Jv[1]+AZN)/2, (Jv[2]-BH)/2], -140, 30, "right");
+    joint("A", [0,0,0], "RA meets DEC", -120, -46, "right");
+    joint("B", A3, "RA meets the second boss", 120, -30, "left");
+    joint("C", Jv, "the joint (bearing centre)", 30, 20, "left");
+    joint("D", [0, AZN, -BH], "boss foot — tripod centreline", 40, 26, "left");
+    joint("E", centre, "tube centre on the saddle", -120, -30, "right");
+    joint("F", camA, "focuser / camera root", 30, -14, "left");
+  }
   line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
   line3(add(A3,scl(P,300)), add(A3,scl(P,560)), 10, css("--steel"), [2,4], 0.7, "butt");
   label("RA shaft — aims at the ★", add(A3, scl(P, 440)), -160, -14, "right");
@@ -350,7 +371,7 @@ function draw() {
   v.className = hit ? "hit" : "clear";
 }
 
-for (const id of ["bearing","decang","tuber","axoff","plateb","bossang"]) document.getElementById(id).addEventListener("input", draw);
+for (const id of ["bearing","decang","tuber","axoff","bossang","boss2len","bossh"]) document.getElementById(id).addEventListener("input", draw);
 modelon.addEventListener("change", draw); 
 function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam) {
   const ct = document.getElementById("top"), gt = ct.getContext("2d");
