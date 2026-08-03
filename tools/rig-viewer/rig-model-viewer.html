@@ -139,6 +139,7 @@
   <div class="cell"><b>tube's low end</b><span id="lowend">—</span></div>
   <div class="cell"><b>room to the tripod</b><span id="clearance">—</span></div>
   <div class="cell"><b>overlap</b><span id="pen">—</span></div>
+  <div class="cell"><b>D north of a plumb from A</b><span id="dnorth">—</span></div>
 </div>
 
 <p class="note" id="dims"></p>
@@ -409,6 +410,7 @@ function draw() {
   lowend.textContent = `${(-Math.min(tubeA[2], tubeB[2])).toFixed(0)} mm below the axes`;
   clearance.textContent = hit ? "—" : `${Math.min(tube.room, cw.room).toFixed(0)} mm`;
   pen.textContent = hit ? `${hit.pen.toFixed(0)} mm into the ${hit.what}` : "none";
+  dnorth.textContent = `${AZN.toFixed(0)} mm — check with a plumb line and tape`;
   const v = document.getElementById("verdict");
   v.textContent = hit ? `THE MODEL WOULD REFUSE THIS POSE — ${hit.what.toUpperCase()}` : "THE MODEL CALLS THIS POSE CLEAR";
   v.className = hit ? "hit" : "clear";
