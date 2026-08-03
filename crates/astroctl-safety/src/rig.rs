@@ -32,6 +32,13 @@
 //! *no* counterweight capsule, for the same reason `mount.geometry` itself ships absent: a guessed
 //! length would be a limit enforced against a number that came from no measurement — the objection
 //! that removed `park_position` in M3-T07.
+//!
+//! **The camera stack is a third capsule along `+d̂`**, rooted at the focuser's station on the
+//! optical axis — "parallel to the dec axis, in front of the mount", the operator's words, and
+//! the fact that retired the fat-tube approximation: sweeping the stack's reach into
+//! `tube_radius_mm` covered a full ring of orientations the camera occupies exactly one of, and
+//! the difference was a third of the RA turn refused at dec-home (E16's aftermath, 2026-08-02/03).
+//! Optional on the same no-guessed-limits terms as the counterweight.
 
 use astroctl_core::config::RigGeometry;
 use astroctl_core::types::PierSide;
@@ -291,9 +298,25 @@ impl RigModel {
                 })
                 .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
         });
+        // The camera stack: from the focuser's station on the optical axis, outward along the
+        // saddle direction — the "parallel to the dec axis, in front of the mount" the operator
+        // stated and the rig viewer confirmed by eye. A capsule of its own rather than a fatter
+        // tube, because a swept ring covers 360° of orientations this stack occupies exactly one
+        // of, and the difference was a third of the RA turn refused at dec-home.
+        let camera_hit = self.geometry.camera.and_then(|cam| {
+            let root = centre.add(tube.scale(cam.along_tube_mm));
+            (0..=SAMPLES)
+                .filter_map(|i| {
+                    #[expect(clippy::cast_precision_loss, reason = "i is bounded by SAMPLES = 64")]
+                    let along = cam.reach_mm * i as f64 / SAMPLES as f64;
+                    self.point_collides(root.add(dec_axis.scale(along)), cam.radius_mm)
+                })
+                .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
+        });
         tube_hit
             .into_iter()
             .chain(counterweight_hit)
+            .chain(camera_hit)
             .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
     }
 

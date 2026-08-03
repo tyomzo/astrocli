@@ -6,7 +6,7 @@
 //! properties that hold for *any* consistent rig — symmetry, monotonicity, which obstacle is
 //! reported, and that the pose (not just the pointing) is what decides.
 
-use astroctl_core::config::CounterweightGeometry;
+use astroctl_core::config::{CameraGeometry, CounterweightGeometry};
 
 use super::*;
 
@@ -24,6 +24,7 @@ const RIG: RigGeometry = RigGeometry {
     base_radius_mm: 650.0,
     mount_axis_offset_mm: 0.0,
     counterweight: None,
+    camera: None,
 };
 
 const VILNIUS: Site = Site {
@@ -306,6 +307,61 @@ fn at_the_pole_the_reported_axis_replaces_the_sweep() {
     assert!(
         long.collides_with_dec_axis(pole, 180.0).is_some(),
         "saddle down at the pole hangs this tube into the legs and must still be refused"
+    );
+}
+
+#[test]
+fn a_camera_is_never_safer_and_reaches_along_the_saddle_direction() {
+    // Two properties in one sweep. Adding the stack can only add refusals; and the stack points
+    // along +d̂ — the saddle side, "in front of the mount" — so at the pole with the saddle
+    // straight down it must reach *below* the tube and hit things a bare rig clears. The stub
+    // tube isolates it, the same trick the counterweight and ground tests use.
+    let stub = RigGeometry {
+        tube_half_length_mm: 50.0,
+        tube_radius_mm: 30.0,
+        saddle_offset_mm: 50.0,
+        ..RIG
+    };
+    let with_camera = |reach: f64| {
+        RigModel::new(
+            Some(RigGeometry {
+                camera: Some(CameraGeometry {
+                    along_tube_mm: 0.0,
+                    reach_mm: reach,
+                    radius_mm: 50.0,
+                }),
+                ..stub
+            }),
+            VILNIUS,
+        )
+        .expect("geometry")
+    };
+    let bare = RigModel::new(Some(stub), VILNIUS).expect("geometry");
+    let long = with_camera((RIG.head_height_mm + 100.0) / VILNIUS.latitude_degrees.to_radians().cos());
+
+    // Never safer, over the sweep the other parts use.
+    for step in 0..=36 {
+        let altitude = 90.0 - f64::from(step) * 5.0;
+        for azimuth in [0.0, 90.0, 180.0, 270.0] {
+            let p = pointing(altitude, azimuth);
+            if bare.collides(p, None).is_some() {
+                assert!(
+                    long.collides(p, None).is_some(),
+                    "adding a camera cleared a pose that collided at {altitude}°/{azimuth}°"
+                );
+            }
+        }
+    }
+    // Reaches along +d̂: saddle-down at the pole sends a long-enough stack into the ground,
+    // where the bare stub rig is clear.
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    assert!(
+        bare.collides_with_dec_axis(pole, 180.0).is_none(),
+        "the stub rig must clear saddle-down at the pole, or the camera is not what is tested"
+    );
+    assert!(
+        long.collides_with_dec_axis(pole, 180.0).is_some(),
+        "a stack reaching past head height was cleared pointing at the ground"
     );
 }
 

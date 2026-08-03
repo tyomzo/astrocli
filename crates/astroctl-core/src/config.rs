@@ -829,6 +829,29 @@ pub struct RigGeometry {
     /// itself: an unmeasured part gets no limit rather than a guessed one.
     #[serde(default)]
     pub counterweight: Option<CounterweightGeometry>,
+    /// The camera and focuser stack, absent until measured.
+    ///
+    /// On the operator's rig it rides the tube's sky end and points along the declination axis,
+    /// away from the mount ("parallel to the dec axis, in front") — so it is a capsule of its
+    /// own, not a fatter tube: inflating `tube_radius_mm` to cover it swept a full ring the
+    /// camera never occupies and refused a third of the RA turn at dec-home for nothing
+    /// (2026-08-02/03, the E16 aftermath and the rig-viewer session).
+    #[serde(default)]
+    pub camera: Option<CameraGeometry>,
+}
+
+/// The camera stack, as a capsule off the tube's side (SDD §5.4.3).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraGeometry {
+    /// Where the focuser sits along the tube, measured from the declination axis along the
+    /// optical axis — positive toward the front (sky) end.
+    pub along_tube_mm: f64,
+    /// How far the stack reaches from the optical axis, along the declination-axis direction,
+    /// away from the mount.
+    pub reach_mm: f64,
+    /// The stack's radius — half the camera body's widest span.
+    pub radius_mm: f64,
 }
 
 /// The counterweight assembly, modelled as a second capsule opposite the saddle (SDD §5.4.3).
@@ -884,6 +907,18 @@ impl RigGeometry {
         // column is expressible, though nobody has met one. Bounded to something a mount head
         // can physically be.
         c.range_f64("mount_axis_offset_mm", self.mount_axis_offset_mm, -500.0, 500.0);
+        if let Some(cam) = self.camera {
+            // `along_tube_mm` is signed — a focuser can sit either side of the dec axis — but it
+            // must sit *on* the tube, or the number describes a different rig than the tube does.
+            c.range_f64(
+                "camera.along_tube_mm",
+                cam.along_tube_mm,
+                -self.tube_half_length_mm,
+                self.tube_half_length_mm,
+            );
+            c.range_f64("camera.reach_mm", cam.reach_mm, 0.0, 100_000.0);
+            c.range_f64("camera.radius_mm", cam.radius_mm, 0.0, 100_000.0);
+        }
         if let Some(cw) = self.counterweight {
             c.range_f64("counterweight.length_mm", cw.length_mm, 0.0, 100_000.0);
             c.range_f64("counterweight.radius_mm", cw.radius_mm, 0.0, 100_000.0);

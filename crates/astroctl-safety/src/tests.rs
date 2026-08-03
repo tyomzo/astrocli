@@ -1223,6 +1223,7 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         base_radius_mm: 650.0,
         mount_axis_offset_mm: 0.0,
         counterweight: None,
+        camera: None,
     };
     // Right-ascension motion, deliberately: at the pole it changes the pose without changing
     // the pointing, so the verdict cannot depend on the sidereal time of the test run — a
@@ -1306,6 +1307,7 @@ async fn a_pose_inside_the_model_permits_the_motion_that_backs_out() {
         base_radius_mm: 2.0,
         mount_axis_offset_mm: 0.0,
         counterweight: None,
+        camera: None,
     };
     let at = Utc::now();
     let buried = target_at_altitude(VILNIUS, -30.0, at);
@@ -1370,6 +1372,7 @@ async fn a_slew_from_home_is_permitted_once_the_driver_reports_its_dec_axis() {
         base_radius_mm: 650.0,
         mount_axis_offset_mm: 0.0,
         counterweight: None,
+        camera: None,
     };
     // Pointing at the pole: the home pointing, and the singular one. Declination 90 is the pole
     // at any right ascension, which is the singularity in one sentence.

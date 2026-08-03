@@ -90,8 +90,9 @@
   <div class="row">
     <label for="tuber">safety margin around the tube (capsule radius)</label>
     <span class="val" id="tuberv">160</span>
-    <input type="range" id="tuber" min="60" max="250" value="160" step="5">
-    <small>the config runs 160 mm; your bare tube is 70. Watch the amber sleeve grow.</small>
+    <input type="range" id="tuber" min="60" max="250" value="80" step="5">
+    <small>the config runs 80 mm (bare tube 70 + margin) — the camera is its own capsule now,
+    not a swept ring baked into this number.</small>
   </div>
   <div class="row">
     <label for="axoff">distance between the two crossing points (the ⊕ marks on the drawing)</label>
@@ -115,7 +116,6 @@
     <button data-pose="0,-90">tube tipped 90°</button>
   </div>
   <label class="toggle"><input type="checkbox" id="modelon" checked> show the safety model's shapes (amber)</label>
-  <label class="toggle"><input type="checkbox" id="camon" checked> draw the camera (not in the safety model yet)</label>
 </div>
 
 <div class="readout">
@@ -135,7 +135,7 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 const G = { decOffset: 165, saddle: 230, tubeHalf: 250, bareTubeR: 70,
             topR: 80, baseR: 630, axisOff: 60,
             groundBelowA: 1051,  // ⊕₂ → ground, fixed to the mount+legs (1100 − 60·sin φ)
-            cwLen: 350, cwR: 75, camReach: 300, camR: 45, camAlong: 140 };
+            cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140 };
 let AZN = 0;             // northing of the azimuth column in the crossing-centred frame
 let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
                          // plate and ground stay bolted to the mount, not to the crossing
@@ -216,7 +216,8 @@ function draw() {
   const cwEnd = scl(dhat, -G.cwLen);
   const camA = add(centre, scl(t, G.camAlong)), camB = add(camA, scl(dhat, G.camReach));
   const tube = capsuleTest(tubeA, tubeB, r), cw = capsuleTest([0,0,0], cwEnd, G.cwR);
-  const hit = [tube.hit, cw.hit].filter(Boolean).sort((x,y)=>y.pen-x.pen)[0] || null;
+  const cam = capsuleTest(camA, camB, G.camR);
+  const hit = [tube.hit, cw.hit, cam.hit].filter(Boolean).sort((x,y)=>y.pen-x.pen)[0] || null;
 
   g.clearRect(0, 0, c.width, c.height);
 
@@ -308,10 +309,8 @@ function draw() {
   label("tube (OTA)", add(centre, scl(t, -G.tubeHalf*0.6)), -110, -16, "right");
 
   // — the camera, hanging off the front along the dec-shaft direction —
-  if (camon.checked) {
-    line3(camA, camB, 2*G.camR, css("--cam"), [6,5], 0.9, "butt");
-    label("camera", camB, 20, -8);
-  }
+  line3(camA, camB, 2*G.camR, cam.hit ? css("--hit") : css("--cam"), [], 0.95, "butt");
+  label("camera (in the model)", camB, 20, -8);
 
   // — the safety model overlay: cone + capsule sleeve, translucent amber —
   if (modelon.checked) {
@@ -328,7 +327,7 @@ function draw() {
   }
 
   // readouts
-  drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw);
+  drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam);
 
   const alt = Math.asin(t[2])*180/Math.PI, az = (Math.atan2(t[0],t[1])*180/Math.PI+360)%360;
   point.textContent = `alt ${alt.toFixed(0)}°, az ${az.toFixed(0)}°`;
@@ -341,8 +340,8 @@ function draw() {
 }
 
 for (const id of ["bearing","decang","tuber","axoff","plateb"]) document.getElementById(id).addEventListener("input", draw);
-modelon.addEventListener("change", draw); camon.addEventListener("change", draw);
-function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw) {
+modelon.addEventListener("change", draw); 
+function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam) {
   const ct = document.getElementById("top"), gt = ct.getContext("2d");
   gt.clearRect(0, 0, ct.width, ct.height);
   const OX2 = ct.width/2, OY2 = ct.height/2;
@@ -380,7 +379,7 @@ function drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw) 
   seg([0,0,0], scl(dhat, G.decOffset+G.saddle), 24, css("--steel"), [], 0.9);
   seg(tubeA, tubeB, 2*G.bareTubeR, tube.hit ? css("--hit") : css("--tube"), [], 0.95);
   seg([0,0,0], cwEnd, 2*G.cwR*0.5, cw.hit ? css("--hit") : css("--cw"), [], 0.95);
-  if (camon.checked) seg(camA, camB, 2*G.camR, css("--cam"), [6,5], 0.9);
+  seg(camA, camB, 2*G.camR, cam.hit ? css("--hit") : css("--cam"), [], 0.95);
   if (modelon.checked) seg(tubeA, tubeB, 2*r, css("--model"), [], 0.2);
   label2(gt, q, "tube", add(centre, scl(t, G.tubeHalf*0.7)), 10, -10);
 }
