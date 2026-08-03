@@ -171,10 +171,13 @@ most wrong thing — or photograph the mount from its east side and send it.</p>
 <script>
 "use strict";
 // The eight measurements (dev-field-tls.yaml) + the proposed camera, display only.
-const G = { decOffset: 165, saddle: 160, tubeHalf: 250, bareTubeR: 70,
+const G = { decOffset: 70, saddle: 160, tubeHalf: 250, bareTubeR: 70,
+            // A→G re-measured 2026-08-03: 160 to the saddle tip (was modelled 255) — so the
+            // dec shaft is 70 to the joint, then the same 90 stack + 70 radius to the tube.
             topR: 80, baseR: 630, axisOff: 160,
             groundA: 1100,       // A → ground, measured directly with the tape
-            cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140,
+            cwLen: 180, cwR: 75, // I — shaft tip: G→I taped 340, so 340 − 160 = 180 from A
+            camReach: 300, camR: 50, camAlong: 140,
             boss2: 80,  // second boss: RA axis → joint, perpendicular to RA, in the meridian
             bossH: 80,  // main boss: joint (bearing centre) → base plate, vertically
             knobReach: 70, knobR: 25 }; // H — enforced obstacle; it has drawn blood already
@@ -183,10 +186,11 @@ let KNOB = null;         // H's segment [from, to], set in draw(); part of the v
 let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
                          // plate and ground stay bolted to the mount, not to the crossing
 document.getElementById("dims").textContent =
-  "The numbers in play: saddle sits 165 mm out from the RA shaft, tube centreline another " +
-  "160 mm further (the tube lies straight on the saddle: 90 stack + 70 radius); tube 500 mm long, 140 mm across; axes cross 1100 mm above the ground and " +
-  "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; counterweight " +
-  "shaft 350 mm with 75 mm weights; head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0.";
+  "The numbers in play: A\u2192G (saddle tip) 160, tube centreline at 230 (the tube lies straight " +
+  "on the saddle: 160 + 70 radius); G\u2192I (counterweight shaft tip) 340, so I is 180 from A; " +
+  "tube 500 mm long, 140 mm across; weights 75 mm; axes cross 1100 mm above the ground and " +
+  "250 mm above the tripod's top plate; plate 80 mm to a leg, feet 630 mm out; " +
+  "head chain A\u2192B 160, B\u2192C 80, C 80 over the plate at 60\u00b0; plumb from A: 30 mm north of the bolt.";
 
 const LAT = 54.687 * Math.PI / 180;
 const P = [0, Math.cos(LAT), Math.sin(LAT)];       // RA (polar) shaft direction, toward the pole
@@ -427,6 +431,7 @@ function draw() {
   joint("G", scl(dhat, G.decOffset + 90), "tip of the saddle (clamp surface)", -130, 26, "right");
   joint("H", chain.H, "alt knob — 70 mm off the boss", -120, 34, "right");
   joint("F", camA, "focuser / camera root", 30, -16, "left");
+  joint("I", cwEnd, "tip of the counterweight shaft (G→I 340)", -30, 40, "right");
 
   drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam, chain);
   drawTop(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, cw, cam);
@@ -499,6 +504,7 @@ function drawBehind(dhat, t, centre, tubeA, tubeB, cwEnd, camA, camB, r, tube, c
   };
   badge("A", [0,0,0]); badge("B", A3v); badge("C", chain.C); badge("D", chain.D);
   badge("E", centre); badge("F", camA); badge("G", scl(dhat, G.decOffset + 90));
+  badge("I", cwEnd);
   if (chain.H) badge("H", chain.H);
 }
 

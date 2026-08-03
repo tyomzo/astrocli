@@ -137,7 +137,7 @@ fn main() {
     // surface) + 140 (saddle surface to tube centreline); base "630" tested under both readings
     // because the raw foot-to-foot figure was not recorded.
     let measured = RigGeometry {
-        dec_axis_offset_mm: 165.0,
+        dec_axis_offset_mm: 70.0,
         tube_half_length_mm: 250.0,
         tube_radius_mm: 70.0,
         saddle_offset_mm: 160.0,
@@ -164,7 +164,7 @@ fn main() {
             radius_mm: 50.0,
         }),
         counterweight: Some(CounterweightGeometry {
-            length_mm: 350.0,
+            length_mm: 180.0,
             radius_mm: 75.0,
         }),
     };
