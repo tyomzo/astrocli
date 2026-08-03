@@ -468,6 +468,7 @@ fn collision_violation(hit: Collision) -> DeviceError {
     let what = match hit.what {
         Obstacle::Tripod => "the tripod legs",
         Obstacle::Ground => "the ground",
+        Obstacle::AltKnob => "the altitude knob",
     };
     DeviceError::LimitViolation {
         limit: Limit::Collision,
@@ -889,6 +890,7 @@ async fn check_limits(shared: &Arc<Shared>, last_hour_angle: &mut Option<f64>) {
                 let what = match hit.what {
                     Obstacle::Tripod => "the tripod legs",
                     Obstacle::Ground => "the ground",
+                    Obstacle::AltKnob => "the altitude knob",
                 };
                 (
                     Limit::Collision,

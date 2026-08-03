@@ -879,6 +879,21 @@ pub struct HeadChain {
     pub c_above_plate_mm: f64,
     /// C → D: the main boss's angle from the base plane. 90 is a vertical column.
     pub c_d_angle_degrees: f64,
+    /// H — the altitude knob: sticks out of the middle of the C→D boss, perpendicular to it,
+    /// on the pole side, straight into the under-pier passage the tube and counterweight swing
+    /// through. Absent means not modelled, the usual rule.
+    #[serde(default)]
+    pub alt_knob: Option<AltKnob>,
+}
+
+/// The altitude-adjustment knob (H in the rig viewer), a mount-fixed obstacle.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AltKnob {
+    /// How far it protrudes from the boss's centreline.
+    pub reach_mm: f64,
+    /// The knob's radius.
+    pub radius_mm: f64,
 }
 
 impl HeadChain {
@@ -887,6 +902,10 @@ impl HeadChain {
         c.range_f64("head.b_to_c_mm", self.b_to_c_mm, 0.0, 500.0);
         c.range_f64("head.c_above_plate_mm", self.c_above_plate_mm, 0.0, 1000.0);
         c.range_f64("head.c_d_angle_degrees", self.c_d_angle_degrees, 10.0, 90.0);
+        if let Some(knob) = self.alt_knob {
+            c.range_f64("head.alt_knob.reach_mm", knob.reach_mm, 0.0, 500.0);
+            c.range_f64("head.alt_knob.radius_mm", knob.radius_mm, 0.0, 200.0);
+        }
     }
 }
 

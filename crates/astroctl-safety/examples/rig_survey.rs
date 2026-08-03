@@ -6,7 +6,7 @@
 //!
 //! Run: `cargo run -p astroctl-safety --example rig_survey`
 
-use astroctl_core::config::{CameraGeometry, CounterweightGeometry, HeadChain, RigGeometry};
+use astroctl_core::config::{AltKnob, CameraGeometry, CounterweightGeometry, HeadChain, RigGeometry};
 use astroctl_core::types::PierSide;
 use astroctl_safety::rig::{Horizontal, RigModel};
 use astroctl_safety::Site;
@@ -152,6 +152,10 @@ fn main() {
             b_to_c_mm: 80.0,
             c_above_plate_mm: 80.0,
             c_d_angle_degrees: 60.0,
+            alt_knob: Some(AltKnob {
+                reach_mm: 70.0,
+                radius_mm: 25.0,
+            }),
         }),
         camera: Some(CameraGeometry {
             along_tube_mm: 140.0,

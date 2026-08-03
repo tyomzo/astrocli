@@ -6,7 +6,7 @@
 //! properties that hold for *any* consistent rig — symmetry, monotonicity, which obstacle is
 //! reported, and that the pose (not just the pointing) is what decides.
 
-use astroctl_core::config::{CameraGeometry, CounterweightGeometry};
+use astroctl_core::config::{AltKnob, CameraGeometry, CounterweightGeometry, HeadChain};
 
 use super::*;
 
@@ -440,6 +440,47 @@ fn a_leaning_head_boss_carries_the_tripod_out_from_under_the_crossing() {
         "the poleward lean ({} mm) did not close room vs plumb ({} mm)",
         leaning.penetration_mm,
         plumb.penetration_mm
+    );
+}
+
+#[test]
+fn the_alt_knob_is_metal_the_model_can_name() {
+    // H sticks out of the boss toward the under-pier passage. With an absurd reach it must be
+    // the part a passing tube meets — named as itself, not folded into the cone — and absent it
+    // must change nothing, the usual unmeasured-part rule.
+    let chain = |knob: Option<AltKnob>| HeadChain {
+        a_to_b_mm: 160.0,
+        b_to_c_mm: 80.0,
+        c_above_plate_mm: 80.0,
+        c_d_angle_degrees: 60.0,
+        alt_knob: knob,
+    };
+    let rig = |knob| {
+        RigModel::new(
+            Some(RigGeometry {
+                dec_axis_offset_mm: 165.0,
+                saddle_offset_mm: 160.0,
+                tube_half_length_mm: 250.0,
+                tube_radius_mm: 80.0,
+                head: Some(chain(knob)),
+                ..RIG
+            }),
+            VILNIUS,
+        )
+        .expect("geometry")
+    };
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    let with_knob = rig(Some(AltKnob {
+        reach_mm: 500.0,
+        radius_mm: 50.0,
+    }))
+    .collides_with_dec_axis(pole, 180.0)
+    .expect("a half-metre knob reaches the tube's path under the pier");
+    assert_eq!(with_knob.what, Obstacle::AltKnob, "the knob must be named");
+    let without = rig(None).collides_with_dec_axis(pole, 180.0);
+    assert!(
+        without.is_none_or(|hit| hit.what != Obstacle::AltKnob),
+        "an unmeasured knob must not exist"
     );
 }
 

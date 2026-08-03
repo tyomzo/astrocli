@@ -118,6 +118,9 @@ pub struct RigModel {
     /// The offset is along the polar axis, which has no east component, so one number places
     /// the column.
     cone_axis_n: f64,
+    /// The altitude knob (H): a mount-fixed capsule from the C→D boss's midpoint, poleward,
+    /// with its radius. `None` when the head chain or the knob is unmeasured.
+    knob: Option<(Vec3, Vec3, f64)>,
 }
 
 /// The direction at hour angle +90°, declination 0: setting due west, at every latitude.
@@ -144,6 +147,9 @@ pub enum Obstacle {
     Tripod,
     /// The ground.
     Ground,
+    /// The altitude-adjustment knob — H in the rig viewer, sticking out of the head's main
+    /// boss into the under-pier passage.
+    AltKnob,
 }
 
 impl RigModel {
@@ -172,6 +178,7 @@ impl RigModel {
         // draft, 2026-08-03). The slope run is the crossing's height above the plate over the
         // tangent; a vertical boss (90°, the default) runs nowhere and this collapses to the
         // plumb line the model used before the operator measured the lean.
+        let mut knob = None;
         let cone_axis_n = if let Some(head) = geometry.head {
             // The lettered chain (2026-08-03): B down the shaft from A, C down the second boss
             // — perpendicular to the shaft in the meridian, toward the pole side — then D at
@@ -197,6 +204,22 @@ impl RigModel {
                      re-measure one of them (the rig viewer shows both)"
                 );
             }
+            // The altitude knob hangs off the middle of the C→D boss, perpendicular to it,
+            // toward the pole — a mount-fixed capsule computed once, here, in this frame.
+            if let Some(k) = head.alt_knob {
+                let b_u = -head.a_to_b_mm * polar.u;
+                let c = Vec3::new(0.0, c_n, b_u - head.b_to_c_mm * polar.n.abs());
+                let d = Vec3::new(0.0, d_n, c.u - head.c_above_plate_mm);
+                let mid = c.add(d).scale(0.5);
+                let boss = d.add(c.scale(-1.0));
+                let len = boss.n.hypot(boss.u).max(1e-9);
+                // Perpendicular to the boss in the meridian plane, on the pole side.
+                let mut perp = Vec3::new(0.0, -boss.u / len, boss.n / len);
+                if perp.n * s_n < 0.0 {
+                    perp = perp.scale(-1.0);
+                }
+                knob = Some((mid, mid.add(perp.scale(k.reach_mm)), k.radius_mm));
+            }
             d_n
         } else {
             // The single-boss approximation the chain superseded, kept for configs that have
@@ -212,6 +235,7 @@ impl RigModel {
             polar,
             equator,
             cone_axis_n,
+            knob,
         })
     }
 
@@ -413,12 +437,41 @@ impl RigModel {
         };
         let (cx, cz) = (dx.mul_add(t, ax), dz.mul_add(t, az));
         let distance = (px - cx).hypot(pz - cz);
-        (distance < r).then_some(Collision {
+        let cone_hit = (distance < r).then_some(Collision {
             depth_mm: depth,
             penetration_mm: r - distance,
             what: Obstacle::Tripod,
-        })
+        });
+        // The altitude knob (H): a true 3-D capsule, unlike the rotationally symmetric cone —
+        // it lives in the meridian plane and only poses that genuinely pass it can touch it.
+        let knob_hit = self.knob.and_then(|(k1, k2, kr)| {
+            let d = point_to_segment(p, k1, k2);
+            (d < r + kr).then_some(Collision {
+                depth_mm: depth,
+                penetration_mm: r + kr - d,
+                what: Obstacle::AltKnob,
+            })
+        });
+        cone_hit
+            .into_iter()
+            .chain(knob_hit)
+            .max_by(|a, b| a.penetration_mm.total_cmp(&b.penetration_mm))
     }
+}
+
+/// Distance from a point to a segment, in three dimensions.
+fn point_to_segment(p: Vec3, a: Vec3, b: Vec3) -> f64 {
+    let ab = b.add(a.scale(-1.0));
+    let len_sq = ab.e.mul_add(ab.e, ab.n.mul_add(ab.n, ab.u * ab.u));
+    let t = if len_sq > f64::EPSILON {
+        let ap = p.add(a.scale(-1.0));
+        ((ap.e * ab.e + ap.n * ab.n + ap.u * ab.u) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let c = a.add(ab.scale(t));
+    let d = p.add(c.scale(-1.0));
+    d.norm()
 }
 
 /// A pointing direction as the rest of the safety layer produces it.

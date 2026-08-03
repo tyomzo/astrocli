@@ -153,8 +153,10 @@ const G = { decOffset: 165, saddle: 160, tubeHalf: 250, bareTubeR: 70,
             groundA: 1100,       // A → ground, measured directly with the tape
             cwLen: 350, cwR: 75, camReach: 300, camR: 50, camAlong: 140,
             boss2: 80,  // second boss: RA axis → joint, perpendicular to RA, in the meridian
-            bossH: 80 };// main boss: joint (bearing centre) → base plate, vertically
+            bossH: 80,  // main boss: joint (bearing centre) → base plate, vertically
+            knobReach: 70, knobR: 25 }; // H — enforced obstacle; it has drawn blood already
 let AZN = 0;             // northing of the azimuth column in the crossing-centred frame
+let KNOB = null;         // H's segment [from, to], set in draw(); part of the verdict
 let BH = 250, HH = 1100; // plate/ground depth below the CROSSING — recomputed per slider so the
                          // plate and ground stay bolted to the mount, not to the crossing
 document.getElementById("dims").textContent =
@@ -178,13 +180,27 @@ function pose(bDeg, dDeg) {
   const t = add(scl(P, Math.cos(d)), scl(e, Math.sin(d)));      // where the tube looks
   return { dhat, t, centre: scl(dhat, G.decOffset + G.saddle) };
 }
+function segDist(p, a, b) {
+  const ab = add(b, scl(a,-1));
+  const L = ab[0]*ab[0]+ab[1]*ab[1]+ab[2]*ab[2] || 1e-9;
+  const ap = add(p, scl(a,-1));
+  const t = Math.max(0, Math.min(1, (ap[0]*ab[0]+ap[1]*ab[1]+ap[2]*ab[2]) / L));
+  const c = add(a, scl(ab, t));
+  return Math.hypot(p[0]-c[0], p[1]-c[1], p[2]-c[2]);
+}
 function pointTest(p, r) {   // mirrors rig.rs::point_collides
   if (p[2] - r <= -HH) return { pen: r - p[2] - HH, what: "ground" };
   const rho = Math.hypot(p[0], p[1] - AZN), z = p[2];
   const ax = G.topR, az = -BH, dx = G.baseR-ax, dz = -HH-az;
   const t = Math.max(0, Math.min(1, ((rho-ax)*dx + (z-az)*dz) / (dx*dx + dz*dz)));
   const dist = Math.hypot(rho-(ax+dx*t), z-(az+dz*t));
-  return dist < r ? { pen: r-dist, what: "tripod" } : { pen: dist-r, what: null };
+  const cone = dist < r ? { pen: r-dist, what: "tripod" } : { pen: dist-r, what: null };
+  if (KNOB) {
+    const kd = segDist(p, KNOB[0], KNOB[1]);
+    if (kd < r + G.knobR && (!cone.what || r + G.knobR - kd > cone.pen))
+      return { pen: r + G.knobR - kd, what: "alt knob" };
+  }
+  return cone;
 }
 function capsuleTest(a, b, r) {
   let worst = { pen: -1, what: null }, room = Infinity;
@@ -321,8 +337,9 @@ function draw() {
     const bl = Math.hypot(bd[1], bd[2]) || 1;
     let perp = [0, -bd[2]/bl, bd[1]/bl];                 // ⊥ in the meridian plane
     if (perp[1] < 0) perp = scl(perp, -1);               // the north side, operator-confirmed
-    const knob = add(mid, scl(perp, 70));
-    line3(mid, knob, 24, css("--steel"), [], 0.95, "butt");
+    const knob = add(mid, scl(perp, G.knobReach));
+    KNOB = [mid, knob];
+    line3(mid, knob, 2*G.knobR, css("--steel"), [], 0.95, "butt");
     chain = { C: Jv, D: D3, H: knob };
   }
   line3(add(A3,scl(P,-140)), add(A3,scl(P,300)), 54, css("--steel"), [], 1, "butt");  // RA housing
