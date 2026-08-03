@@ -22,6 +22,7 @@ const RIG: RigGeometry = RigGeometry {
     mount_body_height_mm: 250.0,
     top_radius_mm: 80.0,
     base_radius_mm: 650.0,
+    mount_axis_offset_mm: 0.0,
     counterweight: None,
 };
 
@@ -305,6 +306,41 @@ fn at_the_pole_the_reported_axis_replaces_the_sweep() {
     assert!(
         long.collides_with_dec_axis(pole, 180.0).is_some(),
         "saddle down at the pole hangs this tube into the legs and must still be refused"
+    );
+}
+
+#[test]
+fn the_tripod_stands_on_the_azimuth_axis_and_not_on_the_crossing() {
+    // The mount's third axis: on a real GEM head the RA∩DEC crossing hangs forward of the
+    // vertical column the tripod is centred on (~60 mm on the operator's, 2026-08-03). The
+    // property: growing the offset slides the cone away under the crossing, so the pose whose
+    // tube hangs on the crossing's own side of the column must gain room — its penetration
+    // shrinks — while offset 0 must reproduce the old model exactly (every other test in this
+    // file runs at 0 and is that assertion).
+    let at = |offset: f64| {
+        RigModel::new(
+            Some(RigGeometry {
+                tube_half_length_mm: 1_000.0,
+                mount_axis_offset_mm: offset,
+                ..RIG
+            }),
+            VILNIUS,
+        )
+        .expect("geometry")
+    };
+    let pole = pointing(VILNIUS.latitude_degrees, 0.0);
+    // Saddle straight down at the pole pointing: the under-the-pier pose, tube low end on the
+    // north side of the column.
+    let centred = at(0.0)
+        .collides_with_dec_axis(pole, 180.0)
+        .expect("this rig collides under the pier with the column on the crossing");
+    let offset = at(120.0)
+        .collides_with_dec_axis(pole, 180.0)
+        .map_or(0.0, |hit| hit.penetration_mm);
+    assert!(
+        offset < centred.penetration_mm,
+        "moving the column back {offset} vs {} did not open room on the crossing's side",
+        centred.penetration_mm
     );
 }
 

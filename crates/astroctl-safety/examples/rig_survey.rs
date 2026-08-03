@@ -145,6 +145,7 @@ fn main() {
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,
         base_radius_mm: 630.0,
+        mount_axis_offset_mm: 60.0,
         counterweight: Some(CounterweightGeometry {
             length_mm: 350.0,
             radius_mm: 75.0,

@@ -88,10 +88,6 @@ impl Vec3 {
         Self::new(self.e + o.e, self.n + o.n, self.u + o.u)
     }
 
-    /// Distance from the vertical line through the origin — the tripod's axis of symmetry.
-    fn horizontal_radius(self) -> f64 {
-        self.e.hypot(self.n)
-    }
 }
 
 /// The rig and its obstacle, resolved from config and the site.
@@ -107,6 +103,14 @@ pub struct RigModel {
     /// axis bearing lives. `(0, −sin φ, cos φ)` is correct in both hemispheres: below the equator
     /// the crossing is due north and high, and the signed latitude puts it there.
     equator: Vec3,
+    /// The northward coordinate of the tripod's vertical centreline, in this frame.
+    ///
+    /// The frame's origin is the RA∩DEC crossing, but the tripod stands on the mount's
+    /// *azimuth* axis, and on a real GEM head the crossing hangs `mount_axis_offset_mm` up the
+    /// RA shaft from that column (the operator's: ~60 mm, ~35 mm of northing at this latitude).
+    /// The offset is along the polar axis, which has no east component, so one number places
+    /// the column.
+    cone_axis_n: f64,
 }
 
 /// The direction at hour angle +90°, declination 0: setting due west, at every latitude.
@@ -152,10 +156,14 @@ impl RigModel {
         };
         let polar = Vec3::new(0.0, s * phi.cos(), s * phi.sin());
         let equator = Vec3::new(0.0, -phi.sin(), phi.cos());
+        // The column sits `offset` back down the RA shaft from the crossing this frame is
+        // centred on: A = −offset·p̂, whose only horizontal component is northing.
+        let cone_axis_n = -geometry.mount_axis_offset_mm * polar.n;
         Some(Self {
             geometry,
             polar,
             equator,
+            cone_axis_n,
         })
     }
 
@@ -322,8 +330,10 @@ impl RigModel {
         // Distance to the leg surface, as a point-to-segment distance in the (ρ, z) half-plane:
         // the legs run from (top_radius, −mount_body_height) at the tripod's top plate down to
         // (base_radius, −head_height) at the foot. The top is *below* the axes by the height of
-        // the mount body, which is why that is a parameter and not zero.
-        let (px, pz) = (p.horizontal_radius(), p.u);
+        // the mount body, which is why that is a parameter and not zero. And ρ is measured from
+        // the *azimuth* axis the tripod actually stands on, not from this frame's origin — the
+        // two differ by `mount_axis_offset_mm` up the RA shaft (`cone_axis_n`).
+        let (px, pz) = (p.e.hypot(p.n - self.cone_axis_n), p.u);
         let (ax, az) = (g.top_radius_mm, -g.mount_body_height_mm);
         let (bx, bz) = (g.base_radius_mm, -g.head_height_mm);
         let (dx, dz) = (bx - ax, bz - az);

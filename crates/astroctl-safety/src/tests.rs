@@ -1221,6 +1221,7 @@ async fn a_slew_into_the_tripod_is_refused_only_once_the_rig_is_measured() {
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
+        mount_axis_offset_mm: 0.0,
         counterweight: None,
     };
     // Right-ascension motion, deliberately: at the pole it changes the pose without changing
@@ -1303,6 +1304,7 @@ async fn a_pose_inside_the_model_permits_the_motion_that_backs_out() {
         mount_body_height_mm: 250.0,
         top_radius_mm: 1.0,
         base_radius_mm: 2.0,
+        mount_axis_offset_mm: 0.0,
         counterweight: None,
     };
     let at = Utc::now();
@@ -1366,6 +1368,7 @@ async fn a_slew_from_home_is_permitted_once_the_driver_reports_its_dec_axis() {
         mount_body_height_mm: 250.0,
         top_radius_mm: 80.0,
         base_radius_mm: 650.0,
+        mount_axis_offset_mm: 0.0,
         counterweight: None,
     };
     // Pointing at the pole: the home pointing, and the singular one. Declination 90 is the pole

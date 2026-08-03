@@ -814,6 +814,17 @@ pub struct RigGeometry {
     /// circumscribes them. It therefore refuses some poses that would have cleared a gap between
     /// two legs, which is the direction to be wrong in.
     pub base_radius_mm: f64,
+    /// How far the RA∩DEC crossing sits from the mount's vertical azimuth axis, measured along
+    /// the RA shaft toward the sky ("to the front"), in millimetres. Zero if not measured.
+    ///
+    /// The tripod stands on the *azimuth* axis — the vertical through the top plate — not on
+    /// the axes crossing the rest of this geometry is measured from. On a real GEM head the
+    /// dec housing rides the sky end of the RA housing, so the crossing hangs forward of the
+    /// column: ~60 mm on the operator's mount (2026-08-03, read straight off the rig-model
+    /// viewer against the metal). Ignoring it plants the modelled tripod ~35 mm north of the
+    /// real one at this latitude and skews every north–south clearance by that much.
+    #[serde(default)]
+    pub mount_axis_offset_mm: f64,
     /// The counterweight shaft and weights, absent until measured — the same rule as the rig
     /// itself: an unmeasured part gets no limit rather than a guessed one.
     #[serde(default)]
@@ -869,6 +880,10 @@ impl RigGeometry {
                  dec_axis_offset_mm + tube_half_length_mm, or every slew is refused",
             );
         }
+        // Signed, unlike every other length here: a head whose crossing sits *behind* the
+        // column is expressible, though nobody has met one. Bounded to something a mount head
+        // can physically be.
+        c.range_f64("mount_axis_offset_mm", self.mount_axis_offset_mm, -500.0, 500.0);
         if let Some(cw) = self.counterweight {
             c.range_f64("counterweight.length_mm", cw.length_mm, 0.0, 100_000.0);
             c.range_f64("counterweight.radius_mm", cw.radius_mm, 0.0, 100_000.0);
