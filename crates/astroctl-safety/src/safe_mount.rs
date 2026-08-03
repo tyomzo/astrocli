@@ -309,20 +309,27 @@ impl Shared {
     /// The collision one lookahead step along, when that step does not *shrink* it (SDD §5.4.3).
     ///
     /// The check is positional — a tube already inside the legs must not be driven further in —
-    /// but positional-without-an-escape is a trap, and it sprang on 2026-08-02: an 835× press
-    /// overshot the altitude floor by ~2°, into a pose the fat capsule and the circumscribing
-    /// cone call "inside" while the metal touched nothing, and every direction out was then
-    /// refused. So a pose already colliding permits the motion that both **climbs and shrinks
-    /// the penetration**, and refuses everything else. Both conditions carry weight:
+    /// but positional-without-an-escape is a trap, and it has sprung twice: 2026-08-02, an 835×
+    /// press through the altitude floor into a pose the model called "inside" with every way out
+    /// refused; and 2026-08-03, the watch's own stop parking the RA axis two degrees inside the
+    /// dec-home bearing band with both RA directions refused. So a pose already colliding
+    /// permits exactly the motions that make it better: **strictly shallower penetration,
+    /// without descending**. Each half carries weight:
     ///
-    /// * Penetration alone is not enough, because the cone is a *shell* and sliding down through
-    ///   it thins the number while the tube keeps descending — the exact motion the original
-    ///   positional rule exists to refuse. Climbing alone is not enough either, or the clause
-    ///   would wave through a climb that grinds harder against the underside of a leg.
-    /// * The climb requirement is strict, which is what keeps the singular pointing honest: at
-    ///   the pole a right-ascension step changes the pose but not the pointing, so `ahead` equals
-    ///   `from`, nothing climbs, and a mount whose driver reports no bearing stays refused by the
-    ///   sweep rather than excused by a comparison that cannot see the difference.
+    /// * Strict, because "no worse" at the singular pointing turned equal-and-refused into a
+    ///   wall. * Non-descending, because the cone is a *shell*, and sliding down through it
+    ///   thins the number while the tube keeps dropping — the exact motion the positional rule
+    ///   exists to refuse.
+    ///
+    /// # The bearing is mechanical state, and a right-ascension command moves it
+    ///
+    /// At the pole the *coordinates* of `ahead` never change — RA motion swings the metal and
+    /// not the pointing — so evaluating both ends of the step at the current bearing makes them
+    /// identical and the strict rule a prison (the 2026-08-03 trap). East lowers hour angles and
+    /// west raises them, so the bearing the `ahead` pose is judged at advances by the lookahead,
+    /// and the two RA directions finally differ: one leaves the band, one digs. A driver that
+    /// reports no bearing keeps the conservative sweep, both ends equal, escape never engaging —
+    /// which is the correct prison for a mount whose pose nobody can know.
     ///
     /// A clear pose still refuses *any* predicted collision — the escape clause never helps a
     /// motion that would begin the contact.
@@ -335,12 +342,18 @@ impl Shared {
         at: DateTime<Utc>,
     ) -> Option<Collision> {
         let ahead = self.predict(from, axis, dir, lookahead)?;
-        let hit = self.collides_at(ahead, at)?;
-        match self.collides_at(from, at) {
+        let bearing = self.inner.dec_axis_hour_angle_degrees();
+        let bearing_ahead = bearing.map(|b| match (axis, dir) {
+            (Axis::Ra, Direction::East) => b - lookahead,
+            (Axis::Ra, Direction::West) => b + lookahead,
+            _ => b,
+        });
+        let hit = self.collides_at_with(ahead, bearing_ahead, at)?;
+        match self.collides_at_with(from, bearing, at) {
             Some(now)
-                if hit.penetration_mm <= now.penetration_mm
+                if hit.penetration_mm < now.penetration_mm
                     && self.horizontal_at(ahead, at).alt.degrees()
-                        > self.horizontal_at(from, at).alt.degrees() =>
+                        >= self.horizontal_at(from, at).alt.degrees() =>
             {
                 None
             }
@@ -384,20 +397,25 @@ impl Shared {
     /// a limit that helpfully permitted more motion because the last one climbed would be helping
     /// the mount grind against a leg. It refuses everything from inside, and the operator releases
     /// the clutch.
-    fn collides_at(&self, target: RaDec, at: DateTime<Utc>) -> Option<Collision> {
+    fn collides_at_with(
+        &self,
+        target: RaDec,
+        bearing: Option<f64>,
+        at: DateTime<Utc>,
+    ) -> Option<Collision> {
         let rig = self.rig?;
         let altaz = self.horizontal_at(target, at);
         let tube = Horizontal {
             altitude_degrees: altaz.alt.degrees(),
             azimuth_degrees: altaz.az.degrees(),
         };
-        // A driver that knows where its declination axis is lets the model test the actual pose.
-        // Without it, the conservative path: the pier side's sign, both signs when that is
-        // unknown, and the all-RA sweep at the pole — which is what made home a prison on
-        // 2026-08-02, every motion refused because the singular pointing was judged by its worst
-        // pose instead of its real one. `target` is always a near-current lookahead here (both
-        // callers), which is the currency `collides_with_dec_axis` requires of the bearing.
-        match self.inner.dec_axis_hour_angle_degrees() {
+        // A driver that knows where its declination axis is lets the model test the actual pose
+        // — the caller supplies the bearing, advanced along the commanded motion where that
+        // matters (see `collision_worsens`). Without one, the conservative path: the pier side's
+        // sign, both signs when that is unknown, and the all-RA sweep at the pole — which is
+        // what made home a prison on 2026-08-02, every motion refused because the singular
+        // pointing was judged by its worst pose instead of its real one.
+        match bearing {
             Some(bearing) => rig.collides_with_dec_axis(tube, bearing),
             None => rig.collides(tube, self.inner.pier_side()),
         }

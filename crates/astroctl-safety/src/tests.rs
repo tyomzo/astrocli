@@ -1349,6 +1349,114 @@ async fn a_pose_inside_the_model_permits_the_motion_that_backs_out() {
     assert!(matches!(error, DeviceError::LimitViolation { .. }));
 }
 
+/// An axis parked inside the refused bearing band can drive back out (SDD §5.4.3).
+///
+/// Hardware, 2026-08-03, 09:03Z: the watch stopped an 835× RA slew at dec-home and its own
+/// overshoot parked the axis ~2° inside the band — after which *both* RA directions refused,
+/// because at the pole the pointing never changes with RA motion and both ends of the lookahead
+/// were judged at the same bearing. The fix is that the bearing advances with the commanded
+/// motion; this is that morning in miniature: same mount, same pointing, bearing just inside the
+/// band, and the two RA directions must finally differ.
+#[tokio::test]
+async fn an_axis_parked_inside_the_bearing_band_can_drive_back_out() {
+    use astroctl_core::config::RigGeometry;
+
+    let geometry = RigGeometry {
+        dec_axis_offset_mm: 180.0,
+        tube_half_length_mm: 1_000.0,
+        tube_radius_mm: 120.0,
+        saddle_offset_mm: 180.0,
+        head_height_mm: 1_250.0,
+        mount_body_height_mm: 250.0,
+        top_radius_mm: 80.0,
+        base_radius_mm: 650.0,
+        mount_axis_offset_mm: 0.0,
+        counterweight: None,
+        camera: None,
+    };
+    let pole = RaDec::from_parts(0.0, 90.0).expect("the pole is a coordinate");
+
+    // Park just inside the band's lower edge — located by scanning rather than assumed, so the
+    // test follows the fixture instead of the author's guess at its shape. East lowers the
+    // bearing, so from here east is out and west is in.
+    let inside = {
+        use crate::rig::{Horizontal, RigModel};
+        let rig = RigModel::new(Some(geometry), VILNIUS).expect("geometry");
+        let at_pole = Horizontal {
+            altitude_degrees: VILNIUS.latitude_degrees,
+            azimuth_degrees: 0.0,
+        };
+        let edge = (90..=180)
+            .map(f64::from)
+            .find(|b| rig.collides_with_dec_axis(at_pole, *b).is_some())
+            .expect("a 2 m tube at the pole must have a refused band");
+        let inside = edge + 2.0;
+        // Preconditions for the assertions below: a Max press looks 6° along the motion, and at
+        // that distance the two directions must genuinely differ.
+        let here = rig
+            .collides_with_dec_axis(at_pole, inside)
+            .expect("2° past the edge is inside");
+        assert!(
+            rig.collides_with_dec_axis(at_pole, inside - 6.0)
+                .is_none_or(|hit| hit.penetration_mm < here.penetration_mm),
+            "outward must thin"
+        );
+        assert!(
+            rig.collides_with_dec_axis(at_pole, inside + 6.0)
+                .expect("deeper is still inside")
+                .penetration_mm
+                > here.penetration_mm,
+            "inward must deepen"
+        );
+        inside
+    };
+
+    let mount = RecordingMount::at(pole)
+        .with_lookahead(LookaheadModel::normal_branch(0.5))
+        .with_dec_axis_hour_angle(inside)
+        .shared();
+    let safe = SafeMount::with_geometry(
+        Arc::clone(&mount) as Arc<dyn MountDevice>,
+        EXAMPLE_LIMITS,
+        VILNIUS,
+        Some(geometry),
+        EventBus::new(),
+    );
+
+    // Bearing = s·h, and east lowers hour angles: from inside the lower edge, east is out.
+    // Max, so the 6° lookahead puts the two directions unambiguously on opposite slopes.
+    safe.slew_for(
+        Axis::Ra,
+        Direction::East,
+        SlewSpeed::Max,
+        Duration::from_millis(500),
+    )
+    .await
+    .expect("driving out of the band shrinks the penetration and must be permitted");
+    assert!(
+        mount.log().contains(&"slew".to_owned()),
+        "the escape never reached the device: {:?}",
+        mount.log()
+    );
+
+    let error = safe
+        .slew_for(
+            Axis::Ra,
+            Direction::West,
+            SlewSpeed::Max,
+            Duration::from_millis(500),
+        )
+        .await
+        .expect_err("driving deeper into the band must stay refused");
+    assert!(matches!(
+        error,
+        DeviceError::LimitViolation {
+            limit: Limit::Collision,
+            ..
+        }
+    ));
+}
+
 /// Home is not a prison once the driver says where the declination axis is (SDD §5.4.3).
 ///
 /// Measured on hardware 2026-08-02: with geometry configured, every slew from home came back 403,
